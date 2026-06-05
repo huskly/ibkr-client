@@ -3,6 +3,5 @@ __pycache__/
 *.pyc
 .env
 
-# Never commit private keys
-private_*.pem
-dhparam.pem
+# Never commit keys
+*.pem
