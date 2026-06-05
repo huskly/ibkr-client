@@ -10,12 +10,12 @@ the keys below are generated and registered in the IBKR self-service portal.
 
 ## What's here
 
-| File | Purpose |
-| --- | --- |
-| `main.py` | The PoC — authenticates and prints accounts, summary, and positions |
-| `dh_prime.py` | Extracts the Diffie-Hellman prime (hex) from `dhparam.pem` |
-| `*.pem` | Cryptographic material (already present, git-ignored) |
-| `.env.example` | Template for the runtime secrets |
+| File           | Purpose                                                             |
+| -------------- | ------------------------------------------------------------------- |
+| `main.py`      | The PoC — authenticates and prints accounts, summary, and positions |
+| `dh_prime.py`  | Extracts the Diffie-Hellman prime (hex) from `dhparam.pem`          |
+| `*.pem`        | Cryptographic material (already present, git-ignored)               |
+| `.env.example` | Template for the runtime secrets                                    |
 
 The `.pem` files (`private_signature.pem`, `private_encryption.pem`,
 `public_*.pem`, `dhparam.pem`) are the keys from the wiki setup step and are
@@ -60,9 +60,9 @@ Expected output (with valid credentials):
   authenticated=True competing=False
 
 → Portfolio accounts:
-  U1234567  (INDIVIDUAL, USD)
+  U**********  (INDIVIDUAL, USD)
 
-→ Using account: U1234567
+→ Using account: U**********
 
 → Account summary:
   netliquidation: 12345.67 USD
@@ -73,7 +73,29 @@ Expected output (with valid credentials):
   ...
 ```
 
+## Development
+
+Install the dev dependencies (adds [ruff](https://docs.astral.sh/ruff/) on top
+of the runtime requirements):
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+```
+
+Lint and format:
+
+```bash
+.venv/bin/ruff check .          # lint
+.venv/bin/ruff format .         # auto-format
+.venv/bin/ruff check --fix .    # lint + auto-fix
+```
+
+CI (`.github/workflows/ci.yml`) runs the same lint/format checks, byte-compiles
+the sources, and runs [gitleaks](https://github.com/gitleaks/gitleaks) to guard
+against committed secrets on every push and pull request.
+
 ## Security notes
 
 - The private keys and `.env` are git-ignored — do not commit them.
 - Credentials are read from the environment, never hardcoded.
+- CI scans every change with gitleaks to catch accidentally committed secrets.

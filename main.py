@@ -19,7 +19,6 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-
 from ibind import IbkrClient
 from ibind.oauth.oauth1a import OAuth1aConfig
 
@@ -143,8 +142,16 @@ def render_positions(client: IbkrClient, account_id: str) -> None:
     day_pnl = fetch_day_pnl(client, [str(p["conid"]) for p in positions])
 
     headers = [
-        "Symbol", "Type", "Long", "Short", "Avg Price", "Cur Price",
-        "Mkt Value", "Day P/L", "P/L Open", "P/L %",
+        "Symbol",
+        "Type",
+        "Long",
+        "Short",
+        "Avg Price",
+        "Cur Price",
+        "Mkt Value",
+        "Day P/L",
+        "P/L Open",
+        "P/L %",
     ]
     # Right-align everything except Symbol and Type.
     left_aligned = {0, 1}
@@ -160,18 +167,20 @@ def render_positions(client: IbkrClient, account_id: str) -> None:
         dpnl = day_pnl.get(p.get("conid"))
         asset = p.get("assetClass")
 
-        rows.append([
-            (p.get("contractDesc") or str(p.get("conid")), CYAN),
-            (ASSET_CLASS_LABELS.get(asset, asset or "-"), ""),
-            (f"{qty:g}" if qty > 0 else "-", GREEN),
-            (f"{abs(qty):g}" if qty < 0 else "-", RED),
-            (fmt_money(avg), ""),
-            (fmt_money(p.get("mktPrice")), ""),
-            (fmt_money(p.get("mktValue")), _pnl_color(p.get("mktValue"))),
-            (fmt_money(dpnl, signed=True), _pnl_color(dpnl)),
-            (fmt_money(upnl, signed=True), _pnl_color(upnl)),
-            (fmt_pct(pl_pct), _pnl_color(pl_pct)),
-        ])
+        rows.append(
+            [
+                (p.get("contractDesc") or str(p.get("conid")), CYAN),
+                (ASSET_CLASS_LABELS.get(asset, asset or "-"), ""),
+                (f"{qty:g}" if qty > 0 else "-", GREEN),
+                (f"{abs(qty):g}" if qty < 0 else "-", RED),
+                (fmt_money(avg), ""),
+                (fmt_money(p.get("mktPrice")), ""),
+                (fmt_money(p.get("mktValue")), _pnl_color(p.get("mktValue"))),
+                (fmt_money(dpnl, signed=True), _pnl_color(dpnl)),
+                (fmt_money(upnl, signed=True), _pnl_color(upnl)),
+                (fmt_pct(pl_pct), _pnl_color(pl_pct)),
+            ]
+        )
 
     # Column widths from raw (uncolored) cell text.
     widths = [len(h) for h in headers]

@@ -3,5 +3,8 @@ __pycache__/
 *.pyc
 .env
 
+# Local Claude Code settings
+.claude/settings.local.json
+
 # Never commit keys
 *.pem
