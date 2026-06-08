@@ -1,2 +1,0 @@
-ibind[oauth]>=0.1.23
-python-dotenv>=1.0.0

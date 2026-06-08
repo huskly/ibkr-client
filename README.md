@@ -1,32 +1,36 @@
-# IBKR OAuth 1.0a PoC
+# IBKR CLI (`@huskly/ibkr-client`)
 
-A minimal proof-of-concept that connects to the **Interactive Brokers Web API**
-using **OAuth 1.0a** (no Client Portal Gateway required) and pulls sample
-portfolio information.
+A terminal trading CLI for the **Interactive Brokers Web API**, authenticating
+over **OAuth 1.0a** (no Client Portal Gateway required). Built to mirror the
+architecture of [huskly-cli](https://github.com/felipecsl/huskly-cli) so the two
+can merge into a single multi-broker CLI (IBKR + Schwab) over time.
 
-Built on [`ibind`](https://github.com/Voyz/ibind). See the
-[OAuth 1.0a setup wiki](https://github.com/Voyz/ibind/wiki/OAuth-1.0a) for how
+The OAuth 1.0a live-session-token handshake is performed by the
+[`ibkr-client`](https://github.com/art1c0/ibkr-client) package. See the
+[`ibind` OAuth 1.0a wiki](https://github.com/Voyz/ibind/wiki/OAuth-1.0a) for how
 the keys below are generated and registered in the IBKR self-service portal.
 
-## What's here
+## Layout
 
-| File           | Purpose                                                             |
-| -------------- | ------------------------------------------------------------------- |
-| `main.py`      | The PoC — authenticates and prints accounts, summary, and positions |
-| `dh_prime.py`  | Extracts the Diffie-Hellman prime (hex) from `dhparam.pem`          |
-| `*.pem`        | Cryptographic material (already present, git-ignored)               |
-| `.env.example` | Template for the runtime secrets                                    |
+The repo is split into a reusable **library** and a thin **CLI**, mirroring
+huskly-cli's `@huskly/schwab-client` + CLI split:
 
-The `.pem` files (`private_signature.pem`, `private_encryption.pem`,
-`public_*.pem`, `dhparam.pem`) are the keys from the wiki setup step and are
-picked up automatically. The DH prime is derived from `dhparam.pem` at runtime,
-so you never need to copy it by hand.
+| Path                     | Purpose                                                                  |
+| ------------------------ | ------------------------------------------------------------------------ |
+| `src/types.ts`           | Broker-neutral `BrokerClient` interface + domain types (the merge contract) |
+| `src/ibkr/ibkrClient.ts` | `IbkrClient` — typed wrapper over `ibkr-client` implementing `BrokerClient` |
+| `src/ibkr/oauthConfig.ts`| Builds the OAuth config from `.pem` files + env vars                      |
+| `src/ibkr/dhPrime.ts`    | Extracts the DH prime (hex) from `dhparam.pem`                            |
+| `src/cli/`               | `commander` program, `--broker` flag, and command handlers               |
+
+The `*.pem` files (`private_signature.pem`, `private_encryption.pem`,
+`dhparam.pem`, plus the public keys) are the cryptographic material from the
+wiki setup step and are git-ignored.
 
 ## Setup
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+npm install
 ```
 
 Provide the account-specific secrets, either by copying the template:
@@ -44,55 +48,62 @@ export IBIND_OAUTH1A_ACCESS_TOKEN=...        # access token from the portal
 export IBIND_OAUTH1A_ACCESS_TOKEN_SECRET=... # access token secret from the portal
 ```
 
-Optionally set `IBKR_ACCOUNT_ID` to target a specific account (otherwise the
-first account returned is used).
+Optional environment variables:
 
-## Run
+- `IBIND_OAUTH1A_REALM` — OAuth realm (defaults to `limited_poa` for the
+  individual self-service flow).
+- `IBKR_KEYS_DIR` — directory holding the `.pem` files (defaults to the current
+  working directory).
+- `IBKR_ACCOUNT_ID` — target a specific account (otherwise the first is used).
+
+## Usage
+
+Run in development (via `tsx`, no build step):
 
 ```bash
-.venv/bin/python main.py
+npm run dev -- account
+npm run dev -- positions
+npm run dev -- positions AAPL          # filter by symbol
+npm run dev -- positions --type EQUITY # filter by asset type
+npm run dev -- positions --csv         # CSV instead of a table
 ```
 
-Expected output (with valid credentials):
+Or build and use the `ibkr-cli` binary:
+
+```bash
+npm run build
+node dist/cli/index.js account
+```
+
+A global `--broker <ibkr|schwab>` flag (default `ibkr`) selects the broker.
+Only IBKR is implemented today; `schwab` is reserved for the huskly-cli merge.
+
+Example output:
 
 ```
-→ Checking authentication status...
-  authenticated=True competing=False
+💰 Account Summary
 
-→ Portfolio accounts:
-  U**********  (INDIVIDUAL, USD)
-
-→ Using account: U**********
-
-→ Account summary:
-  netliquidation: 12345.67 USD
-  ...
-
-→ Positions (first page):
-  AAPL         qty=10 mktValue=1900.0 USD
-  ...
+Authenticated: yes   Competing: no
+Account:       U********
+──────────────────────────────────────────────────
+Net Liquidation:  $123,456.78
+Available Funds:  $...
+...
 ```
 
 ## Development
 
-Install the dev dependencies (adds [ruff](https://docs.astral.sh/ruff/) on top
-of the runtime requirements):
-
 ```bash
-.venv/bin/pip install -r requirements-dev.txt
+npm run lint          # eslint
+npm run format        # prettier --write
+npm run typecheck     # tsc --noEmit
+npm run build         # tsc -> dist/
+npm run check         # lint + format:check + typecheck
 ```
 
-Lint and format:
-
-```bash
-.venv/bin/ruff check .          # lint
-.venv/bin/ruff format .         # auto-format
-.venv/bin/ruff check --fix .    # lint + auto-fix
-```
-
-CI (`.github/workflows/ci.yml`) runs the same lint/format checks, byte-compiles
-the sources, and runs [gitleaks](https://github.com/gitleaks/gitleaks) to guard
-against committed secrets on every push and pull request.
+CI (`.github/workflows/ci.yml`) runs lint, format check, typecheck, and build on
+every push and pull request, plus [gitleaks](https://github.com/gitleaks/gitleaks)
+to guard against committed secrets.
 
 ## Security notes
 
