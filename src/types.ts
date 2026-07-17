@@ -38,13 +38,52 @@ export interface BrokerPosition {
   openProfitLoss: number;
 }
 
+export interface BrokerInstrument {
+  /** Broker-native contract id (IBKR conid), as a string. */
+  brokerId?: string;
+  symbol?: string;
+  description?: string;
+  exchange?: string;
+  assetType?: string;
+}
+
+export interface BrokerQuoteReference {
+  description?: string;
+  exchange?: string;
+  exchangeName?: string;
+}
+
+export interface BrokerQuoteData {
+  lastPrice?: number;
+  bidPrice?: number;
+  askPrice?: number;
+  closePrice?: number;
+  highPrice?: number;
+  lowPrice?: number;
+  openPrice?: number;
+  netChange?: number;
+  netPercentChange?: number;
+  totalVolume?: number;
+}
+
 /**
- * The contract every broker client satisfies. Kept intentionally small for the
- * initial foundation (account + positions); extend as commands are added.
+ * Broker-neutral quote, mirroring huskly-cli's (Schwab-shaped) `BrokerQuote` so
+ * consumers normalize IBKR and Schwab quotes through one code path.
+ */
+export interface BrokerQuote {
+  symbol: string;
+  reference: BrokerQuoteReference;
+  quote: BrokerQuoteData;
+}
+
+/**
+ * The contract every broker client satisfies. Kept intentionally small (account,
+ * positions, quotes); extend as commands are added.
  */
 export interface BrokerClient {
   getAuthStatus(): Promise<AuthStatus>;
   getAccountId(): Promise<string>;
   getAccountBalances(): Promise<AccountBalances>;
   getPositions(symbol?: string): Promise<BrokerPosition[]>;
+  getQuotes(symbols: string[]): Promise<Record<string, BrokerQuote>>;
 }

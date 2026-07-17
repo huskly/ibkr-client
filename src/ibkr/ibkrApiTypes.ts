@@ -43,3 +43,38 @@ export interface IbkrPosition {
 export type IbkrMarketDataSnapshot = Record<string, string | number | undefined> & {
   conid?: number;
 };
+
+/** A contract under a listing in the `trsrv/stocks` response. */
+export interface IbkrStockContract {
+  conid?: number;
+  exchange?: string;
+  isUS?: boolean;
+}
+
+/** A listing (one per company) in the `trsrv/stocks` response. */
+export interface IbkrStockListing {
+  name?: string;
+  assetClass?: string;
+  contracts?: IbkrStockContract[];
+}
+
+/** `trsrv/stocks` response: keyed by the requested symbol. */
+export type IbkrStocksResponse = Record<string, IbkrStockListing[] | undefined>;
+
+/** One OHLCV bar from `iserver/marketdata/history`. */
+export interface IbkrMarketDataHistoryBar {
+  o?: number;
+  c?: number;
+  h?: number;
+  l?: number;
+  v?: number;
+  t?: number;
+}
+
+/** `iserver/marketdata/history` response. */
+export interface IbkrMarketDataHistoryResponse {
+  symbol?: string;
+  text?: string;
+  volumeFactor?: number;
+  data?: IbkrMarketDataHistoryBar[];
+}

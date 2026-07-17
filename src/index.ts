@@ -5,6 +5,10 @@ export type {
   AccountBalances,
   AuthStatus,
   BrokerClient,
+  BrokerInstrument,
   BrokerName,
   BrokerPosition,
+  BrokerQuote,
+  BrokerQuoteData,
+  BrokerQuoteReference,
 } from "./types.js";

@@ -1,6 +1,6 @@
 {
   "name": "@huskly/ibkr-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Interactive Brokers Web API client (OAuth 1.0a) and terminal CLI",
   "type": "module",
   "main": "dist/index.js",
@@ -17,7 +17,7 @@
   "files": [
     "dist"
   ],
-  "repository": "github.com/felipecsl/ibkr-oauth",
+  "repository": "github.com/huskly/ibkr-client",
   "author": "Felipe Lima",
   "license": "MIT",
   "engines": {
