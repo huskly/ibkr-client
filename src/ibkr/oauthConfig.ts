@@ -39,7 +39,10 @@ const REQUIRED_ENV = [
 ] as const;
 
 export function buildOauthConfig(): IbkrOauth1Config {
-  loadEnv();
+  // dotenv v17 logs an "injected env" banner (plus an unrelated promotional "tip") to
+  // stdout by default; callers like an MCP server's stdio transport need stdout to carry
+  // nothing but JSON-RPC. Mirrors the same fix already applied in huskly-cli's local copy.
+  loadEnv({ quiet: true });
 
   const missing = REQUIRED_ENV.filter((name) => !process.env[name]);
   if (missing.length > 0) {

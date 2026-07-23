@@ -8,6 +8,12 @@ import type {
   BrokerInstrument,
   BrokerPosition,
   BrokerQuote,
+  OptionContract,
+  OptionMarketQuote,
+  OptionQuoteRequest,
+  OptionRight,
+  PriceHistoryBar,
+  PriceHistoryRequest,
 } from "../types.js";
 import { ASSET_CLASS_LABELS, toNumber } from "../helpers.js";
 import type {
@@ -18,10 +24,15 @@ import type {
   IbkrPortfolioAccount,
   IbkrPortfolioSummary,
   IbkrPosition,
+  IbkrSecdefByConidResponse,
+  IbkrSecdefInfo,
+  IbkrSecdefSearchResult,
+  IbkrSecdefStrikesResponse,
   IbkrStockContract,
   IbkrStockListing,
   IbkrStocksResponse,
 } from "./ibkrApiTypes.js";
+import { normalizeOptionContract, parseOsiOptionSymbol } from "./optionContract.js";
 
 // `ibkr-client`'s published ESM build is broken: its `import` condition points
 // at files that use extensionless relative imports, which Node's strict ESM
@@ -44,6 +55,11 @@ interface QuoteContract {
 
 /** Live market-data snapshot field 78 = position's P&L for the current day. */
 const DAY_PNL_FIELD = "78";
+const OPTION_QUOTE_FIELDS = [
+  "84", // Bid
+  "86", // Ask
+  "7308", // Delta
+].join(",");
 const QUOTE_FIELDS = [
   "31", // Last
   "55", // Symbol
@@ -62,6 +78,51 @@ const QUOTE_FIELDS = [
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+function chunks<T>(values: readonly T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
+  return result;
+}
+
+function monthCode(calendarDate: string): string {
+  const match = /^(?<year>\d{4})-(?<month>\d{2})-\d{2}$/.exec(calendarDate);
+  const year = Number(match?.groups?.["year"]);
+  const month = Number(match?.groups?.["month"]);
+  if (!match || month < 1 || month > 12) throw new Error(`Invalid calendar date: ${calendarDate}`);
+  const monthName = [
+    "JAN",
+    "FEB",
+    "MAR",
+    "APR",
+    "MAY",
+    "JUN",
+    "JUL",
+    "AUG",
+    "SEP",
+    "OCT",
+    "NOV",
+    "DEC",
+  ][month - 1];
+  return `${String(monthName)}${String(year).slice(2)}`;
+}
+
+function monthCodes(fromDate: string, toDate: string): string[] {
+  const start = new Date(`${fromDate}T00:00:00Z`);
+  const end = new Date(`${toDate}T00:00:00Z`);
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || start > end) {
+    throw new Error(`Invalid option expiry range: ${fromDate}..${toDate}`);
+  }
+  const result: string[] = [];
+  const cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  while (cursor <= end) {
+    result.push(monthCode(cursor.toISOString().slice(0, 10)));
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+  return result;
+}
+
 /**
  * Typed IBKR Web API client implementing the broker-neutral {@link BrokerClient}.
  * Wraps the `ibkr-client` npm package, which performs the OAuth 1.0a
@@ -72,6 +133,7 @@ export class IbkrClient implements BrokerClient {
   private readonly raw: RawIbkrClient;
   private initPromise?: Promise<void>;
   private accountIdPromise?: Promise<string>;
+  private readonly optionDiscovery = new Map<string, Promise<OptionContract[]>>();
 
   constructor(config: IbkrOauth1Config) {
     this.raw = new RawIbkrClientCtor(config);
@@ -82,7 +144,7 @@ export class IbkrClient implements BrokerClient {
     this.initPromise ??= (async () => {
       await this.raw.init();
       // IBKR is slow right after init; give the session a moment to settle.
-      await sleep(1000);
+      await this.wait(1000);
     })();
     return this.initPromise;
   }
@@ -159,7 +221,7 @@ export class IbkrClient implements BrokerClient {
 
     const params = { conids: conids.join(","), fields: DAY_PNL_FIELD };
     await this.req<unknown>({ path: "iserver/marketdata/snapshot", params }); // warm up
-    await sleep(2000);
+    await this.wait(2000);
     const snapshot = await this.req<IbkrMarketDataSnapshot[]>({
       path: "iserver/marketdata/snapshot",
       params,
@@ -183,6 +245,7 @@ export class IbkrClient implements BrokerClient {
       longQuantity: qty > 0 ? qty : 0,
       shortQuantity: qty < 0 ? Math.abs(qty) : 0,
       averagePrice: toNumber(p.avgPrice),
+      ...(p.multiplier === undefined ? {} : { multiplier: p.multiplier }),
       marketPrice: toNumber(p.mktPrice),
       marketValue: toNumber(p.mktValue),
       currentDayProfitLoss: p.conid !== undefined ? (dayPnl.get(p.conid) ?? 0) : 0,
@@ -200,7 +263,7 @@ export class IbkrClient implements BrokerClient {
     const conids = resolvedContracts.map((contract) => contract.conid).join(",");
     const params = { conids, fields: QUOTE_FIELDS };
     await this.req<unknown>({ path: "iserver/marketdata/snapshot", params }); // warm up
-    await sleep(2000);
+    await this.wait(2000);
     const snapshots = await this.req<IbkrMarketDataSnapshot[]>({
       path: "iserver/marketdata/snapshot",
       params,
@@ -276,6 +339,22 @@ export class IbkrClient implements BrokerClient {
   }
 
   private async resolveQuoteContract(symbol: string): Promise<QuoteContract | undefined> {
+    const osi = parseOsiOptionSymbol(symbol);
+    if (osi) {
+      const option = await this.resolveOptionContract({
+        symbol: osi.underlying,
+        expiry: osi.expiry,
+        strike: osi.strike,
+        right: osi.right,
+      });
+      return option
+        ? {
+            requestedSymbol: symbol,
+            symbol: option.symbol,
+            conid: option.conid,
+          }
+        : undefined;
+    }
     const instruments = await this.searchInstruments(symbol);
     const instrument = instruments.find((item) => item.brokerId !== undefined);
     if (instrument?.brokerId === undefined) return undefined;
@@ -291,22 +370,259 @@ export class IbkrClient implements BrokerClient {
     };
   }
 
+  /** Return normalized daily price history without consulting a vendor-owned clock. */
+  async getPriceHistory(input: PriceHistoryRequest): Promise<PriceHistoryBar[]> {
+    const contract = await this.resolveQuoteContract(input.symbol);
+    if (!contract) throw new Error(`IBKR could not resolve market-data contract: ${input.symbol}`);
+    const days = this.historyDays(input);
+    const history = await this.fetchQuoteHistory(contract.conid, `${String(days)}d`, false);
+    const volumeFactor = history?.volumeFactor ?? 1;
+    return (history?.data ?? []).map((bar) => {
+      if (
+        bar.t === undefined ||
+        bar.o === undefined ||
+        bar.h === undefined ||
+        bar.l === undefined ||
+        bar.c === undefined ||
+        bar.v === undefined
+      ) {
+        throw new Error(`IBKR returned an incomplete history bar for ${input.symbol}`);
+      }
+      return {
+        datetime: bar.t,
+        open: bar.o,
+        high: bar.h,
+        low: bar.l,
+        close: bar.c,
+        volume: bar.v * volumeFactor,
+      };
+    });
+  }
+
+  /** Discover every listed weekly/monthly expiry in the requested calendar range. */
+  async getOptionExpiries(
+    symbol: string,
+    right: OptionRight,
+    fromDate: string,
+    toDate: string
+  ): Promise<string[]> {
+    const contracts = (
+      await Promise.all(
+        monthCodes(fromDate, toDate).map((month) => this.discoverOptions(symbol, month))
+      )
+    ).flat();
+    return [
+      ...new Set(
+        contracts
+          .filter(
+            (contract) =>
+              contract.right === right && contract.expiry >= fromDate && contract.expiry <= toDate
+          )
+          .map((contract) => contract.expiry)
+      ),
+    ].sort();
+  }
+
+  /** Build one exact-expiry chain with canonical OSI symbols and required pricing/greeks. */
+  async getOptionChain(symbol: string, expiry: string): Promise<OptionMarketQuote[]> {
+    const contracts = (await this.discoverOptions(symbol, monthCode(expiry))).filter(
+      (contract) => contract.expiry === expiry
+    );
+    if (!contracts.length) {
+      throw new Error(`IBKR returned no option contracts for ${symbol} ${expiry}`);
+    }
+    return this.fetchOptionQuotes(contracts);
+  }
+
+  /** Fetch one exact option quote; null means the contract is not listed. */
+  async getOptionQuote(input: OptionQuoteRequest): Promise<OptionMarketQuote | null> {
+    const contract = await this.resolveOptionContract(input);
+    if (!contract) return null;
+    return (await this.fetchOptionQuotes([contract]))[0] ?? null;
+  }
+
+  /** Resolve a conid back into the canonical OSI-bearing option contract. */
+  async getOptionContract(conid: number): Promise<OptionContract | null> {
+    const response = await this.req<IbkrSecdefByConidResponse>({
+      path: "trsrv/secdef",
+      params: { conids: String(conid) },
+    });
+    const raw = response[String(conid)];
+    if (!raw) return null;
+    return normalizeOptionContract({
+      conid: raw.conid ?? conid,
+      symbol: raw.symbol,
+      maturityDate: raw.expiry,
+      right: raw.putOrCall,
+      strike: raw.strike,
+    });
+  }
+
+  private async resolveOptionContract(input: OptionQuoteRequest): Promise<OptionContract | null> {
+    const contracts = await this.discoverOptions(input.symbol, monthCode(input.expiry));
+    return (
+      contracts.find(
+        (contract) =>
+          contract.expiry === input.expiry &&
+          contract.right === input.right &&
+          contract.strike === input.strike
+      ) ?? null
+    );
+  }
+
+  private discoverOptions(symbol: string, month: string): Promise<OptionContract[]> {
+    const normalized = symbol.trim().toUpperCase();
+    const key = `${normalized}:${month}`;
+    let pending = this.optionDiscovery.get(key);
+    if (!pending) {
+      pending = this.loadOptionContracts(normalized, month);
+      this.optionDiscovery.set(key, pending);
+    }
+    return pending;
+  }
+
+  private async loadOptionContracts(symbol: string, month: string): Promise<OptionContract[]> {
+    // This search is load-bearing: IBKR silently returns empty strikes unless the current
+    // session has first searched the underlying.
+    const search = await this.req<IbkrSecdefSearchResult[]>({
+      path: "iserver/secdef/search",
+      params: { symbol },
+    });
+    const underlying = search.find(
+      (candidate) =>
+        candidate.conid !== undefined &&
+        candidate.sections?.some((section) => section.secType === "OPT")
+    );
+    if (underlying?.conid === undefined) {
+      throw new Error(`IBKR did not identify ${symbol} as an optionable underlying`);
+    }
+
+    const strikes = await this.req<IbkrSecdefStrikesResponse>({
+      path: "iserver/secdef/strikes",
+      params: { conid: String(underlying.conid), sectype: "OPT", month },
+    });
+    const requests = [
+      ...(strikes.call ?? []).map((strike) => ({ strike, right: "C" as const })),
+      ...(strikes.put ?? []).map((strike) => ({ strike, right: "P" as const })),
+    ];
+    if (!requests.length) {
+      throw new Error(
+        `IBKR returned empty option strikes for ${symbol} ${month} after secdef/search priming`
+      );
+    }
+
+    const contracts: OptionContract[] = [];
+    for (const batch of chunks(requests, 8)) {
+      const responses = await Promise.all(
+        batch.map(({ strike, right }) =>
+          this.req<IbkrSecdefInfo[]>({
+            path: "iserver/secdef/info",
+            params: {
+              conid: String(underlying.conid),
+              sectype: "OPT",
+              month,
+              strike,
+              right,
+            },
+          })
+        )
+      );
+      for (const raw of responses.flat()) {
+        const contract = normalizeOptionContract({
+          conid: raw.conid,
+          symbol: raw.symbol ?? underlying.symbol ?? symbol,
+          maturityDate: raw.maturityDate,
+          right: raw.right,
+          strike: raw.strike,
+        });
+        if (contract) contracts.push(contract);
+      }
+    }
+    const unique = [...new Map(contracts.map((contract) => [contract.conid, contract])).values()];
+    if (!unique.length) {
+      throw new Error(`IBKR returned no usable option definitions for ${symbol} ${month}`);
+    }
+    return unique;
+  }
+
+  private async fetchOptionQuotes(
+    contracts: readonly OptionContract[]
+  ): Promise<OptionMarketQuote[]> {
+    const result: OptionMarketQuote[] = [];
+    for (const batch of chunks(contracts, 100)) {
+      const params = {
+        conids: batch.map((contract) => contract.conid).join(","),
+        fields: OPTION_QUOTE_FIELDS,
+      };
+      await this.req<unknown>({ path: "iserver/marketdata/snapshot", params });
+      await this.wait(2000);
+      const snapshots = await this.req<IbkrMarketDataSnapshot[]>({
+        path: "iserver/marketdata/snapshot",
+        params,
+      });
+      const byConid = new Map(
+        snapshots
+          .filter(
+            (snapshot): snapshot is IbkrMarketDataSnapshot & { conid: number } =>
+              snapshot.conid !== undefined
+          )
+          .map((snapshot) => [snapshot.conid, snapshot])
+      );
+      for (const contract of batch) {
+        const snapshot = byConid.get(contract.conid);
+        const bid = snapshot ? this.snapshotNumber(snapshot, "84") : undefined;
+        const ask = snapshot ? this.snapshotNumber(snapshot, "86") : undefined;
+        const delta = snapshot ? this.snapshotNumber(snapshot, "7308") : undefined;
+        if (bid === undefined || ask === undefined || delta === undefined) {
+          throw new Error(
+            `IBKR returned incomplete option market data for ${contract.symbol} (bid/ask/delta required)`
+          );
+        }
+        result.push({ ...contract, bid, ask, mid: (bid + ask) / 2, delta });
+      }
+    }
+    return result;
+  }
+
+  private historyDays(input: PriceHistoryRequest): number {
+    if (input.days !== undefined) {
+      if (!Number.isFinite(input.days) || input.days <= 0) {
+        throw new Error(`History days must be positive: ${String(input.days)}`);
+      }
+      return Math.ceil(input.days);
+    }
+    if (input.startDate === undefined || input.endDate === undefined) {
+      throw new Error("Price history requires days or both startDate and endDate");
+    }
+    const duration = input.endDate - input.startDate;
+    if (duration < 0) throw new Error("Price history endDate must not precede startDate");
+    return Math.max(1, Math.ceil(duration / 86_400_000) + 1);
+  }
+
   private async fetchQuoteHistory(
-    conid: number
+    conid: number,
+    period = "5d",
+    suppressErrors = true
   ): Promise<IbkrMarketDataHistoryResponse | undefined> {
     try {
       return await this.req<IbkrMarketDataHistoryResponse>({
         path: "iserver/marketdata/history",
         params: {
           conid: String(conid),
-          period: "5d",
+          period,
           bar: "1d",
           outsideRth: true,
         },
       });
-    } catch {
+    } catch (error) {
+      if (!suppressErrors) throw error;
       return undefined;
     }
+  }
+
+  /** Overridable in request-level tests so snapshot warm-up does not sleep. */
+  protected wait(ms: number): Promise<void> {
+    return sleep(ms);
   }
 
   private normalizeQuote(
@@ -432,7 +748,7 @@ export class IbkrClient implements BrokerClient {
   }
 
   /** Typed wrapper around the raw client's untyped `request()`. */
-  private async req<T>(input: {
+  protected async req<T>(input: {
     path: string;
     method?: string;
     params?: Record<string, string | number | boolean | null | undefined>;

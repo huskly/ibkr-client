@@ -78,3 +78,36 @@ export interface IbkrMarketDataHistoryResponse {
   volumeFactor?: number;
   data?: IbkrMarketDataHistoryBar[];
 }
+
+/** A security-definition search result. Calling this endpoint primes strikes for the session. */
+export interface IbkrSecdefSearchResult {
+  conid?: number;
+  symbol?: string;
+  sections?: { secType?: string; months?: string; exchange?: string }[];
+}
+
+export interface IbkrSecdefStrikesResponse {
+  call?: number[];
+  put?: number[];
+}
+
+export interface IbkrSecdefInfo {
+  conid?: number;
+  symbol?: string;
+  maturityDate?: string;
+  right?: string;
+  strike?: number;
+}
+
+/** `trsrv/secdef` response keyed by conid. */
+export type IbkrSecdefByConidResponse = Record<
+  string,
+  | {
+      conid?: number;
+      symbol?: string;
+      expiry?: string;
+      putOrCall?: string;
+      strike?: string | number;
+    }
+  | undefined
+>;

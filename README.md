@@ -21,6 +21,7 @@ huskly-cli's `@huskly/schwab-client` + CLI split:
 | `src/ibkr/ibkrClient.ts` | `IbkrClient` — typed wrapper over `ibkr-client` implementing `BrokerClient` |
 | `src/ibkr/oauthConfig.ts`| Builds the OAuth config from `.pem` files + env vars                      |
 | `src/ibkr/dhPrime.ts`    | Extracts the DH prime (hex) from `dhparam.pem`                            |
+| `src/ibkr/optionContract.ts` | Canonical OSI parsing and formatting for IBKR option contracts        |
 | `src/cli/`               | `commander` program, `--broker` flag, and command handlers               |
 
 The `*.pem` files (`private_signature.pem`, `private_encryption.pem`,
@@ -91,17 +92,68 @@ Available Funds:  $...
 ...
 ```
 
+## Strategy market data
+
+The reusable `IbkrClient` also exposes typed, read-only strategy data:
+
+- `getPriceHistory(...)` returns normalized OHLCV bars.
+- `getOptionExpiries(...)` discovers weekly and monthly maturities across month buckets.
+- `getOptionChain(...)` returns an exact-expiry chain with canonical OSI symbols, conids,
+  bid/ask/mid prices, and delta.
+- `getOptionQuote(...)` resolves and prices one exact contract.
+- `getOptionContract(conid)` maps a broker conid back to durable OSI identity.
+
+Contract discovery always calls `secdef/search` before `secdef/strikes`, because IBKR keeps
+that priming state in the authenticated session. Empty post-prime strikes and incomplete
+bid/ask/delta snapshots throw instead of looking like a valid chain with no candidates.
+Conids are broker-boundary identifiers; consumers should persist the returned OSI `symbol`.
+
+### Authorized read-only smoke test
+
+Run this only after the account owner authorizes a read-only brokerage request and the OAuth
+environment from Setup is present. Supply an explicit calendar window; the client does not
+source strategy time from IBKR. This calls account, security-definition, history, and
+market-data endpoints only—never preview, placement, reply-confirmation, or cancellation.
+
+```bash
+IBKR_SMOKE_SYMBOL=MSTR \
+IBKR_SMOKE_FROM=2026-08-01 \
+IBKR_SMOKE_TO=2026-08-31 \
+node --input-type=module <<'NODE'
+import { IbkrClient, buildOauthConfig } from "./dist/index.js";
+
+const client = new IbkrClient(buildOauthConfig());
+await client.init();
+const symbol = process.env.IBKR_SMOKE_SYMBOL;
+const from = process.env.IBKR_SMOKE_FROM;
+const to = process.env.IBKR_SMOKE_TO;
+if (!symbol || !from || !to) throw new Error("Smoke symbol/from/to are required");
+
+const [balances, history, expiries] = await Promise.all([
+  client.getAccountBalances(),
+  client.getPriceHistory({ symbol, days: 5 }),
+  client.getOptionExpiries(symbol, "C", from, to),
+]);
+const expiry = expiries[0];
+if (!expiry) throw new Error(`No listed expiries for ${symbol} in ${from}..${to}`);
+const chain = await client.getOptionChain(symbol, expiry);
+console.log({ equityRead: Number.isFinite(balances.netLiquidation), historyBars: history.length,
+  expiry, contracts: chain.length, first: chain[0]?.symbol });
+NODE
+```
+
 ## Development
 
 ```bash
 npm run lint          # eslint
 npm run format        # prettier --write
 npm run typecheck     # tsc --noEmit
+npm test              # typecheck + native node:test suite
 npm run build         # tsc -> dist/
 npm run check         # lint + format:check + typecheck
 ```
 
-CI (`.github/workflows/ci.yml`) runs lint, format check, typecheck, and build on
+CI (`.github/workflows/ci.yml`) runs lint, format check, typecheck, tests, and build on
 every push and pull request, plus [gitleaks](https://github.com/gitleaks/gitleaks)
 to guard against committed secrets.
 

@@ -30,6 +30,8 @@ export interface BrokerPosition {
   longQuantity: number;
   shortQuantity: number;
   averagePrice: number;
+  /** Contract multiplier when IBKR supplies one (normally 100 for US equity options). */
+  multiplier?: number;
   marketPrice: number;
   marketValue: number;
   /** P/L for the current trading day. */
@@ -74,6 +76,53 @@ export interface BrokerQuote {
   symbol: string;
   reference: BrokerQuoteReference;
   quote: BrokerQuoteData;
+}
+
+/** One normalized daily/intraday market-data history bar. */
+export interface PriceHistoryBar {
+  datetime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export type OptionRight = "C" | "P";
+
+/**
+ * An IBKR option contract with durable OSI identity. The conid is intentionally retained
+ * only at this broker boundary; consumers should persist {@link symbol}, not {@link conid}.
+ */
+export interface OptionContract {
+  conid: number;
+  symbol: string;
+  underlying: string;
+  expiry: string;
+  strike: number;
+  right: OptionRight;
+}
+
+/** A fully priced option contract suitable for delta-based strategy selection. */
+export interface OptionMarketQuote extends OptionContract {
+  bid: number;
+  ask: number;
+  mid: number;
+  delta: number;
+}
+
+export interface PriceHistoryRequest {
+  symbol: string;
+  days?: number;
+  startDate?: number;
+  endDate?: number;
+}
+
+export interface OptionQuoteRequest {
+  symbol: string;
+  expiry: string;
+  strike: number;
+  right: OptionRight;
 }
 
 /**
