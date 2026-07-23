@@ -11,4 +11,11 @@ export type {
   BrokerQuote,
   BrokerQuoteData,
   BrokerQuoteReference,
+  OptionContract,
+  OptionMarketQuote,
+  OptionQuoteRequest,
+  OptionRight,
+  PriceHistoryBar,
+  PriceHistoryRequest,
 } from "./types.js";
+export { formatOsiOptionSymbol, parseOsiOptionSymbol } from "./ibkr/optionContract.js";
