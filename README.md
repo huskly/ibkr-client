@@ -106,6 +106,11 @@ The reusable `IbkrClient` also exposes typed, read-only strategy data:
 Contract discovery always calls `secdef/search` before `secdef/strikes`, because IBKR keeps
 that priming state in the authenticated session. Empty post-prime strikes and incomplete
 bid/ask/delta snapshots throw instead of looking like a valid chain with no candidates.
+Request shaping is resilient by design: option discovery normalizes the requested symbol,
+applies bounded batching for secondary-definition and market-data calls, and retries read-only
+requests on transient `429` responses with capped exponential backoff (including `Retry-After`
+headers when available). If every returned contract is unusable (missing bid/ask/delta), the
+client now fails noisily so callers can handle that condition explicitly.
 Conids are broker-boundary identifiers; consumers should persist the returned OSI `symbol`.
 
 ### Authorized read-only smoke test

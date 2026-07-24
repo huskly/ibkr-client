@@ -201,8 +201,11 @@ void test("multi-month option discovery bounds secdef/info concurrency", async (
   const order = ["JUL26", "AUG26", "SEP26"].map((month) =>
     observedInfo.findIndex((entry) => entry.startsWith(`info:${month}:`))
   );
-  assert.ok(order.every((index) => index >= 0));
   const [julyIndex, augustIndex, septemberIndex] = order;
+  if (julyIndex === undefined || augustIndex === undefined || septemberIndex === undefined) {
+    assert.fail("Expected each option month to be discovered");
+  }
+  assert.ok(order.every((index) => index >= 0));
   assert.ok(julyIndex >= 0 && augustIndex >= 0 && septemberIndex >= 0);
   assert.ok(julyIndex < augustIndex && augustIndex < septemberIndex);
 });
