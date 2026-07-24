@@ -75,8 +75,47 @@ const QUOTE_FIELDS = [
   "6509", // Market data availability
   "7762", // Unformatted volume
 ].join(",");
+const OPTION_DISCOVERY_MONTH_CONCURRENCY = 1;
+const OPTION_SECDEF_INFO_BATCH_SIZE = 8;
+const OPTION_MARKETDATA_BATCH_SIZE = 100;
+const READ_ONLY_REQUEST_MAX_RETRIES = 3;
+const REQUEST_RETRY_BASE_DELAY_MS = 250;
+const REQUEST_RETRY_MAX_DELAY_MS = 5_000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+function parseRetryAfter(raw: unknown): number | undefined {
+  const asString = typeof raw === "string" ? raw.trim() : undefined;
+  if (!asString) return undefined;
+
+  const numeric = Number(asString);
+  if (Number.isFinite(numeric) && numeric > 0) return Math.ceil(numeric * 1000);
+
+  const date = Date.parse(asString);
+  if (!Number.isNaN(date)) {
+    const ms = Math.max(0, date - Date.now());
+    if (ms > 0) return ms;
+  }
+
+  return undefined;
+}
+
+function isHeadersLike(input: unknown): input is { get(name: string): string | null } {
+  return (
+    typeof input === "object" &&
+    input !== null &&
+    typeof (input as { get?: unknown }).get === "function"
+  );
+}
+
+function headerToString(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (Array.isArray(value)) return headerToString(value[0]);
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "string") {
+    return String(value);
+  }
+  return undefined;
+}
 
 function chunks<T>(values: readonly T[], size: number): T[][] {
   const result: T[][] = [];
@@ -406,11 +445,16 @@ export class IbkrClient implements BrokerClient {
     fromDate: string,
     toDate: string
   ): Promise<string[]> {
-    const contracts = (
-      await Promise.all(
-        monthCodes(fromDate, toDate).map((month) => this.discoverOptions(symbol, month))
-      )
-    ).flat();
+    const normalized = symbol.trim().toUpperCase();
+    const months = monthCodes(fromDate, toDate);
+    const contracts: OptionContract[] = [];
+    for (let index = 0; index < months.length; index += OPTION_DISCOVERY_MONTH_CONCURRENCY) {
+      const batch = months.slice(index, index + OPTION_DISCOVERY_MONTH_CONCURRENCY);
+      const batchContracts = (
+        await Promise.all(batch.map((month) => this.discoverOptions(normalized, month)))
+      ).flat();
+      contracts.push(...batchContracts);
+    }
     return [
       ...new Set(
         contracts
@@ -431,7 +475,11 @@ export class IbkrClient implements BrokerClient {
     if (!contracts.length) {
       throw new Error(`IBKR returned no option contracts for ${symbol} ${expiry}`);
     }
-    return this.fetchOptionQuotes(contracts);
+    const quoted = await this.fetchOptionQuotes(contracts, { allowIncomplete: true });
+    if (!quoted.length) {
+      throw new Error(`IBKR returned no usable option quotes for ${symbol} ${expiry}`);
+    }
+    return quoted;
   }
 
   /** Fetch one exact option quote; null means the contract is not listed. */
@@ -512,7 +560,7 @@ export class IbkrClient implements BrokerClient {
     }
 
     const contracts: OptionContract[] = [];
-    for (const batch of chunks(requests, 8)) {
+    for (const batch of chunks(requests, OPTION_SECDEF_INFO_BATCH_SIZE)) {
       const responses = await Promise.all(
         batch.map(({ strike, right }) =>
           this.req<IbkrSecdefInfo[]>({
@@ -546,10 +594,13 @@ export class IbkrClient implements BrokerClient {
   }
 
   private async fetchOptionQuotes(
-    contracts: readonly OptionContract[]
+    contracts: readonly OptionContract[],
+    options: { allowIncomplete?: boolean } = {}
   ): Promise<OptionMarketQuote[]> {
+    const { allowIncomplete = false } = options;
     const result: OptionMarketQuote[] = [];
-    for (const batch of chunks(contracts, 100)) {
+    const skipped: string[] = [];
+    for (const batch of chunks(contracts, OPTION_MARKETDATA_BATCH_SIZE)) {
       const params = {
         conids: batch.map((contract) => contract.conid).join(","),
         fields: OPTION_QUOTE_FIELDS,
@@ -574,12 +625,25 @@ export class IbkrClient implements BrokerClient {
         const ask = snapshot ? this.snapshotNumber(snapshot, "86") : undefined;
         const delta = snapshot ? this.snapshotNumber(snapshot, "7308") : undefined;
         if (bid === undefined || ask === undefined || delta === undefined) {
+          if (allowIncomplete) {
+            skipped.push(contract.symbol);
+            continue;
+          }
           throw new Error(
             `IBKR returned incomplete option market data for ${contract.symbol} (bid/ask/delta required)`
           );
         }
         result.push({ ...contract, bid, ask, mid: (bid + ask) / 2, delta });
       }
+    }
+    if (allowIncomplete && skipped.length && skipped.length === contracts.length) {
+      const symbol = contracts[0]?.underlying ?? "unknown";
+      const expiry = contracts[0]?.expiry ?? "unknown";
+      throw new Error(
+        `IBKR returned unusable option market data for ${symbol} ${expiry} (all ${String(
+          skipped.length
+        )} contracts)`
+      );
     }
     return result;
   }
@@ -680,13 +744,15 @@ export class IbkrClient implements BrokerClient {
   private latestHistoryBar(
     history: IbkrMarketDataHistoryResponse | undefined
   ): IbkrMarketDataHistoryBar | undefined {
-    return history?.data?.at(-1);
+    if (!history?.data?.length) return undefined;
+    return history.data[history.data.length - 1];
   }
 
   private previousHistoryBar(
     history: IbkrMarketDataHistoryResponse | undefined
   ): IbkrMarketDataHistoryBar | undefined {
-    return history?.data?.at(-2);
+    if (!history?.data || history.data.length < 2) return undefined;
+    return history.data[history.data.length - 2];
   }
 
   private historyVolume(
@@ -748,12 +814,108 @@ export class IbkrClient implements BrokerClient {
   }
 
   /** Typed wrapper around the raw client's untyped `request()`. */
-  protected async req<T>(input: {
+  protected async sendRequest<T>(input: {
     path: string;
     method?: string;
     params?: Record<string, string | number | boolean | null | undefined>;
     data?: object;
   }): Promise<T> {
     return (await this.raw.request(input)) as T;
+  }
+
+  protected async req<T>(input: {
+    path: string;
+    method?: string;
+    params?: Record<string, string | number | boolean | null | undefined>;
+    data?: object;
+  }): Promise<T> {
+    let retries = 0;
+    for (;;) {
+      try {
+        return await this.sendRequest<T>(input);
+      } catch (error) {
+        const status = this.httpStatusFromError(error);
+        if (status !== 429 || retries >= READ_ONLY_REQUEST_MAX_RETRIES) {
+          throw error;
+        }
+        const retryAfter = this.retryAfterFromError(error);
+        const delayMs = this.computeBackoffDelayMs(retries, retryAfter);
+        retries += 1;
+        await this.wait(delayMs);
+      }
+    }
+  }
+
+  private httpStatusFromError(error: unknown): number | undefined {
+    if (typeof error !== "object" || error === null) return undefined;
+    const response = (error as { response?: unknown }).response;
+    const directStatus = this.numberFromUnknown((error as { status?: unknown }).status);
+    if (directStatus !== undefined) return directStatus;
+    const directStatusCode = this.numberFromUnknown((error as { statusCode?: unknown }).statusCode);
+    if (directStatusCode !== undefined) return directStatusCode;
+    if (typeof response === "object" && response !== null) {
+      return this.numberFromUnknown(
+        (response as { status?: unknown }).status ??
+          (response as { statusCode?: unknown }).statusCode
+      );
+    }
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") {
+      const match = /\b429\b/.exec(message);
+      if (match) return 429;
+    }
+    return undefined;
+  }
+
+  private retryAfterFromError(error: unknown): number | undefined {
+    if (typeof error !== "object" || error === null) return undefined;
+    const response = (error as { response?: unknown }).response;
+    const responseHeaders =
+      response && typeof response === "object" && "headers" in response
+        ? response.headers
+        : undefined;
+    const directHeaders = (error as { headers?: unknown }).headers;
+    const retryAfterRaw =
+      this.headerValue(responseHeaders, "Retry-After") ??
+      this.headerValue(directHeaders, "Retry-After");
+    return parseRetryAfter(retryAfterRaw);
+  }
+
+  private computeBackoffDelayMs(retry: number, retryAfterMs: number | undefined): number {
+    if (retryAfterMs !== undefined) return Math.min(retryAfterMs, REQUEST_RETRY_MAX_DELAY_MS);
+    return Math.min(REQUEST_RETRY_BASE_DELAY_MS * 2 ** retry, REQUEST_RETRY_MAX_DELAY_MS);
+  }
+
+  private numberFromUnknown(value: unknown): number | undefined {
+    if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    }
+    return undefined;
+  }
+
+  private headerValue(headers: unknown, headerName: string): string | undefined {
+    const canonical = headerName.toLowerCase();
+    if (headers === undefined || headers === null) return undefined;
+
+    if (isHeadersLike(headers)) {
+      const direct = headers.get(canonical) ?? headers.get(headerName);
+      return direct ?? undefined;
+    }
+
+    if (typeof headers === "object") {
+      const bucket = headers as Record<string, unknown>;
+      const direct = headerToString(bucket[headerName]) ?? headerToString(bucket[canonical]);
+      if (direct !== undefined) return direct;
+
+      for (const [key, value] of Object.entries(bucket)) {
+        if (key.toLowerCase() !== canonical) continue;
+        const candidate = headerToString(value);
+        if (candidate !== undefined) return candidate;
+      }
+    }
+
+    return undefined;
   }
 }
