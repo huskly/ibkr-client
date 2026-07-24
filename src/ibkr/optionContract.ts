@@ -1,6 +1,6 @@
 import type { OptionContract, OptionRight } from "../types.js";
 
-const OSI_PATTERN = /^(?<root>.{6})(?<date>\d{6})(?<right>[CP])(?<strike>\d{8})$/;
+const OSI_PATTERN = /^(.{6})(\d{6})([CP])(\d{8})$/;
 
 export interface ParsedOsiOptionSymbol {
   underlying: string;
@@ -10,7 +10,7 @@ export interface ParsedOsiOptionSymbol {
 }
 
 function calendarDate(raw: string): string {
-  const digits = raw.replaceAll("-", "");
+  const digits = raw.replace(/-/g, "");
   if (!/^\d{8}$/.test(digits)) throw new Error(`Invalid option expiry: ${raw}`);
   const year = Number(digits.slice(0, 4));
   const month = Number(digits.slice(4, 6));
@@ -36,7 +36,7 @@ export function formatOsiOptionSymbol(input: {
   if (!underlying || underlying.length > 6) {
     throw new Error(`OSI underlying must contain 1-6 characters: ${input.underlying}`);
   }
-  const expiry = calendarDate(input.expiry).replaceAll("-", "").slice(2);
+  const expiry = calendarDate(input.expiry).replace(/-/g, "").slice(2);
   const strikeMillis = Math.round(input.strike * 1000);
   if (!Number.isFinite(input.strike) || input.strike <= 0 || strikeMillis > 99_999_999) {
     throw new Error(`Invalid option strike: ${String(input.strike)}`);
@@ -46,16 +46,18 @@ export function formatOsiOptionSymbol(input: {
 
 export function parseOsiOptionSymbol(symbol: string): ParsedOsiOptionSymbol | null {
   const match = OSI_PATTERN.exec(symbol.toUpperCase());
-  const groups = match?.groups;
-  if (!groups) return null;
-  const right = groups["right"];
+  if (!match) return null;
+  const [, root, date, right, strike] = match;
+  if (right === undefined || strike === undefined || root === undefined || date === undefined) {
+    return null;
+  }
   if (right !== "C" && right !== "P") return null;
   try {
     return {
-      underlying: (groups["root"] ?? "").trim(),
-      expiry: calendarDate(`20${groups["date"] ?? ""}`),
+      underlying: root.trim(),
+      expiry: calendarDate(`20${date}`),
       right,
-      strike: Number(groups["strike"]) / 1000,
+      strike: Number(strike) / 1000,
     };
   } catch {
     return null;

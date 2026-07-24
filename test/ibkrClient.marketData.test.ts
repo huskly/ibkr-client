@@ -27,7 +27,7 @@ class FakeIbkrClient extends IbkrClient {
     super(config);
   }
 
-  protected override req<T>(input: RequestInput): Promise<T> {
+  protected override sendRequest<T>(input: RequestInput): Promise<T> {
     this.calls.push(input);
     return Promise.resolve(this.responder(input, this.calls) as T);
   }
@@ -35,6 +35,24 @@ class FakeIbkrClient extends IbkrClient {
   protected override wait(_ms: number): Promise<void> {
     return Promise.resolve();
   }
+}
+
+interface RateLimitedError extends Error {
+  status: number;
+  response?: {
+    status: number;
+    headers?: Record<string, string | string[]>;
+  };
+}
+
+function rateLimitedError(retryAfter?: string): RateLimitedError {
+  const error = new Error("Response status 429") as RateLimitedError;
+  error.status = 429;
+  error.response = {
+    status: 429,
+    ...(retryAfter ? { headers: { "Retry-After": retryAfter } } : {}),
+  };
+  return error;
 }
 
 function discoveryResponse(input: RequestInput): unknown {
@@ -115,6 +133,134 @@ void test("option discovery primes search, preserves weekly/monthly expiries, an
   );
 });
 
+void test("multi-month option discovery bounds secdef/info concurrency", async () => {
+  let activeInfo = 0;
+  let maxActiveInfo = 0;
+  const observedInfo: string[] = [];
+
+  const monthToDate = (month: string): string => {
+    const year = Number(`20${month.slice(3)}`);
+    const monthIndex = [
+      "JAN",
+      "FEB",
+      "MAR",
+      "APR",
+      "MAY",
+      "JUN",
+      "JUL",
+      "AUG",
+      "SEP",
+      "OCT",
+      "NOV",
+      "DEC",
+    ].indexOf(month.slice(0, 3));
+    return `${year}-${String(monthIndex + 1).padStart(2, "0")}-14`;
+  };
+
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
+    }
+    if (input.path === "iserver/secdef/strikes") {
+      return { call: [15, 20, 25, 30, 35, 40, 45, 50, 55], put: [] };
+    }
+    if (input.path === "iserver/secdef/info") {
+      const month = String(input.params?.["month"] ?? "UNK");
+      const strike = Number(input.params?.["strike"] ?? 0);
+      observedInfo.push(`info:${month}:${String(strike)}`);
+      activeInfo += 1;
+      maxActiveInfo = Math.max(maxActiveInfo, activeInfo);
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          const monthCode = month.replace(/\D/g, "");
+          const conid = Number(`${monthCode}${String(strike).padStart(3, "0")}`);
+          resolve([
+            {
+              conid,
+              symbol: "MSTR",
+              maturityDate: monthToDate(month).split("-").join(""),
+              right: String(input.params?.["right"]),
+              strike,
+            },
+          ]);
+        }, 10);
+      }).finally(() => {
+        activeInfo -= 1;
+      });
+    }
+    return discoveryResponse(input);
+  });
+
+  const expiries = await client.getOptionExpiries("MSTR", "C", "2026-07-01", "2026-09-30");
+  assert.deepEqual(expiries, ["2026-07-14", "2026-08-14", "2026-09-14"]);
+  assert.ok(
+    maxActiveInfo <= 8,
+    `expected bounded concurrent info requests, observed max ${String(maxActiveInfo)}`
+  );
+
+  const order = ["JUL26", "AUG26", "SEP26"].map((month) =>
+    observedInfo.findIndex((entry) => entry.startsWith(`info:${month}:`))
+  );
+  const [julyIndex, augustIndex, septemberIndex] = order;
+  if (julyIndex === undefined || augustIndex === undefined || septemberIndex === undefined) {
+    assert.fail("Expected each option month to be discovered");
+  }
+  assert.ok(order.every((index) => index >= 0));
+  assert.ok(julyIndex >= 0 && augustIndex >= 0 && septemberIndex >= 0);
+  assert.ok(julyIndex < augustIndex && augustIndex < septemberIndex);
+});
+
+void test("option chain skips incomplete contracts and returns usable quotes", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/info") {
+      const right = input.params?.["right"];
+      if (right === "C") {
+        return [{ conid: 101, symbol: "MSTR", maturityDate: "20260814", right: "C", strike: 215 }];
+      }
+      return [{ conid: 102, symbol: "MSTR", maturityDate: "20260814", right: "P", strike: 95 }];
+    }
+    if (input.path !== "iserver/marketdata/snapshot") return discoveryResponse(input);
+    snapshots += 1;
+    if (snapshots === 1) return [];
+    return [{ conid: 101, "84": "4.00", "86": "4.20", "7308": "0.25" }];
+  });
+
+  const chain = await client.getOptionChain("MSTR", "2026-08-14");
+  assert.deepEqual(
+    chain.map(({ conid, symbol, bid, ask, mid, delta }) => ({
+      conid,
+      symbol,
+      bid,
+      ask,
+      mid,
+      delta,
+    })),
+    [{ conid: 101, symbol: "MSTR  260814C00215000", bid: 4, ask: 4.2, mid: 4.1, delta: 0.25 }]
+  );
+});
+
+void test("chain with all incomplete option snapshots fails noisily", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/info") {
+      const right = input.params?.["right"];
+      if (right === "C") {
+        return [{ conid: 101, symbol: "MSTR", maturityDate: "20260814", right: "C", strike: 215 }];
+      }
+      return [{ conid: 102, symbol: "MSTR", maturityDate: "20260814", right: "P", strike: 95 }];
+    }
+    if (input.path !== "iserver/marketdata/snapshot") return discoveryResponse(input);
+    snapshots += 1;
+    if (snapshots === 1) return [];
+    return [{ conid: 101, "84": "4.00", "86": "4.20" }];
+  });
+  await assert.rejects(
+    () => client.getOptionChain("MSTR", "2026-08-14"),
+    /unusable option market data/
+  );
+});
+
 void test("an empty post-prime strikes response rejects instead of masquerading as no candidates", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/secdef/search") {
@@ -127,6 +273,53 @@ void test("an empty post-prime strikes response rejects instead of masquerading 
     () => client.getOptionChain("MSTR", "2026-08-14"),
     /empty option strikes.*after secdef\/search priming/
   );
+});
+
+void test("429 responses are retried and eventually succeed when status clears", async () => {
+  let strikesCalls = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
+    }
+    if (input.path === "iserver/secdef/strikes") {
+      strikesCalls += 1;
+      if (strikesCalls === 1) throw rateLimitedError("1");
+      return { call: [215], put: [] };
+    }
+    if (input.path === "iserver/secdef/info") {
+      return [{ conid: 101, symbol: "MSTR", maturityDate: "20260814", right: "C", strike: 215 }];
+    }
+    if (input.path === "iserver/marketdata/snapshot") return [];
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await client.getOptionExpiries("MSTR", "C", "2026-08-01", "2026-08-31");
+  assert.equal(strikesCalls, 2);
+});
+
+void test("exhausted 429 retries preserve the original read failure", async () => {
+  let strikesCalls = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
+    }
+    if (input.path === "iserver/secdef/strikes") {
+      strikesCalls += 1;
+      throw rateLimitedError("1");
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  let caught: unknown;
+  try {
+    await client.getOptionExpiries("MSTR", "C", "2026-08-01", "2026-08-31");
+    assert.fail("Expected the request to fail after exhausting retries");
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught instanceof Error);
+  assert.equal(caught.message, "Response status 429");
+  assert.equal(strikesCalls, 4);
 });
 
 void test("missing option delta fails closed", async () => {
