@@ -80,14 +80,21 @@ void test("option discovery primes search, preserves weekly/monthly expiries, an
     snapshotReads += 1;
     if (snapshotReads === 1) return [];
     return [
-      { conid: 101, "84": "4.00", "86": "4.20", "7308": "0.25" },
-      { conid: 103, "84": "1.00", "86": "1.20", "7308": "-0.10" },
+      {
+        conid: 101,
+        "84": "4.00",
+        "86": "4.20",
+        "7308": "0.25",
+        "7638": "450",
+        "7762": "120",
+      },
+      { conid: 103, "84": "1.00", "86": "1.20", "7308": "-0.10", "7638": 0, "7762": 0 },
     ];
   });
 
   const chain = await client.getOptionChain("mstr", "2026-08-14");
   assert.deepEqual(
-    chain.map(({ conid, symbol, expiry, right, bid, ask, mid, delta }) => ({
+    chain.map(({ conid, symbol, expiry, right, bid, ask, mid, delta, volume, openInterest }) => ({
       conid,
       symbol,
       expiry,
@@ -96,6 +103,8 @@ void test("option discovery primes search, preserves weekly/monthly expiries, an
       ask,
       mid,
       delta,
+      volume,
+      openInterest,
     })),
     [
       {
@@ -107,6 +116,8 @@ void test("option discovery primes search, preserves weekly/monthly expiries, an
         ask: 4.2,
         mid: 4.1,
         delta: 0.25,
+        volume: 120,
+        openInterest: 450,
       },
       {
         conid: 103,
@@ -117,6 +128,8 @@ void test("option discovery primes search, preserves weekly/monthly expiries, an
         ask: 1.2,
         mid: 1.1,
         delta: -0.1,
+        volume: 0,
+        openInterest: 0,
       },
     ]
   );
@@ -228,16 +241,83 @@ void test("option chain skips incomplete contracts and returns usable quotes", a
 
   const chain = await client.getOptionChain("MSTR", "2026-08-14");
   assert.deepEqual(
-    chain.map(({ conid, symbol, bid, ask, mid, delta }) => ({
+    chain.map(({ conid, symbol, bid, ask, mid, delta, volume, openInterest }) => ({
       conid,
       symbol,
       bid,
       ask,
       mid,
       delta,
+      volume,
+      openInterest,
     })),
-    [{ conid: 101, symbol: "MSTR  260814C00215000", bid: 4, ask: 4.2, mid: 4.1, delta: 0.25 }]
+    [
+      {
+        conid: 101,
+        symbol: "MSTR  260814C00215000",
+        bid: 4,
+        ask: 4.2,
+        mid: 4.1,
+        delta: 0.25,
+        volume: null,
+        openInterest: null,
+      },
+    ]
   );
+});
+
+void test("individual option quotes preserve activity values and normalize unavailable data", async () => {
+  const cases = [
+    {
+      name: "positive",
+      activity: { "7638": "1,250", "7762": "75" },
+      expected: { volume: 75, openInterest: 1250 },
+    },
+    {
+      name: "zero",
+      activity: { "7638": 0, "7762": 0 },
+      expected: { volume: 0, openInterest: 0 },
+    },
+    {
+      name: "unavailable",
+      activity: { "7638": "N/A", "7762": "--", "87": "--" },
+      expected: { volume: null, openInterest: null },
+    },
+    {
+      name: "non-finite",
+      activity: { "7638": Number.POSITIVE_INFINITY, "7762": "Infinity" },
+      expected: { volume: null, openInterest: null },
+    },
+    {
+      name: "unsupported",
+      activity: { "7638": "12 contracts", "7762": "75 contracts", "87": "75 contracts" },
+      expected: { volume: null, openInterest: null },
+    },
+  ] as const;
+
+  for (const { name, activity, expected } of cases) {
+    let snapshots = 0;
+    const client = new FakeIbkrClient((input) => {
+      if (input.path !== "iserver/marketdata/snapshot") return discoveryResponse(input);
+      snapshots += 1;
+      return snapshots === 1
+        ? []
+        : [{ conid: 102, "84": "4", "86": "4.2", "7308": "0.25", ...activity }];
+    });
+
+    const quote = await client.getOptionQuote({
+      symbol: "MSTR",
+      expiry: "2026-08-21",
+      strike: 215,
+      right: "C",
+    });
+    assert.ok(quote, `expected a quote for ${name} activity values`);
+    assert.deepEqual({ volume: quote.volume, openInterest: quote.openInterest }, expected, name);
+    assert.equal(
+      client.calls.find((call) => call.path === "iserver/marketdata/snapshot")?.params?.["fields"],
+      "84,86,87,7308,7638,7762"
+    );
+  }
 });
 
 void test("chain with all incomplete option snapshots fails noisily", async () => {

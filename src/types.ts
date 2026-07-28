@@ -109,6 +109,8 @@ export interface OptionMarketQuote extends OptionContract {
   ask: number;
   mid: number;
   delta: number;
+  volume: number | null;
+  openInterest: number | null;
 }
 
 export interface PriceHistoryRequest {
