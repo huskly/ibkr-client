@@ -99,8 +99,8 @@ The reusable `IbkrClient` also exposes typed, read-only strategy data:
 - `getPriceHistory(...)` returns normalized OHLCV bars.
 - `getOptionExpiries(...)` discovers weekly and monthly maturities across month buckets.
 - `getOptionChain(...)` returns an exact-expiry chain with canonical OSI symbols, conids,
-  bid/ask/mid prices, and delta.
-- `getOptionQuote(...)` resolves and prices one exact contract.
+  bid/ask/mid prices, delta, session volume, and open interest.
+- `getOptionQuote(...)` resolves and prices one exact contract with the same market-data shape.
 - `getOptionContract(conid)` maps a broker conid back to durable OSI identity.
 
 Contract discovery always calls `secdef/search` before `secdef/strikes`, because IBKR keeps
@@ -111,6 +111,8 @@ applies bounded batching for secondary-definition and market-data calls, and ret
 requests on transient `429` responses with capped exponential backoff (including `Retry-After`
 headers when available). If every returned contract is unusable (missing bid/ask/delta), the
 client now fails noisily so callers can handle that condition explicitly.
+Option volume and open interest are required nullable fields: numeric zero remains zero, while
+missing, unsupported, or non-finite provider values are returned as `null`.
 Conids are broker-boundary identifiers; consumers should persist the returned OSI `symbol`.
 
 ### Authorized read-only smoke test

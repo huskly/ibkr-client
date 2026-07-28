@@ -58,7 +58,10 @@ const DAY_PNL_FIELD = "78";
 const OPTION_QUOTE_FIELDS = [
   "84", // Bid
   "86", // Ask
+  "87", // Formatted volume
   "7308", // Delta
+  "7638", // Option open interest
+  "7762", // Unformatted volume
 ].join(",");
 const QUOTE_FIELDS = [
   "31", // Last
@@ -633,7 +636,17 @@ export class IbkrClient implements BrokerClient {
             `IBKR returned incomplete option market data for ${contract.symbol} (bid/ask/delta required)`
           );
         }
-        result.push({ ...contract, bid, ask, mid: (bid + ask) / 2, delta });
+        const volume = snapshot ? (this.snapshotVolume(snapshot) ?? null) : null;
+        const openInterest = snapshot ? (this.snapshotNumber(snapshot, "7638") ?? null) : null;
+        result.push({
+          ...contract,
+          bid,
+          ask,
+          mid: (bid + ask) / 2,
+          delta,
+          volume,
+          openInterest,
+        });
       }
     }
     if (allowIncomplete && skipped.length && skipped.length === contracts.length) {
@@ -774,8 +787,9 @@ export class IbkrClient implements BrokerClient {
     const value = this.snapshotString(snapshot, field);
     if (value === undefined) return undefined;
     const cleaned = value.replace(/^[A-Z]\s*/i, "").replace(/,/g, "");
-    const parsed = parseFloat(cleaned);
-    return Number.isNaN(parsed) ? undefined : parsed;
+    if (!cleaned) return undefined;
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : undefined;
   }
 
   private snapshotHasPrefix(
