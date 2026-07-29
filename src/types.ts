@@ -237,6 +237,60 @@ export interface DerivativeDiscoveryClient {
   getDerivativeReferenceQuote(contract: DerivativeContract): Promise<DerivativeReferenceQuote>;
 }
 
+export type BrokerEnvironment = "live" | "paper";
+
+export interface TradingDiagnostics {
+  accountId: string;
+  selectedAccountId: string | null;
+  environment: BrokerEnvironment;
+  authenticated: boolean;
+  competingSession: boolean;
+  marketDataAvailable: boolean | null;
+  advisoryAssetPermissions: string[];
+}
+
+export interface DerivativeComboLeg {
+  contract: DerivativeContract;
+  ratio: 1 | -1;
+}
+
+export interface DerivativeComboPreviewRequest {
+  accountId: string;
+  legs: [DerivativeComboLeg, DerivativeComboLeg];
+  quantity: number;
+  priceEffect: "CREDIT" | "DEBIT";
+  limit: number;
+  tif: "DAY" | "GTC";
+  session: "REGULAR" | "OVERNIGHT";
+}
+
+export interface MarginImpact {
+  current: number;
+  change: number;
+  after: number;
+}
+
+export interface DerivativeComboPreviewResult {
+  accountId: string;
+  environment: BrokerEnvironment;
+  accepted: boolean;
+  submitted: false;
+  commission: number | null;
+  initialMargin: MarginImpact | null;
+  maintenanceMargin: MarginImpact | null;
+  warnings: string[];
+  rejectionReasons: string[];
+  advisoryAssetPermissions: string[];
+}
+
+/** Explicit What-If capability. It contains no live placement operation. */
+export interface DerivativePreviewClient {
+  getTradingDiagnostics(accountId: string): Promise<TradingDiagnostics>;
+  previewDerivativeCombo(
+    request: DerivativeComboPreviewRequest
+  ): Promise<DerivativeComboPreviewResult>;
+}
+
 /**
  * An IBKR option contract with durable OSI identity. The conid is intentionally retained
  * only at this broker boundary; consumers should persist {@link symbol}, not {@link conid}.

@@ -141,6 +141,25 @@ Option volume and open interest are required nullable fields: numeric zero remai
 missing, unsupported, or non-finite provider values are returned as `null`.
 Conids are broker-boundary identifiers; consumers should persist the returned OSI `symbol`.
 
+### Explicit derivative What-If previews
+
+`IbkrClient` also implements `DerivativePreviewClient`, a deliberately narrow capability with
+no placement, reply-confirmation, modification, or cancellation method. Callers must provide an
+exact account ID; the client never selects the first account for preview work.
+
+- `getTradingDiagnostics(accountId)` reports authentication, selected account, paper/live state,
+  market-data access, and advisory asset permissions. It does not switch accounts or preview an
+  order.
+- `previewDerivativeCombo(...)` accepts two exact contracts with signed ratios and a positive
+  user-facing credit/debit. It requests the required market-data snapshot, constructs one atomic
+  `conidex`, and calls only `/orders/whatif`.
+
+For a BUY-oriented combo, IBKR encodes a net credit as a negative limit price. That provider
+detail remains inside this package: callers send `{ priceEffect: "CREDIT", limit: 39 }`. The
+normalized result includes paper/live environment, commission, initial and maintenance margin,
+warnings, rejection reasons, and `submitted: false`. An incomplete nominal success fails closed.
+Permission metadata is diagnostic only; the What-If response remains authoritative.
+
 ### Authorized read-only smoke test
 
 Run this only after the account owner authorizes a read-only brokerage request and the OAuth

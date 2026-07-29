@@ -91,6 +91,25 @@ export interface IbkrLiveOrdersResponse {
 export interface IbkrBrokerageAccountsResponse {
   accounts?: string[];
   selectedAccount?: string;
+  isPaper?: boolean;
+  allowFeatures?: {
+    showGFIS?: boolean;
+    allowedAssetTypes?: string;
+  };
+}
+
+export interface IbkrWhatIfValues {
+  current?: string;
+  change?: string;
+  after?: string;
+}
+
+export interface IbkrWhatIfResponse {
+  amount?: { amount?: string; commission?: string; total?: string };
+  initial?: IbkrWhatIfValues;
+  maintenance?: IbkrWhatIfValues;
+  warn?: string | null;
+  error?: string | null;
 }
 
 export interface IbkrSwitchAccountResponse {
