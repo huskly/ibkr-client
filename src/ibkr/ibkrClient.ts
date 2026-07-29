@@ -22,6 +22,7 @@ import type {
   DerivativeExpiry,
   DerivativeExpiryQuery,
   DerivativeQuote,
+  DerivativeReferenceQuote,
   OptionContract,
   OptionMarketQuote,
   OptionQuoteRequest,
@@ -43,6 +44,7 @@ import type {
   IbkrPosition,
   IbkrSecdefByConidResponse,
   IbkrSecdefInfo,
+  IbkrSecdefResponse,
   IbkrSecdefSearchResult,
   IbkrSecdefStrikesResponse,
   IbkrStockContract,
@@ -97,6 +99,14 @@ const DERIVATIVE_QUOTE_FIELDS = [
   "7635", // Mark price
   "7638", // Option open interest
   "7762", // Unformatted volume
+].join(",");
+const DERIVATIVE_REFERENCE_QUOTE_FIELDS = [
+  "31", // Last
+  "55", // Symbol
+  "84", // Bid
+  "86", // Ask
+  "6509", // Market data availability
+  "7635", // Mark price when supplied
 ].join(",");
 const QUOTE_FIELDS = [
   "31", // Last
@@ -702,6 +712,59 @@ export class IbkrClient implements BrokerClient, DerivativeDiscoveryClient {
     return quotes;
   }
 
+  /** Quote the broker-linked underlying (for example, the Sep NQ future behind QN3). */
+  async getDerivativeReferenceQuote(
+    contract: DerivativeContract
+  ): Promise<DerivativeReferenceQuote> {
+    const detailResponse = await this.req<IbkrSecdefResponse>({
+      path: "trsrv/secdef",
+      params: { conids: String(contract.conid) },
+    });
+    const details = (detailResponse.secdef ?? []).filter(
+      (detail) => detail.conid === contract.conid
+    );
+    if (details.length !== 1) {
+      throw new Error(
+        `IBKR returned ${String(details.length)} contract details for derivative ${String(contract.conid)}`
+      );
+    }
+    const detail = details[0];
+    const referenceConid = detail?.undConid;
+    if (
+      !Number.isSafeInteger(referenceConid) ||
+      referenceConid === undefined ||
+      referenceConid <= 0
+    ) {
+      throw new Error(
+        `IBKR did not identify the underlying contract for derivative ${String(contract.conid)}`
+      );
+    }
+    const params = {
+      conids: String(referenceConid),
+      fields: DERIVATIVE_REFERENCE_QUOTE_FIELDS,
+    };
+    await this.req<unknown>({ path: "iserver/marketdata/snapshot", params });
+    await this.wait(2000);
+    const snapshots = await this.req<IbkrMarketDataSnapshot[]>({
+      path: "iserver/marketdata/snapshot",
+      params,
+    });
+    const snapshot = snapshots.find((item) => item.conid === referenceConid);
+    const bid = snapshot ? (this.snapshotNumber(snapshot, "84") ?? null) : null;
+    const ask = snapshot ? (this.snapshotNumber(snapshot, "86") ?? null) : null;
+    const suppliedMark = snapshot ? (this.snapshotNumber(snapshot, "7635") ?? null) : null;
+    return {
+      conid: referenceConid,
+      symbol: String(snapshot?.["55"] ?? detail?.undSym ?? contract.underlying),
+      availability: normalizeDerivativeDataAvailability(snapshot?.["6509"]),
+      timestamp: snapshot ? this.snapshotTimestamp(snapshot) : null,
+      bid,
+      ask,
+      last: snapshot ? (this.snapshotNumber(snapshot, "31") ?? null) : null,
+      mark: suppliedMark ?? (bid !== null && ask !== null ? (bid + ask) / 2 : null),
+    };
+  }
+
   /** Discover every listed weekly/monthly expiry in the requested calendar range. */
   async getOptionExpiries(
     symbol: string,
@@ -944,16 +1007,10 @@ export class IbkrClient implements BrokerClient, DerivativeDiscoveryClient {
       );
       for (const contract of batch) {
         const snapshot = byConid.get(contract.conid);
-        const updated = snapshot ? this.snapshotNumber(snapshot, "_updated") : undefined;
-        const updatedMs =
-          updated === undefined ? undefined : updated < 100_000_000_000 ? updated * 1000 : updated;
-        const updatedDate = updatedMs === undefined ? undefined : new Date(updatedMs);
-        const timestamp =
-          updatedDate && !Number.isNaN(updatedDate.getTime()) ? updatedDate.toISOString() : null;
         result.push({
           contract,
           availability: normalizeDerivativeDataAvailability(snapshot?.["6509"]),
-          timestamp,
+          timestamp: snapshot ? this.snapshotTimestamp(snapshot) : null,
           bid: snapshot ? (this.snapshotNumber(snapshot, "84") ?? null) : null,
           ask: snapshot ? (this.snapshotNumber(snapshot, "86") ?? null) : null,
           last: snapshot ? (this.snapshotNumber(snapshot, "31") ?? null) : null,
@@ -1500,6 +1557,14 @@ export class IbkrClient implements BrokerClient, DerivativeDiscoveryClient {
     if (!cleaned) return undefined;
     const parsed = Number(cleaned);
     return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  private snapshotTimestamp(snapshot: IbkrMarketDataSnapshot): string | null {
+    const updated = this.snapshotNumber(snapshot, "_updated");
+    if (updated === undefined) return null;
+    const updatedMs = updated < 100_000_000_000 ? updated * 1000 : updated;
+    const date = new Date(updatedMs);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
   }
 
   private snapshotHasPrefix(

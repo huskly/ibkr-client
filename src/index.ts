@@ -26,6 +26,7 @@ export type {
   DerivativeExpiry,
   DerivativeExpiryQuery,
   DerivativeQuote,
+  DerivativeReferenceQuote,
   OptionContract,
   OptionMarketQuote,
   OptionQuoteRequest,
