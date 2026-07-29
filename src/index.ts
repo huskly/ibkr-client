@@ -18,6 +18,14 @@ export type {
   BrokerTransaction,
   BrokerTransactionHistory,
   BrokerTransferItem,
+  DerivativeAssetClass,
+  DerivativeContract,
+  DerivativeContractQuery,
+  DerivativeDataAvailability,
+  DerivativeDiscoveryClient,
+  DerivativeExpiry,
+  DerivativeExpiryQuery,
+  DerivativeQuote,
   OptionContract,
   OptionMarketQuote,
   OptionQuoteRequest,
@@ -26,3 +34,4 @@ export type {
   PriceHistoryRequest,
 } from "./types.js";
 export { formatOsiOptionSymbol, parseOsiOptionSymbol } from "./ibkr/optionContract.js";
+export { normalizeDerivativeDataAvailability } from "./ibkr/derivativeContract.js";

@@ -15,6 +15,13 @@ import type {
   BrokerQuote,
   BrokerTransaction,
   BrokerTransactionHistory,
+  DerivativeAssetClass,
+  DerivativeContract,
+  DerivativeContractQuery,
+  DerivativeDiscoveryClient,
+  DerivativeExpiry,
+  DerivativeExpiryQuery,
+  DerivativeQuote,
   OptionContract,
   OptionMarketQuote,
   OptionQuoteRequest,
@@ -46,6 +53,10 @@ import type {
   IbkrTransactionsResponse,
 } from "./ibkrApiTypes.js";
 import { normalizeOptionContract, parseOsiOptionSymbol } from "./optionContract.js";
+import {
+  normalizeDerivativeContract,
+  normalizeDerivativeDataAvailability,
+} from "./derivativeContract.js";
 
 // `ibkr-client`'s published ESM build is broken: its `import` condition points
 // at files that use extensionless relative imports, which Node's strict ESM
@@ -73,6 +84,17 @@ const OPTION_QUOTE_FIELDS = [
   "86", // Ask
   "87", // Formatted volume
   "7308", // Delta
+  "7638", // Option open interest
+  "7762", // Unformatted volume
+].join(",");
+const DERIVATIVE_QUOTE_FIELDS = [
+  "31", // Last
+  "84", // Bid
+  "86", // Ask
+  "6509", // Market data availability
+  "7308", // Delta
+  "7633", // Implied volatility
+  "7635", // Mark price
   "7638", // Option open interest
   "7762", // Unformatted volume
 ].join(",");
@@ -206,11 +228,12 @@ function monthCodes(fromDate: string, toDate: string): string[] {
  * live-session-token handshake. Ports the data access from the Python PoC
  * (main.py): account summary, positions paging, and day-P/L snapshots.
  */
-export class IbkrClient implements BrokerClient {
+export class IbkrClient implements BrokerClient, DerivativeDiscoveryClient {
   private readonly raw: RawIbkrClient;
   private initPromise?: Promise<void>;
   private accountIdPromise?: Promise<string>;
   private readonly optionDiscovery = new Map<string, Promise<OptionContract[]>>();
+  private readonly derivativeDiscovery = new Map<string, Promise<DerivativeContract[]>>();
 
   constructor(config: IbkrOauth1Config) {
     this.raw = new RawIbkrClientCtor(config);
@@ -570,6 +593,115 @@ export class IbkrClient implements BrokerClient {
     });
   }
 
+  /** Discover listed derivative series over an inclusive calendar range. */
+  async getDerivativeExpiries(query: DerivativeExpiryQuery): Promise<DerivativeExpiry[]> {
+    const contracts = (
+      await Promise.all(
+        monthCodes(query.from, query.to).map((month) =>
+          this.discoverDerivativeMonth(
+            query.underlying,
+            query.assetClass,
+            month,
+            query.exchange,
+            query.right
+          )
+        )
+      )
+    ).flat();
+    const filtered = contracts.filter(
+      (contract) =>
+        contract.expiration >= query.from &&
+        contract.expiration <= query.to &&
+        (query.right === undefined || contract.right === query.right) &&
+        (query.tradingClass === undefined ||
+          contract.tradingClass === query.tradingClass.trim().toUpperCase())
+    );
+    const expiries = filtered.map(
+      ({ assetClass, underlying, expiration, tradingClass, exchange, multiplier }) => ({
+        assetClass,
+        underlying,
+        expiration,
+        tradingClass,
+        exchange,
+        multiplier,
+      })
+    );
+    return [
+      ...new Map(
+        expiries.map((expiry) => [
+          [
+            expiry.assetClass,
+            expiry.underlying,
+            expiry.expiration,
+            expiry.tradingClass,
+            expiry.exchange,
+            String(expiry.multiplier),
+          ].join(":"),
+          expiry,
+        ])
+      ).values(),
+    ].sort((left, right) => left.expiration.localeCompare(right.expiration));
+  }
+
+  /** Discover contracts for one exact expiration, preserving class and venue identity. */
+  async getDerivativeContracts(query: DerivativeContractQuery): Promise<DerivativeContract[]> {
+    const tradingClass = query.tradingClass?.trim().toUpperCase();
+    return (
+      await this.discoverDerivativeMonth(
+        query.underlying,
+        query.assetClass,
+        monthCode(query.expiration),
+        query.exchange,
+        query.right,
+        query.strike
+      )
+    ).filter(
+      (contract) =>
+        contract.expiration === query.expiration &&
+        (query.right === undefined || contract.right === query.right) &&
+        (query.strike === undefined || contract.strike === query.strike) &&
+        (tradingClass === undefined || contract.tradingClass === tradingClass)
+    );
+  }
+
+  /** Resolve exactly one contract and reject missing or ambiguous semantic identity. */
+  async resolveDerivativeContract(
+    query: DerivativeContractQuery & { right: OptionRight; strike: number }
+  ): Promise<DerivativeContract> {
+    const contracts = await this.getDerivativeContracts(query);
+    if (!contracts.length) {
+      throw new Error(
+        `IBKR returned no exact ${query.assetClass} contract for ${query.underlying} ${query.expiration} ${query.right}${String(query.strike)}`
+      );
+    }
+    if (contracts.length !== 1) {
+      const classes = [...new Set(contracts.map((contract) => contract.tradingClass))].join(", ");
+      throw new Error(
+        `Ambiguous ${query.assetClass} contract for ${query.underlying} ${query.expiration} ${query.right}${String(query.strike)}; specify tradingClass (${classes})`
+      );
+    }
+    const contract = contracts[0];
+    if (!contract) throw new Error("IBKR exact derivative resolution lost its selected contract");
+    return contract;
+  }
+
+  /** Return an exact-expiration derivative chain with explicit data availability. */
+  async getDerivativeChain(query: DerivativeContractQuery): Promise<DerivativeQuote[]> {
+    const contracts = await this.getDerivativeContracts(query);
+    if (!contracts.length) {
+      throw new Error(
+        `IBKR returned no ${query.assetClass} contracts for ${query.underlying} ${query.expiration}`
+      );
+    }
+    const quotes = await this.fetchDerivativeQuotes(contracts);
+    if (!quotes.some((quote) => quote.bid !== null && quote.ask !== null)) {
+      throw new Error(
+        `IBKR returned no usable derivative quotes for ${query.underlying} ${query.expiration}`
+      );
+    }
+    return quotes;
+  }
+
   /** Discover every listed weekly/monthly expiry in the requested calendar range. */
   async getOptionExpiries(
     symbol: string,
@@ -648,6 +780,192 @@ export class IbkrClient implements BrokerClient {
           contract.strike === input.strike
       ) ?? null
     );
+  }
+
+  private discoverDerivativeMonth(
+    underlying: string,
+    assetClass: DerivativeAssetClass,
+    month: string,
+    exchange?: string,
+    right?: OptionRight,
+    strike?: number
+  ): Promise<DerivativeContract[]> {
+    const normalizedUnderlying = underlying.trim().toUpperCase();
+    if (!normalizedUnderlying) throw new Error("Derivative underlying is required");
+    const normalizedExchange = exchange?.trim().toUpperCase();
+    const key = [
+      normalizedUnderlying,
+      assetClass,
+      month,
+      normalizedExchange ?? "*",
+      right ?? "*",
+      strike === undefined ? "*" : String(strike),
+    ].join(":");
+    let pending = this.derivativeDiscovery.get(key);
+    if (!pending) {
+      pending = this.loadDerivativeContracts(
+        normalizedUnderlying,
+        assetClass,
+        month,
+        normalizedExchange,
+        right,
+        strike
+      );
+      this.derivativeDiscovery.set(key, pending);
+    }
+    return pending;
+  }
+
+  private async loadDerivativeContracts(
+    underlying: string,
+    assetClass: DerivativeAssetClass,
+    month: string,
+    requestedExchange?: string,
+    requestedRight?: OptionRight,
+    requestedStrike?: number
+  ): Promise<DerivativeContract[]> {
+    // IBKR keeps this priming state in the authenticated session. Strikes may be
+    // empty when search has not run first, even with otherwise identical params.
+    const search = await this.req<IbkrSecdefSearchResult[]>({
+      path: "iserver/secdef/search",
+      params: { symbol: underlying, ...(assetClass === "FOP" ? { secType: "FUT" } : {}) },
+    });
+    const candidates = search.filter(
+      (candidate) =>
+        candidate.conid !== undefined &&
+        candidate.symbol?.trim().toUpperCase() === underlying &&
+        candidate.sections?.some((section) => section.secType?.toUpperCase() === assetClass)
+    );
+    if (candidates.length !== 1) {
+      throw new Error(
+        `IBKR ${assetClass} underlying identity is ${candidates.length ? "ambiguous" : "missing"} for ${underlying}`
+      );
+    }
+    const candidate = candidates[0];
+    if (!candidate) throw new Error(`IBKR lost the selected underlying for ${underlying}`);
+    const conid = Number(candidate.conid);
+    if (!Number.isSafeInteger(conid) || conid <= 0) {
+      throw new Error(`IBKR returned an invalid underlying contract id for ${underlying}`);
+    }
+    const section = candidate.sections?.find((item) => item.secType?.toUpperCase() === assetClass);
+    const exchanges = (section?.exchange ?? "")
+      .split(";")
+      .map((value) => value.trim().toUpperCase())
+      .filter(Boolean);
+    if (requestedExchange && !exchanges.includes(requestedExchange)) {
+      throw new Error(
+        `IBKR does not list ${underlying} ${assetClass} discovery on ${requestedExchange}`
+      );
+    }
+    const exchange = requestedExchange ?? (exchanges.length === 1 ? exchanges[0] : undefined);
+
+    const strikes = await this.req<IbkrSecdefStrikesResponse>({
+      path: "iserver/secdef/strikes",
+      params: {
+        conid: String(conid),
+        sectype: assetClass,
+        month,
+        ...(exchange ? { exchange } : {}),
+      },
+    });
+    const availableRequests = [
+      ...(strikes.call ?? []).map((strike) => ({ strike, right: "C" as const })),
+      ...(strikes.put ?? []).map((strike) => ({ strike, right: "P" as const })),
+    ];
+    if (!availableRequests.length) {
+      throw new Error(
+        `IBKR returned empty ${assetClass} strikes for ${underlying} ${month} after secdef/search priming`
+      );
+    }
+    const requests = availableRequests.filter(
+      (request) =>
+        (requestedRight === undefined || request.right === requestedRight) &&
+        (requestedStrike === undefined || request.strike === requestedStrike)
+    );
+    if (!requests.length) {
+      return [];
+    }
+
+    const contracts: DerivativeContract[] = [];
+    for (const batch of chunks(requests, OPTION_SECDEF_INFO_BATCH_SIZE)) {
+      const responses = await Promise.all(
+        batch.map(({ strike, right }) =>
+          this.req<IbkrSecdefInfo[]>({
+            path: "iserver/secdef/info",
+            params: {
+              conid: String(conid),
+              sectype: assetClass,
+              month,
+              strike,
+              right,
+              ...(exchange ? { exchange } : {}),
+            },
+          })
+        )
+      );
+      for (const raw of responses.flat()) {
+        const contract = normalizeDerivativeContract(raw, assetClass, underlying);
+        if (contract && (!requestedExchange || contract.exchange === requestedExchange)) {
+          contracts.push(contract);
+        }
+      }
+    }
+    const unique = [...new Map(contracts.map((contract) => [contract.conid, contract])).values()];
+    if (!unique.length) {
+      throw new Error(
+        `IBKR returned no usable ${assetClass} definitions for ${underlying} ${month}`
+      );
+    }
+    return unique;
+  }
+
+  private async fetchDerivativeQuotes(
+    contracts: readonly DerivativeContract[]
+  ): Promise<DerivativeQuote[]> {
+    const result: DerivativeQuote[] = [];
+    for (const batch of chunks(contracts, OPTION_MARKETDATA_BATCH_SIZE)) {
+      const params = {
+        conids: batch.map((contract) => contract.conid).join(","),
+        fields: DERIVATIVE_QUOTE_FIELDS,
+      };
+      await this.req<unknown>({ path: "iserver/marketdata/snapshot", params });
+      await this.wait(2000);
+      const snapshots = await this.req<IbkrMarketDataSnapshot[]>({
+        path: "iserver/marketdata/snapshot",
+        params,
+      });
+      const byConid = new Map(
+        snapshots
+          .filter(
+            (snapshot): snapshot is IbkrMarketDataSnapshot & { conid: number } =>
+              snapshot.conid !== undefined
+          )
+          .map((snapshot) => [snapshot.conid, snapshot])
+      );
+      for (const contract of batch) {
+        const snapshot = byConid.get(contract.conid);
+        const updated = snapshot ? this.snapshotNumber(snapshot, "_updated") : undefined;
+        const updatedMs =
+          updated === undefined ? undefined : updated < 100_000_000_000 ? updated * 1000 : updated;
+        const updatedDate = updatedMs === undefined ? undefined : new Date(updatedMs);
+        const timestamp =
+          updatedDate && !Number.isNaN(updatedDate.getTime()) ? updatedDate.toISOString() : null;
+        result.push({
+          contract,
+          availability: normalizeDerivativeDataAvailability(snapshot?.["6509"]),
+          timestamp,
+          bid: snapshot ? (this.snapshotNumber(snapshot, "84") ?? null) : null,
+          ask: snapshot ? (this.snapshotNumber(snapshot, "86") ?? null) : null,
+          last: snapshot ? (this.snapshotNumber(snapshot, "31") ?? null) : null,
+          mark: snapshot ? (this.snapshotNumber(snapshot, "7635") ?? null) : null,
+          delta: snapshot ? (this.snapshotNumber(snapshot, "7308") ?? null) : null,
+          impliedVolatility: snapshot ? (this.snapshotNumber(snapshot, "7633") ?? null) : null,
+          volume: snapshot ? (this.snapshotVolume(snapshot) ?? null) : null,
+          openInterest: snapshot ? (this.snapshotNumber(snapshot, "7638") ?? null) : null,
+        });
+      }
+    }
+    return result;
   }
 
   private discoverOptions(symbol: string, month: string): Promise<OptionContract[]> {

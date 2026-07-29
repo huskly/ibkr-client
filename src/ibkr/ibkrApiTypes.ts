@@ -161,7 +161,7 @@ export interface IbkrMarketDataHistoryResponse {
 
 /** A security-definition search result. Calling this endpoint primes strikes for the session. */
 export interface IbkrSecdefSearchResult {
-  conid?: number;
+  conid?: number | string;
   symbol?: string;
   sections?: { secType?: string; months?: string; exchange?: string }[];
 }
@@ -174,9 +174,17 @@ export interface IbkrSecdefStrikesResponse {
 export interface IbkrSecdefInfo {
   conid?: number;
   symbol?: string;
+  secType?: string;
+  exchange?: string;
+  listingExchange?: string | null;
   maturityDate?: string;
   right?: string;
   strike?: number;
+  multiplier?: string | number;
+  tradingClass?: string;
+  validExchanges?: string;
+  settlement?: string;
+  exerciseStyle?: string;
 }
 
 /** `trsrv/secdef` response keyed by conid. */

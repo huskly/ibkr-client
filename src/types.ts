@@ -148,6 +148,82 @@ export interface PriceHistoryBar {
 
 export type OptionRight = "C" | "P";
 
+/** Derivative security types supported by IBKR security-definition discovery. */
+export type DerivativeAssetClass = "OPT" | "FOP";
+
+/** Normalized market-data timeline reported by IBKR snapshot field 6509. */
+export type DerivativeDataAvailability =
+  "live" | "delayed" | "frozen" | "frozen-delayed" | "unavailable";
+
+/** Query one exact expiration while retaining trading-class and venue identity. */
+export interface DerivativeContractQuery {
+  assetClass: DerivativeAssetClass;
+  underlying: string;
+  expiration: string;
+  exchange?: string;
+  tradingClass?: string;
+  right?: OptionRight;
+  strike?: number;
+}
+
+/** Query derivative expirations over an inclusive calendar range. */
+export interface DerivativeExpiryQuery {
+  assetClass: DerivativeAssetClass;
+  underlying: string;
+  from: string;
+  to: string;
+  exchange?: string;
+  tradingClass?: string;
+  right?: OptionRight;
+}
+
+/** A listed derivative series. No broker-local contract id is part of this identity. */
+export interface DerivativeExpiry {
+  assetClass: DerivativeAssetClass;
+  underlying: string;
+  expiration: string;
+  tradingClass: string;
+  exchange: string;
+  multiplier: number;
+}
+
+/**
+ * An exact IBKR derivative contract. All fields except {@link conid} form semantic
+ * identity; conid is broker-local and must not be persisted as durable identity.
+ */
+export interface DerivativeContract extends DerivativeExpiry {
+  conid: number;
+  strike: number;
+  right: OptionRight;
+  settlement?: string;
+  exerciseStyle?: string;
+}
+
+/** A derivative quote whose nullable fields preserve missing provider data honestly. */
+export interface DerivativeQuote {
+  contract: DerivativeContract;
+  availability: DerivativeDataAvailability;
+  timestamp: string | null;
+  bid: number | null;
+  ask: number | null;
+  last: number | null;
+  mark: number | null;
+  delta: number | null;
+  impliedVolatility: number | null;
+  volume: number | null;
+  openInterest: number | null;
+}
+
+/** Capability-specific read-only derivative discovery boundary. */
+export interface DerivativeDiscoveryClient {
+  getDerivativeExpiries(query: DerivativeExpiryQuery): Promise<DerivativeExpiry[]>;
+  getDerivativeContracts(query: DerivativeContractQuery): Promise<DerivativeContract[]>;
+  resolveDerivativeContract(
+    query: DerivativeContractQuery & { right: OptionRight; strike: number }
+  ): Promise<DerivativeContract>;
+  getDerivativeChain(query: DerivativeContractQuery): Promise<DerivativeQuote[]>;
+}
+
 /**
  * An IBKR option contract with durable OSI identity. The conid is intentionally retained
  * only at this broker boundary; consumers should persist {@link symbol}, not {@link conid}.
