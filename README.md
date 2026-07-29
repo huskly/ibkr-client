@@ -21,6 +21,7 @@ The repository contains only the reusable client library:
 | `src/ibkr/oauthConfig.ts`    | Builds the OAuth config from `.pem` files + env vars                        |
 | `src/ibkr/dhPrime.ts`        | Extracts the DH prime (hex) from `dhparam.pem`                              |
 | `src/ibkr/optionContract.ts` | Canonical OSI parsing and formatting for IBKR option contracts              |
+| `src/ibkr/derivativeContract.ts` | Normalizes OPT/FOP identity and market-data availability              |
 
 The `*.pem` files (`private_signature.pem`, `private_encryption.pem`,
 `dhparam.pem`, plus the public keys) are the cryptographic material from the
@@ -78,6 +79,53 @@ The reusable `IbkrClient` also exposes typed, read-only strategy data:
   bid/ask/mid prices, delta, session volume, and open interest.
 - `getOptionQuote(...)` resolves and prices one exact contract with the same market-data shape.
 - `getOptionContract(conid)` maps a broker conid back to durable OSI identity.
+
+### Broker-neutral derivative discovery
+
+`IbkrClient` implements the capability-specific `DerivativeDiscoveryClient` without adding
+derivative operations to the smaller account-oriented `BrokerClient`:
+
+- `getDerivativeExpiries(...)` lists exact series identity over a calendar range.
+- `getDerivativeContracts(...)` discovers all matching contracts for one expiration.
+- `resolveDerivativeContract(...)` returns exactly one contract and rejects ambiguous trading
+  classes.
+- `getDerivativeChain(...)` prices one exact expiration and fails when no usable bid/ask exists.
+
+Both `OPT` and `FOP` use the stateful `secdef/search` -> `secdef/strikes` -> `secdef/info`
+sequence. FOP discovery derives a unique exchange such as CME from the search result when the
+caller does not provide one. Index-option callers can select a venue explicitly, such as SMART.
+
+```ts
+const nq = await client.resolveDerivativeContract({
+  assetClass: "FOP",
+  underlying: "NQ",
+  expiration: "2026-08-21",
+  strike: 26600,
+  right: "P",
+  tradingClass: "QN3",
+});
+// nq.multiplier === 20; nq.exchange === "CME"
+
+const ndxp = await client.resolveDerivativeContract({
+  assetClass: "OPT",
+  underlying: "NDX",
+  expiration: "2026-08-20",
+  strike: 26600,
+  right: "P",
+  tradingClass: "NDXP",
+  exchange: "SMART",
+});
+```
+
+Semantic identity consists of asset class, underlying, expiration, strike, right, trading class,
+exchange, and multiplier. `conid` is returned only because this package is the IBKR boundary; it
+is broker-local, can change, and must not be persisted as durable strategy identity. Optional
+settlement and exercise-style fields are preserved when IBKR supplies them.
+
+Derivative quotes use nullable values for missing prices and Greeks and normalize field `6509`
+to `live`, `delayed`, `frozen`, `frozen-delayed`, or `unavailable`. A missing subscription is
+never reported as live data. All discovery APIs are read-only and do not call preview, order,
+warning-reply, or cancellation endpoints.
 
 Contract discovery always calls `secdef/search` before `secdef/strikes`, because IBKR keeps
 that priming state in the authenticated session. Empty post-prime strikes and incomplete
