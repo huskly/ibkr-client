@@ -160,6 +160,29 @@ normalized result includes paper/live environment, commission, initial and maint
 warnings, rejection reasons, and `submitted: false`. An incomplete nominal success fails closed.
 Permission metadata is diagnostic only; the What-If response remains authoritative.
 
+### Guarded derivative order execution
+
+`IbkrClient` implements a separate `DerivativeExecutionClient` capability for callers that have
+already enforced their own reviewed-preview workflow. It does not persist previews or decide
+whether live execution is allowed.
+
+- `submitDerivativeCombo(...)` places one atomic combo with the exact legs, signed ratios,
+  quantity, price effect, limit, TIF, and session supplied by the caller. The request requires a
+  unique client order ID plus CME `manualIndicator` and `extOperator` metadata.
+- `acknowledgeOrderWarning(...)` replies once to an exact broker warning ID. Only documented
+  warning message IDs are marked `known`; consumers must stop on unknown warnings.
+- `getDerivativeOrderStatus(...)` performs a fresh order read and normalizes pending, working,
+  partial-fill, fill, canceled, rejected, and unknown lifecycle states with leg ratios and order
+  economics.
+- `cancelDerivativeOrder(...)` sends one exact cancellation request with the required operator
+  metadata. Callers remain responsible for reading until a terminal state and verifying that a
+  cancellation actually reached `CANCELED`.
+
+Placement, warning replies, and cancellation deliberately use single-attempt HTTP writes so a
+transport retry cannot duplicate a broker action. A BUY-oriented net credit remains negative at
+the IBKR boundary, matching the What-If ticket exactly. Every write requires the exact account ID;
+the library never falls back to the first account.
+
 ### Authorized read-only smoke test
 
 Run this only after the account owner authorizes a read-only brokerage request and the OAuth
