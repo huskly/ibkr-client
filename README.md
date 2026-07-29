@@ -90,6 +90,8 @@ derivative operations to the smaller account-oriented `BrokerClient`:
 - `resolveDerivativeContract(...)` returns exactly one contract and rejects ambiguous trading
   classes.
 - `getDerivativeChain(...)` prices one exact expiration and fails when no usable bid/ask exists.
+- `getDerivativeReferenceQuote(...)` follows IBKR's `undConid` to quote the actual linked
+  underlying contract, such as the September NQ future behind an August QN3 option.
 
 Both `OPT` and `FOP` use the stateful `secdef/search` -> `secdef/strikes` -> `secdef/info`
 sequence. FOP discovery derives a unique exchange such as CME from the search result when the

@@ -187,6 +187,18 @@ export interface IbkrSecdefInfo {
   exerciseStyle?: string;
 }
 
+/** `trsrv/secdef` response used to locate a derivative's broker-linked underlying. */
+export interface IbkrSecdefContract {
+  conid?: number;
+  ticker?: string;
+  undConid?: number;
+  undSym?: string;
+}
+
+export interface IbkrSecdefResponse {
+  secdef?: IbkrSecdefContract[];
+}
+
 /** `trsrv/secdef` response keyed by conid. */
 export type IbkrSecdefByConidResponse = Record<
   string,

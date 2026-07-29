@@ -214,6 +214,18 @@ export interface DerivativeQuote {
   openInterest: number | null;
 }
 
+/** Broker-linked market reference for a derivative's true underlying contract. */
+export interface DerivativeReferenceQuote {
+  conid: number;
+  symbol: string;
+  availability: DerivativeDataAvailability;
+  timestamp: string | null;
+  bid: number | null;
+  ask: number | null;
+  last: number | null;
+  mark: number | null;
+}
+
 /** Capability-specific read-only derivative discovery boundary. */
 export interface DerivativeDiscoveryClient {
   getDerivativeExpiries(query: DerivativeExpiryQuery): Promise<DerivativeExpiry[]>;
@@ -222,6 +234,7 @@ export interface DerivativeDiscoveryClient {
     query: DerivativeContractQuery & { right: OptionRight; strike: number }
   ): Promise<DerivativeContract>;
   getDerivativeChain(query: DerivativeContractQuery): Promise<DerivativeQuote[]>;
+  getDerivativeReferenceQuote(contract: DerivativeContract): Promise<DerivativeReferenceQuote>;
 }
 
 /**

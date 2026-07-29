@@ -309,3 +309,63 @@ void test("derivative timestamps accept IBKR epoch seconds as well as millisecon
   assert.equal(quote?.timestamp, "2023-06-01T06:13:20.000Z");
   assert.equal(quote?.availability, "delayed");
 });
+
+void test("FOP reference quotes follow the broker-linked futures conid", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/secdef") {
+      return {
+        secdef: [
+          {
+            conid: 892767774,
+            ticker: "NQ",
+            undConid: 770561204,
+            undSym: "NQ",
+          },
+        ],
+      };
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return snapshots === 1
+        ? []
+        : [
+            {
+              conid: 770561204,
+              "31": "27865.50",
+              "55": "NQ",
+              "84": "27865.00",
+              "86": "27866.50",
+              "6509": "RB",
+              "7635": "27864.25",
+              _updated: 1785348475692,
+            },
+          ];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const reference = await client.getDerivativeReferenceQuote({
+    conid: 892767774,
+    assetClass: "FOP",
+    underlying: "NQ",
+    expiration: "2026-08-21",
+    strike: 26600,
+    right: "P",
+    tradingClass: "QN3",
+    exchange: "CME",
+    multiplier: 20,
+  });
+  assert.deepEqual(reference, {
+    conid: 770561204,
+    symbol: "NQ",
+    availability: "live",
+    timestamp: "2026-07-29T18:07:55.692Z",
+    bid: 27865,
+    ask: 27866.5,
+    last: 27865.5,
+    mark: 27864.25,
+  });
+  assert.equal(client.calls[0]?.params?.["conids"], "892767774");
+  assert.ok(client.calls.every((call) => !call.path.includes("/orders")));
+});
