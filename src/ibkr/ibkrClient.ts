@@ -18,9 +18,14 @@ import type {
   DerivativeAssetClass,
   DerivativeContract,
   DerivativeContractQuery,
+  DerivativeComboExecutionRequest,
   DerivativeComboPreviewRequest,
   DerivativeComboPreviewResult,
   DerivativeDiscoveryClient,
+  DerivativeExecutionClient,
+  DerivativeOrderLifecycle,
+  DerivativeOrderStatus,
+  DerivativeOrderSubmissionResult,
   DerivativePreviewClient,
   DerivativeExpiry,
   DerivativeExpiryQuery,
@@ -40,6 +45,7 @@ import type {
   IbkrBrokerageAccountsResponse,
   IbkrLiveOrder,
   IbkrLiveOrdersResponse,
+  IbkrOrderSubmissionResponse,
   IbkrMarketDataHistoryBar,
   IbkrMarketDataHistoryResponse,
   IbkrMarketDataSnapshot,
@@ -151,6 +157,7 @@ const IBKR_WORKING_STATUSES = new Set([
   "SUBMITTED",
   "PENDING_CANCEL",
 ]);
+const KNOWN_ORDER_WARNING_IDS = new Set(["o163"]);
 
 /** Extract the canonical OSI symbol embedded in an IBKR option description. */
 function extractOsiPositionSymbol(contractDescription: string): string | undefined {
@@ -244,7 +251,11 @@ function monthCodes(fromDate: string, toDate: string): string[] {
  * (main.py): account summary, positions paging, and day-P/L snapshots.
  */
 export class IbkrClient
-  implements BrokerClient, DerivativeDiscoveryClient, DerivativePreviewClient
+  implements
+    BrokerClient,
+    DerivativeDiscoveryClient,
+    DerivativePreviewClient,
+    DerivativeExecutionClient
 {
   private readonly raw: RawIbkrClient;
   private initPromise?: Promise<void>;
@@ -315,30 +326,103 @@ export class IbkrClient
       path: "iserver/marketdata/snapshot",
       params: { conids, fields: "6509" },
     });
-    const exchange = request.legs[0].contract.exchange;
-    const spreadConid = exchange === "SMART" ? "28812380" : `28812380@${exchange}`;
-    const conidex = `${spreadConid};;;${request.legs
-      .map(({ contract, ratio }) => `${String(contract.conid)}/${String(ratio)}`)
-      .join(",")}`;
     const response = await this.req<IbkrWhatIfResponse>({
       path: `iserver/account/${request.accountId}/orders/whatif`,
       method: "POST",
       data: {
+        orders: [this.comboOrderTicket(request)],
+      },
+    });
+    return this.normalizeComboPreview(request.accountId, diagnostics, response);
+  }
+
+  async submitDerivativeCombo(
+    request: DerivativeComboExecutionRequest
+  ): Promise<DerivativeOrderSubmissionResult> {
+    this.validateComboPreview(request);
+    if (!request.clientOrderId.trim() || request.clientOrderId.length > 64) {
+      throw new Error("Client order ID must contain 1 to 64 characters");
+    }
+    if (!request.extOperator.trim()) throw new Error("External operator is required");
+    const diagnostics = await this.getTradingDiagnostics(request.accountId);
+    if (!diagnostics.authenticated || diagnostics.competingSession) {
+      throw new Error("IBKR brokerage session is not safely authenticated for submission");
+    }
+    await this.prepareBrokerageAccount(request.accountId);
+    const response = await this.sendRequest<
+      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+    >({
+      path: `iserver/account/${request.accountId}/orders`,
+      method: "POST",
+      data: {
         orders: [
           {
-            acctId: request.accountId,
-            conidex,
-            orderType: "LMT",
-            price: request.priceEffect === "CREDIT" ? -request.limit : request.limit,
-            side: "BUY",
-            tif: request.tif,
-            quantity: request.quantity,
-            outsideRTH: request.session === "OVERNIGHT",
+            ...this.comboOrderTicket(request),
+            cOID: request.clientOrderId,
+            extOperator: request.extOperator,
+            manualIndicator: request.manualIndicator,
           },
         ],
       },
     });
-    return this.normalizeComboPreview(request.accountId, diagnostics, response);
+    return this.normalizeOrderSubmission(response, request.clientOrderId);
+  }
+
+  async acknowledgeOrderWarning(input: {
+    replyId: string;
+    confirmed: true;
+  }): Promise<DerivativeOrderSubmissionResult> {
+    if (!input.replyId.trim()) throw new Error("An exact warning reply ID is required");
+    const response = await this.sendRequest<
+      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+    >({
+      path: `iserver/reply/${encodeURIComponent(input.replyId)}`,
+      method: "POST",
+      data: { confirmed: true },
+    });
+    return this.normalizeOrderSubmission(response, null);
+  }
+
+  async getDerivativeOrderStatus(
+    accountId: string,
+    orderId: string
+  ): Promise<DerivativeOrderLifecycle> {
+    if (!accountId.trim() || !orderId.trim()) {
+      throw new Error("Exact account and order IDs are required");
+    }
+    await this.prepareBrokerageAccount(accountId);
+    const response = await this.req<IbkrLiveOrdersResponse>({
+      path: "iserver/account/orders",
+      params: { force: true, accountId },
+    });
+    const order = response.orders?.find(
+      (candidate) => String(candidate.order_id ?? candidate.orderId) === orderId
+    );
+    if (order === undefined) throw new Error(`IBKR order ${orderId} was not found`);
+    if (!this.orderBelongsToAccount(order, accountId)) {
+      throw new Error(`IBKR order ${orderId} does not belong to the requested account`);
+    }
+    return this.normalizeDerivativeOrderLifecycle(accountId, orderId, order);
+  }
+
+  async cancelDerivativeOrder(input: {
+    accountId: string;
+    orderId: string;
+    extOperator: string;
+    manualIndicator: boolean;
+  }): Promise<void> {
+    if (!input.accountId.trim() || !input.orderId.trim() || !input.extOperator.trim()) {
+      throw new Error("Exact account, order, and external operator are required");
+    }
+    await this.prepareBrokerageAccount(input.accountId);
+    await this.sendRequest<unknown>({
+      path: `iserver/account/${input.accountId}/order/${encodeURIComponent(input.orderId)}`,
+      method: "DELETE",
+      params: {
+        extOperator: input.extOperator,
+        manualIndicator: input.manualIndicator,
+      },
+    });
   }
 
   async getAccountId(): Promise<string> {
@@ -599,6 +683,146 @@ export class IbkrClient
         throw new Error(`Combo legs differ on ${field}`);
       }
     }
+  }
+
+  private comboOrderTicket(request: DerivativeComboPreviewRequest): {
+    acctId: string;
+    conidex: string;
+    orderType: "LMT";
+    price: number;
+    side: "BUY";
+    tif: "DAY" | "GTC";
+    quantity: number;
+    outsideRTH: boolean;
+  } {
+    const exchange = request.legs[0].contract.exchange;
+    const spreadConid = exchange === "SMART" ? "28812380" : `28812380@${exchange}`;
+    return {
+      acctId: request.accountId,
+      conidex: `${spreadConid};;;${request.legs
+        .map(({ contract, ratio }) => `${String(contract.conid)}/${String(ratio)}`)
+        .join(",")}`,
+      orderType: "LMT",
+      price: request.priceEffect === "CREDIT" ? -request.limit : request.limit,
+      side: "BUY",
+      tif: request.tif,
+      quantity: request.quantity,
+      outsideRTH: request.session === "OVERNIGHT",
+    };
+  }
+
+  private normalizeOrderSubmission(
+    response: IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[],
+    clientOrderId: string | null
+  ): DerivativeOrderSubmissionResult {
+    const items = Array.isArray(response) ? response : [response];
+    const warnings = items.flatMap((item) => {
+      if (!("id" in item) || typeof item.id !== "string") return [];
+      const messageIds = item.messageIds?.filter((value) => typeof value === "string") ?? [];
+      return [
+        {
+          replyId: item.id,
+          messages: item.message?.filter((value) => typeof value === "string") ?? [],
+          messageIds,
+          known: messageIds.length > 0 && messageIds.every((id) => KNOWN_ORDER_WARNING_IDS.has(id)),
+        },
+      ];
+    });
+    if (warnings.length > 0) return { state: "warning", warnings };
+    const reasons = items.flatMap((item) =>
+      "error" in item && typeof item.error === "string" && item.error.trim()
+        ? [item.error.trim()]
+        : []
+    );
+    if (reasons.length > 0) return { state: "rejected", reasons };
+    const accepted = items.find((item) => "order_id" in item || "orderId" in item);
+    if (accepted !== undefined) {
+      const orderId =
+        ("order_id" in accepted ? accepted.order_id : undefined) ??
+        ("orderId" in accepted ? accepted.orderId : undefined);
+      if (orderId !== undefined) {
+        return {
+          state: "accepted",
+          orderId: String(orderId),
+          status: this.normalizeDerivativeOrderStatus(
+            ("order_status" in accepted ? accepted.order_status : undefined) ??
+              ("orderStatus" in accepted ? accepted.orderStatus : undefined),
+            0,
+            0
+          ),
+          clientOrderId,
+          warnings: [],
+        };
+      }
+    }
+    return { state: "rejected", reasons: ["IBKR returned an unknown order response"] };
+  }
+
+  private normalizeDerivativeOrderLifecycle(
+    accountId: string,
+    orderId: string,
+    order: IbkrLiveOrder
+  ): DerivativeOrderLifecycle {
+    const quantity = this.firstPositiveNumber(order.total_size, order.totalSize, order.size) ?? 0;
+    const filledQuantity =
+      this.firstNumber(order.cum_fill, order.cumFill, order.filledQuantity) ?? 0;
+    const remainingQuantity =
+      order.remainingQuantity === undefined
+        ? Math.max(0, quantity - filledQuantity)
+        : toNumber(order.remainingQuantity);
+    return {
+      accountId,
+      orderId,
+      clientOrderId: order.cOID ?? null,
+      status: this.normalizeDerivativeOrderStatus(
+        order.order_status ?? order.orderStatus ?? order.status,
+        filledQuantity,
+        remainingQuantity
+      ),
+      quantity,
+      filledQuantity,
+      remainingQuantity,
+      averagePrice:
+        this.firstNumber(order.avgPrice, order.average_price, order.averagePrice) ?? null,
+      limitPrice: this.firstNumber(order.limitPrice, order.price) ?? null,
+      commissionAndFees:
+        typeof order.commissionAndFees === "number"
+          ? order.commissionAndFees
+          : this.whatIfNumber(order.commissionAndFees),
+      legs: this.parseComboLegs(order.conidex),
+      updatedAt: this.parseOrderTime(order)?.toISOString() ?? null,
+    };
+  }
+
+  private parseComboLegs(conidex: string | undefined): { conid: number; ratio: number }[] {
+    const encoded = conidex?.split(";;;")[1];
+    if (!encoded) return [];
+    return encoded.split(",").flatMap((leg) => {
+      const [conidValue, ratioValue] = leg.split("/");
+      const conid = Number(conidValue);
+      const ratio = Number(ratioValue);
+      return Number.isSafeInteger(conid) && conid > 0 && Number.isSafeInteger(ratio) && ratio !== 0
+        ? [{ conid, ratio }]
+        : [];
+    });
+  }
+
+  private normalizeDerivativeOrderStatus(
+    value: string | undefined,
+    filledQuantity: number,
+    remainingQuantity: number
+  ): DerivativeOrderStatus {
+    const status = value
+      ?.replace(/([a-z])([A-Z])/g, "$1_$2")
+      .replace(/\s+/g, "_")
+      .toUpperCase();
+    if (filledQuantity > 0 && remainingQuantity > 0) return "PARTIALLY_FILLED";
+    if (status === "FILLED") return "FILLED";
+    if (status === "CANCELLED" || status === "CANCELED") return "CANCELED";
+    if (status === "INACTIVE" || status === "REJECTED") return "REJECTED";
+    if (status === "API_PENDING" || status === "PENDING_SUBMIT") return "PENDING";
+    if (status !== undefined && IBKR_WORKING_STATUSES.has(status)) return "WORKING";
+    return "UNKNOWN";
   }
 
   private normalizeComboPreview(
