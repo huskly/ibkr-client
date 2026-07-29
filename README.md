@@ -1,10 +1,10 @@
-# IBKR CLI (`@huskly/ibkr-client`)
+# IBKR Client (`@huskly/ibkr-client`)
 
-A terminal trading CLI for the **Interactive Brokers Web API**, authenticating
-over **OAuth 1.0a** (no Client Portal Gateway required). Built to mirror the
-IBKR transport boundary used by
-[huskly-cli](https://github.com/felipecsl/huskly-cli), the multi-broker CLI for
-IBKR and Schwab.
+A reusable TypeScript client for the **Interactive Brokers Web API**,
+authenticating over **OAuth 1.0a** without the Client Portal Gateway. This
+package contains no command-line interface; terminal commands and presentation
+belong exclusively in
+[huskly-cli](https://github.com/felipecsl/huskly-cli).
 
 The OAuth 1.0a live-session-token handshake is performed by the
 [`ibkr-client`](https://github.com/art1c0/ibkr-client) package. See the
@@ -13,17 +13,15 @@ the keys below are generated and registered in the IBKR self-service portal.
 
 ## Layout
 
-The repo is split into a reusable **library** and a thin **CLI**, mirroring
-huskly-cli's `@huskly/schwab-client` + CLI split:
+The repository contains only the reusable client library:
 
 | Path                     | Purpose                                                                  |
 | ------------------------ | ------------------------------------------------------------------------ |
-| `src/types.ts`           | Broker-neutral `BrokerClient` interface + domain types (the merge contract) |
+| `src/types.ts`           | Broker-neutral `BrokerClient` interface and normalized domain types         |
 | `src/ibkr/ibkrClient.ts` | `IbkrClient` — typed wrapper over `ibkr-client` implementing `BrokerClient` |
 | `src/ibkr/oauthConfig.ts`| Builds the OAuth config from `.pem` files + env vars                      |
 | `src/ibkr/dhPrime.ts`    | Extracts the DH prime (hex) from `dhparam.pem`                            |
 | `src/ibkr/optionContract.ts` | Canonical OSI parsing and formatting for IBKR option contracts        |
-| `src/cli/`               | `commander` program, `--broker` flag, and command handlers               |
 
 The `*.pem` files (`private_signature.pem`, `private_encryption.pem`,
 `dhparam.pem`, plus the public keys) are the cryptographic material from the
@@ -32,7 +30,7 @@ wiki setup step and are git-ignored.
 ## Setup
 
 ```bash
-npm install
+yarn install --frozen-lockfile
 ```
 
 Provide the account-specific secrets, either by copying the template:
@@ -59,46 +57,11 @@ Optional environment variables:
 - `IBKR_ACCOUNT_ID` — target a specific account (otherwise the first is used).
 - `IBKR_TRANSACTION_CURRENCY` — transaction-query currency (defaults to `USD`).
 
-## Usage
-
-Run in development (via `tsx`, no build step):
-
-```bash
-npm run dev -- account
-npm run dev -- positions
-npm run dev -- positions AAPL          # filter by symbol
-npm run dev -- positions --type EQUITY # filter by asset type
-npm run dev -- positions --csv         # CSV instead of a table
-```
-
-Or build and use the `ibkr-cli` binary:
-
-```bash
-npm run build
-node dist/cli/index.js account
-```
-
-A global `--broker <ibkr|schwab>` flag (default `ibkr`) selects the broker.
-Only IBKR is implemented today; `schwab` is reserved for the huskly-cli merge.
-
-Example output:
-
-```
-💰 Account Summary
-
-Authenticated: yes   Competing: no
-Account:       U********
-──────────────────────────────────────────────────
-Net Liquidation:  $123,456.78
-Available Funds:  $...
-...
-```
-
 ## Library API
 
 `IbkrClient` owns IBKR authentication, requests, raw response types, and
-normalization. Consumers such as `@huskly/cli` provide only presentation and
-caching adapters. Its broker-neutral account API includes:
+normalization. Consumers such as huskly-cli provide presentation, command
+routing, and caching. Its broker-neutral account API includes:
 
 - `getAccountBalances()` and `getPositions()` for account state.
 - `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes.
@@ -166,12 +129,12 @@ NODE
 ## Development
 
 ```bash
-npm run lint          # eslint
-npm run format        # prettier --write
-npm run typecheck     # tsc --noEmit
-npm test              # typecheck + native node:test suite
-npm run build         # tsc -> dist/
-npm run check         # lint + format:check + typecheck
+yarn lint       # eslint
+yarn format     # prettier --write
+yarn typecheck  # tsc --noEmit
+yarn test       # typecheck + native node:test suite
+yarn build      # tsc -> dist/
+yarn run check  # lint + format:check + typecheck
 ```
 
 CI (`.github/workflows/ci.yml`) runs lint, format check, typecheck, tests, and build on

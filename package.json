@@ -1,7 +1,7 @@
 {
   "name": "@huskly/ibkr-client",
   "version": "0.7.0",
-  "description": "Interactive Brokers Web API client (OAuth 1.0a) and terminal CLI",
+  "description": "Interactive Brokers Web API client with OAuth 1.0a authentication",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,9 +10,6 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
-  },
-  "bin": {
-    "ibkr-cli": "./dist/cli/index.js"
   },
   "files": [
     "dist"
@@ -25,7 +22,6 @@
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx src/cli/index.ts",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
     "format": "prettier --write \"{src,test}/**/*.ts\"",
@@ -33,12 +29,10 @@
     "typecheck": "tsc --noEmit",
     "test": "tsc --noEmit -p tsconfig.test.json && node --import tsx --test test/**/*.test.ts",
     "clean": "rm -rf dist",
-    "check": "npm run lint && npm run format:check && npm run typecheck",
-    "prepublishOnly": "npm run clean && npm run build"
+    "check": "yarn lint && yarn format:check && yarn typecheck",
+    "prepublishOnly": "yarn clean && yarn build"
   },
   "dependencies": {
-    "chalk": "^5.6.2",
-    "commander": "^15.0.0",
     "dotenv": "^17.2.3",
     "ibkr-client": "^1.0.4"
   },

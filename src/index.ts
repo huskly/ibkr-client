@@ -11,7 +11,6 @@ export type {
   BrokerOrder,
   BrokerOrderLeg,
   BrokerOrdersOptions,
-  BrokerName,
   BrokerPosition,
   BrokerQuote,
   BrokerQuoteData,

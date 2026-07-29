@@ -1,14 +1,10 @@
 /**
- * Broker-neutral domain types shared across the CLI.
+ * Broker-neutral domain types exposed by the IBKR client.
  *
- * Command handlers render these normalized shapes and never touch raw broker
- * JSON. Both the IBKR client (here) and Schwab (when this is merged into
- * huskly-cli) implement {@link BrokerClient}, so a single set of handlers can
- * serve either broker. The field names mirror huskly-cli's `getAccountBalances`
- * / `SchwabPosition` shapes to keep that future merge mechanical.
+ * The client normalizes raw IBKR JSON into these shapes so consumers do not
+ * depend on provider-specific response payloads. The field names align with
+ * the broker-neutral interfaces consumed by huskly-cli.
  */
-
-export type BrokerName = "ibkr" | "schwab";
 
 export type BrokerInstrumentSearchProjection =
   "symbol-search" | "symbol-regex" | "desc-search" | "desc-regex" | "search" | "fundamental";
@@ -190,8 +186,9 @@ export interface OptionQuoteRequest {
 }
 
 /**
- * The contract every broker client satisfies. Kept intentionally small (account,
- * positions, quotes); extend as commands are added.
+ * The broker-neutral contract implemented by {@link IbkrClient}. Kept
+ * intentionally small around account, position, quote, transaction, and order
+ * data needed by consumers.
  */
 export interface BrokerClient {
   getAuthStatus(): Promise<AuthStatus>;
