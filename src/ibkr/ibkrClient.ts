@@ -4,10 +4,17 @@ import type { IbkrOauth1Config } from "./oauthConfig.js";
 import type {
   AccountBalances,
   AuthStatus,
+  BrokerAccountOrders,
   BrokerClient,
   BrokerInstrument,
+  BrokerInstrumentSearchProjection,
+  BrokerOrder,
+  BrokerOrderLeg,
+  BrokerOrdersOptions,
   BrokerPosition,
   BrokerQuote,
+  BrokerTransaction,
+  BrokerTransactionHistory,
   OptionContract,
   OptionMarketQuote,
   OptionQuoteRequest,
@@ -18,6 +25,9 @@ import type {
 import { ASSET_CLASS_LABELS, toNumber } from "../helpers.js";
 import type {
   IbkrAuthStatus,
+  IbkrBrokerageAccountsResponse,
+  IbkrLiveOrder,
+  IbkrLiveOrdersResponse,
   IbkrMarketDataHistoryBar,
   IbkrMarketDataHistoryResponse,
   IbkrMarketDataSnapshot,
@@ -31,6 +41,9 @@ import type {
   IbkrStockContract,
   IbkrStockListing,
   IbkrStocksResponse,
+  IbkrSwitchAccountResponse,
+  IbkrTransaction,
+  IbkrTransactionsResponse,
 } from "./ibkrApiTypes.js";
 import { normalizeOptionContract, parseOsiOptionSymbol } from "./optionContract.js";
 
@@ -84,6 +97,28 @@ const OPTION_MARKETDATA_BATCH_SIZE = 100;
 const READ_ONLY_REQUEST_MAX_RETRIES = 3;
 const REQUEST_RETRY_BASE_DELAY_MS = 250;
 const REQUEST_RETRY_MAX_DELAY_MS = 5_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const IBKR_STATUS_FILTERS: Readonly<Record<string, string>> = {
+  CANCELED: "cancelled",
+  CANCELLED: "cancelled",
+  FILLED: "filled",
+  PENDING_CANCEL: "pending_cancel",
+  PENDING_SUBMIT: "pending_submit",
+  PRE_SUBMITTED: "pre_submitted",
+  SUBMITTED: "submitted",
+};
+const IBKR_WORKING_STATUSES = new Set([
+  "API_PENDING",
+  "PENDING_SUBMIT",
+  "PRE_SUBMITTED",
+  "SUBMITTED",
+  "PENDING_CANCEL",
+]);
+
+/** Extract the canonical OSI symbol embedded in an IBKR option description. */
+function extractOsiPositionSymbol(contractDescription: string): string | undefined {
+  return /\[([A-Z]+\s*\d{6}[CP]\d{8})\s+\d+\]\s*$/.exec(contractDescription)?.[1];
+}
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -281,8 +316,13 @@ export class IbkrClient implements BrokerClient {
   private normalizePosition(p: IbkrPosition, dayPnl: Map<number, number>): BrokerPosition {
     const qty = p.position ?? 0;
     const assetClass = p.assetClass ?? "";
+    const contractDescription = p.contractDesc ?? String(p.conid ?? "-");
+    const symbol =
+      assetClass === "OPT"
+        ? (extractOsiPositionSymbol(contractDescription) ?? contractDescription)
+        : contractDescription;
     return {
-      symbol: p.contractDesc ?? String(p.conid ?? "-"),
+      symbol,
       assetType: ASSET_CLASS_LABELS[assetClass] ?? (assetClass || "-"),
       longQuantity: qty > 0 ? qty : 0,
       shortQuantity: qty < 0 ? Math.abs(qty) : 0,
@@ -337,7 +377,15 @@ export class IbkrClient implements BrokerClient {
   }
 
   /** Resolve equity/ETF symbols to IBKR contracts via `trsrv/stocks`. */
-  private async searchInstruments(symbol: string): Promise<BrokerInstrument[]> {
+  async searchInstruments(
+    symbol: string,
+    projection: BrokerInstrumentSearchProjection = "symbol-search"
+  ): Promise<BrokerInstrument[]> {
+    if (projection !== "symbol-search" && projection !== "search") {
+      throw new Error(
+        `IBKR search currently supports only symbol-search/search projections (got '${projection}').`
+      );
+    }
     const query = symbol.trim().toUpperCase();
     if (!query) return [];
 
@@ -347,6 +395,87 @@ export class IbkrClient implements BrokerClient {
     });
 
     return (response[query] ?? []).flatMap((listing) => this.normalizeStockListing(query, listing));
+  }
+
+  async fetchTransactionHistory(
+    startDate: Date,
+    endDate: Date
+  ): Promise<BrokerTransactionHistory[]> {
+    const accountId = await this.getAccountId();
+    const rows = await this.fetchAllPositions(accountId);
+    const positionsByConid = new Map(
+      rows
+        .filter(
+          (position): position is IbkrPosition & { conid: number } => position.conid !== undefined
+        )
+        .map((position) => [position.conid, position])
+    );
+    const transactionsByKey = new Map<string, BrokerTransaction>();
+    const days = Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / DAY_MS) + 1);
+
+    for (const conid of positionsByConid.keys()) {
+      const response = await this.req<IbkrTransactionsResponse>({
+        path: "pa/transactions",
+        method: "POST",
+        data: {
+          acctIds: [accountId],
+          conids: [conid],
+          currency: process.env["IBKR_TRANSACTION_CURRENCY"] ?? "USD",
+          days,
+        },
+      });
+
+      for (const transaction of response.transactions ?? []) {
+        const normalized = this.normalizeTransaction(transaction, positionsByConid);
+        const time = new Date(normalized.time).getTime();
+        if (time < startDate.getTime() || time > endDate.getTime()) continue;
+        transactionsByKey.set(this.transactionKey(normalized), normalized);
+      }
+    }
+
+    return [{ accountNumber: accountId, transactions: [...transactionsByKey.values()] }];
+  }
+
+  async fetchOrders(options: BrokerOrdersOptions): Promise<BrokerAccountOrders[]> {
+    const accountId = await this.getAccountId();
+    await this.prepareBrokerageAccount(accountId);
+
+    const params: Record<string, string | boolean> = {};
+    if (options.status && options.status.toUpperCase() !== "WORKING") {
+      params["filters"] = this.ibkrStatusFilter(options.status);
+    }
+
+    const response = await this.req<IbkrLiveOrdersResponse>({
+      path: "iserver/account/orders",
+      params,
+    });
+
+    let orders = (response.orders ?? [])
+      .filter((order) => this.orderBelongsToAccount(order, accountId))
+      .map((order) => this.normalizeOrder(order))
+      .filter((order) => this.orderMatchesStatus(order, options.status))
+      .filter((order) =>
+        this.orderInDateRange(order, options.fromEnteredTime, options.toEnteredTime)
+      )
+      .sort((left, right) => this.orderTimeMs(right) - this.orderTimeMs(left));
+
+    if (options.maxResults !== undefined) orders = orders.slice(0, options.maxResults);
+    return [{ accountNumber: accountId, orders }];
+  }
+
+  private async prepareBrokerageAccount(accountId: string): Promise<void> {
+    const brokerageAccounts = await this.req<IbkrBrokerageAccountsResponse>({
+      path: "iserver/accounts",
+    });
+    if (brokerageAccounts.selectedAccount === accountId) return;
+    if (brokerageAccounts.accounts && !brokerageAccounts.accounts.includes(accountId)) {
+      throw new Error(`IBKR account ${accountId} is not available for trading/order queries.`);
+    }
+    await this.req<IbkrSwitchAccountResponse>({
+      path: "iserver/account",
+      method: "POST",
+      data: { acctId: accountId },
+    });
   }
 
   private normalizeStockListing(symbol: string, listing: IbkrStockListing): BrokerInstrument[] {
@@ -695,6 +824,269 @@ export class IbkrClient implements BrokerClient {
       if (!suppressErrors) throw error;
       return undefined;
     }
+  }
+
+  private normalizeTransaction(
+    transaction: IbkrTransaction,
+    positionsByConid: ReadonlyMap<number, IbkrPosition>
+  ): BrokerTransaction {
+    const conid = transaction.conid;
+    const position = conid === undefined ? undefined : positionsByConid.get(conid);
+    const assetType =
+      position?.assetClass === undefined
+        ? undefined
+        : (ASSET_CLASS_LABELS[position.assetClass] ?? position.assetClass);
+    const symbol = position?.contractDesc ?? (conid === undefined ? undefined : String(conid));
+    const description = transaction.desc ?? symbol;
+    const time = this.parseTransactionTime(transaction)?.toISOString() ?? "";
+    const type = (transaction.type ?? "TRANSACTION").toUpperCase();
+    const transferItem = {
+      instrument: {
+        ...(assetType === undefined ? {} : { assetType }),
+        ...(symbol === undefined ? {} : { symbol }),
+        ...(description === undefined ? {} : { description }),
+      },
+      ...(transaction.qty === undefined ? {} : { amount: transaction.qty }),
+      ...(transaction.pr === undefined ? {} : { cost: transaction.pr }),
+      transferItemType: type,
+    };
+    const activityId = [
+      conid === undefined ? "unknown" : String(conid),
+      time,
+      transaction.qty === undefined ? "" : String(transaction.qty),
+      transaction.amt === undefined ? "" : String(transaction.amt),
+    ].join(":");
+
+    return {
+      activityId,
+      time,
+      type,
+      status: "VALID",
+      ...(transaction.acctid === undefined ? {} : { subAccount: transaction.acctid }),
+      ...(description === undefined ? {} : { description }),
+      netAmount: toNumber(transaction.amt),
+      transferItems: [transferItem],
+    };
+  }
+
+  private normalizeOrder(order: IbkrLiveOrder): BrokerOrder {
+    const description =
+      order.orderDescriptionWithContract ??
+      order.order_description_with_contract ??
+      order.orderDesc ??
+      order.orderDescription ??
+      order.order_description;
+    const symbol =
+      order.description1 ??
+      order.contract_description_1 ??
+      order.contractDescription1 ??
+      order.symbol ??
+      order.ticker;
+    const quantity =
+      this.firstPositiveNumber(order.total_size, order.totalSize, order.size) ??
+      this.quantityFromDescription(description);
+    const filledQuantity =
+      this.firstNumber(order.cum_fill, order.cumFill, order.filledQuantity) ??
+      this.filledQuantityFromSizeAndFills(order.size_and_fills ?? order.sizeAndFills);
+    const remainingQuantity =
+      order.remainingQuantity !== undefined
+        ? toNumber(order.remainingQuantity)
+        : quantity !== undefined && filledQuantity !== undefined
+          ? Math.max(0, quantity - filledQuantity)
+          : undefined;
+    const status = this.normalizeOrderStatus(
+      order.order_status ?? order.orderStatus ?? order.status
+    );
+    const price = this.firstPositiveNumber(
+      order.limitPrice,
+      order.price,
+      order.avgPrice,
+      order.average_price,
+      order.averagePrice
+    );
+    const stopPrice = this.firstPositiveNumber(order.stopPrice);
+    const orderId = order.order_id ?? order.orderId;
+    const enteredTime = this.parseOrderTime(order)?.toISOString();
+    const orderType = this.normalizeOrderType(order.order_type ?? order.orderType);
+
+    return {
+      ...(orderId === undefined ? {} : { orderId }),
+      ...(enteredTime === undefined ? {} : { enteredTime }),
+      ...(status === undefined ? {} : { status }),
+      ...(orderType === undefined ? {} : { orderType }),
+      ...(quantity === undefined ? {} : { quantity }),
+      ...(filledQuantity === undefined ? {} : { filledQuantity }),
+      ...(remainingQuantity === undefined ? {} : { remainingQuantity }),
+      ...(price === undefined ? {} : { price }),
+      ...(stopPrice === undefined ? {} : { stopPrice }),
+      orderLegCollection: [this.normalizeOrderLeg(order, symbol)],
+    };
+  }
+
+  private normalizeOrderLeg(order: IbkrLiveOrder, symbol: string | undefined): BrokerOrderLeg {
+    const fallbackSymbol = symbol ?? (order.conid === undefined ? undefined : String(order.conid));
+    const instruction = this.normalizeOrderSide(order.side);
+    return {
+      ...(instruction === undefined ? {} : { instruction }),
+      instrument: { ...(fallbackSymbol === undefined ? {} : { symbol: fallbackSymbol }) },
+    };
+  }
+
+  private normalizeOrderStatus(status: string | undefined): string | undefined {
+    if (!status) return undefined;
+    const normalized = status
+      .replace(/([a-z])([A-Z])/g, "$1_$2")
+      .replace(/\s+/g, "_")
+      .toUpperCase();
+    return normalized === "CANCELLED" ? "CANCELED" : normalized;
+  }
+
+  private normalizeOrderType(type: string | undefined): string | undefined {
+    if (!type) return undefined;
+    if (type === "MKT") return "MARKET";
+    if (type === "LMT") return "LIMIT";
+    if (type === "STP") return "STOP";
+    return type.replace(/\s+/g, "_").toUpperCase();
+  }
+
+  private normalizeOrderSide(side: string | undefined): string | undefined {
+    if (!side) return undefined;
+    const upper = side.toUpperCase();
+    if (upper === "B" || upper === "BUY") return "BUY";
+    if (upper === "S" || upper === "SELL") return "SELL";
+    return upper;
+  }
+
+  private ibkrStatusFilter(status: string): string {
+    const normalized = status.toUpperCase();
+    return IBKR_STATUS_FILTERS[normalized] ?? normalized.toLowerCase();
+  }
+
+  private orderMatchesStatus(order: BrokerOrder, requestedStatus: string | undefined): boolean {
+    if (!requestedStatus) return true;
+    const normalizedStatus = this.normalizeOrderStatus(requestedStatus);
+    if (normalizedStatus === "WORKING") {
+      return order.status !== undefined && IBKR_WORKING_STATUSES.has(order.status);
+    }
+    return order.status === normalizedStatus;
+  }
+
+  private orderBelongsToAccount(order: IbkrLiveOrder, accountId: string): boolean {
+    const account = order.account ?? order.acct;
+    return account === undefined || account === accountId;
+  }
+
+  private orderInDateRange(order: BrokerOrder, fromDate: Date, toDate: Date): boolean {
+    const timeMs = this.orderTimeMs(order);
+    return !Number.isFinite(timeMs) || (timeMs >= fromDate.getTime() && timeMs <= toDate.getTime());
+  }
+
+  private orderTimeMs(order: BrokerOrder): number {
+    const parsed = order.enteredTime ? new Date(order.enteredTime).getTime() : Number.NaN;
+    return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+  }
+
+  private parseOrderTime(order: IbkrLiveOrder): Date | undefined {
+    if (order.lastExecutionTime_r !== undefined) {
+      const parsed = new Date(order.lastExecutionTime_r);
+      if (!Number.isNaN(parsed.getTime())) return parsed;
+    }
+    const value = order.order_time ?? order.orderTime ?? order.lastExecutionTime;
+    if (!value) return undefined;
+    const compact = /^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/.exec(value);
+    if (compact) {
+      const [, year, month, day, hour, minute, second] = compact;
+      return new Date(
+        Date.UTC(
+          2000 + Number(year),
+          Number(month) - 1,
+          Number(day),
+          Number(hour),
+          Number(minute),
+          Number(second)
+        )
+      );
+    }
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+  }
+
+  private firstNumber(...values: (string | number | undefined)[]): number | undefined {
+    for (const value of values) {
+      if (value === undefined) continue;
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) return numeric;
+    }
+    return undefined;
+  }
+
+  private firstPositiveNumber(...values: (string | number | undefined)[]): number | undefined {
+    for (const value of values) {
+      const numeric = this.firstNumber(value);
+      if (numeric !== undefined && numeric > 0) return numeric;
+    }
+    return undefined;
+  }
+
+  private quantityFromDescription(description: string | undefined): number | undefined {
+    const quantity = description
+      ? /\b(?:Bought|Sold|Buy|Sell)\s+(?<quantity>[\d.]+)/i.exec(description)?.groups?.["quantity"]
+      : undefined;
+    if (!quantity) return undefined;
+    const parsed = Number(quantity);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  private filledQuantityFromSizeAndFills(value: string | undefined): number | undefined {
+    const quantity = value ? /(?<quantity>[\d.]+)/.exec(value)?.groups?.["quantity"] : undefined;
+    if (!quantity) return undefined;
+    const parsed = Number(quantity);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  private parseTransactionTime(transaction: IbkrTransaction): Date | undefined {
+    if (transaction.rawDate && /^\d{8}$/.test(transaction.rawDate)) {
+      const year = transaction.rawDate.slice(0, 4);
+      const month = transaction.rawDate.slice(4, 6);
+      const day = transaction.rawDate.slice(6, 8);
+      return new Date(`${year}-${month}-${day}T00:00:00`);
+    }
+    const value = transaction.date;
+    if (!value) return undefined;
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+    const match =
+      /^(?:\w{3}) (?<month>\w{3}) (?<day>\d{1,2}) (?<time>\d{2}:\d{2}:\d{2}) (?<zone>\w{3}) (?<year>\d{4})$/.exec(
+        value
+      );
+    if (!match?.groups) return undefined;
+    const zoneOffsets: Readonly<Record<string, string>> = {
+      EST: "-05:00",
+      EDT: "-04:00",
+      CST: "-06:00",
+      CDT: "-05:00",
+      MST: "-07:00",
+      MDT: "-06:00",
+      PST: "-08:00",
+      PDT: "-07:00",
+      UTC: "Z",
+      GMT: "Z",
+    };
+    const { month, day, time, zone, year } = match.groups;
+    if (!month || !day || !time || !zone || !year) return undefined;
+    const normalized = `${day.padStart(2, "0")} ${month} ${year} ${time} ${zoneOffsets[zone] ?? "Z"}`;
+    const fallback = new Date(normalized);
+    return Number.isNaN(fallback.getTime()) ? undefined : fallback;
+  }
+
+  private transactionKey(transaction: BrokerTransaction): string {
+    return [
+      transaction.activityId,
+      transaction.time,
+      transaction.type,
+      transaction.netAmount,
+      transaction.transferItems?.[0]?.amount ?? "",
+    ].join(":");
   }
 
   /** Overridable in request-level tests so snapshot warm-up does not sleep. */

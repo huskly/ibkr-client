@@ -61,6 +61,86 @@ export interface IbkrStockListing {
 /** `trsrv/stocks` response: keyed by the requested symbol. */
 export type IbkrStocksResponse = Record<string, IbkrStockListing[] | undefined>;
 
+export interface IbkrTransactionsResponse {
+  currency?: string;
+  from?: number;
+  to?: number;
+  includesRealTime?: boolean;
+  transactions?: IbkrTransaction[];
+}
+
+export interface IbkrTransaction {
+  date?: string;
+  rawDate?: string;
+  cur?: string;
+  fxRate?: number;
+  pr?: number;
+  qty?: number;
+  acctid?: string;
+  amt?: number;
+  conid?: number;
+  type?: string;
+  desc?: string;
+}
+
+export interface IbkrLiveOrdersResponse {
+  orders?: IbkrLiveOrder[];
+  snapshot?: boolean;
+}
+
+export interface IbkrBrokerageAccountsResponse {
+  accounts?: string[];
+  selectedAccount?: string;
+}
+
+export interface IbkrSwitchAccountResponse {
+  set?: boolean;
+  acctId?: string;
+}
+
+export interface IbkrLiveOrder {
+  account?: string;
+  acct?: string;
+  orderId?: number | string;
+  order_id?: number | string;
+  conid?: number;
+  ticker?: string;
+  symbol?: string;
+  description1?: string;
+  contractDescription1?: string;
+  contract_description_1?: string;
+  side?: string;
+  orderType?: string;
+  order_type?: string;
+  orderStatus?: string;
+  order_status?: string;
+  status?: string;
+  totalSize?: string | number;
+  total_size?: string | number;
+  size?: string | number;
+  cumFill?: string | number;
+  cum_fill?: string | number;
+  filledQuantity?: string | number;
+  remainingQuantity?: string | number;
+  sizeAndFills?: string;
+  size_and_fills?: string;
+  avgPrice?: string | number;
+  averagePrice?: string | number;
+  average_price?: string | number;
+  price?: string | number;
+  limitPrice?: string | number;
+  stopPrice?: string | number;
+  orderDescription?: string;
+  order_description?: string;
+  orderDesc?: string;
+  orderDescriptionWithContract?: string;
+  order_description_with_contract?: string;
+  lastExecutionTime?: string;
+  lastExecutionTime_r?: number;
+  orderTime?: string;
+  order_time?: string;
+}
+
 /** One OHLCV bar from `iserver/marketdata/history`. */
 export interface IbkrMarketDataHistoryBar {
   o?: number;

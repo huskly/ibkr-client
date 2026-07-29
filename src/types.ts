@@ -10,6 +10,9 @@
 
 export type BrokerName = "ibkr" | "schwab";
 
+export type BrokerInstrumentSearchProjection =
+  "symbol-search" | "symbol-regex" | "desc-search" | "desc-regex" | "search" | "fundamental";
+
 export interface AuthStatus {
   authenticated: boolean;
   competing: boolean;
@@ -47,6 +50,65 @@ export interface BrokerInstrument {
   description?: string;
   exchange?: string;
   assetType?: string;
+}
+
+export interface BrokerTransferItem {
+  instrument?: {
+    assetType?: string;
+    symbol?: string;
+    description?: string;
+  };
+  amount?: number;
+  cost?: number;
+  transferItemType?: string;
+  feeType?: string;
+}
+
+export interface BrokerTransaction {
+  activityId: string | number;
+  time: string;
+  type: string;
+  status: string;
+  subAccount?: string;
+  description?: string;
+  netAmount: number;
+  transferItems?: BrokerTransferItem[];
+}
+
+export interface BrokerTransactionHistory {
+  accountNumber: string;
+  transactions: BrokerTransaction[];
+}
+
+export interface BrokerOrderLeg {
+  instrument?: { symbol?: string };
+  instruction?: string;
+}
+
+export interface BrokerOrder {
+  orderId?: string | number;
+  enteredTime?: string;
+  status?: string;
+  orderType?: string;
+  complexOrderStrategyType?: string;
+  quantity?: number;
+  filledQuantity?: number;
+  remainingQuantity?: number;
+  price?: number;
+  stopPrice?: number;
+  orderLegCollection?: BrokerOrderLeg[];
+}
+
+export interface BrokerOrdersOptions {
+  fromEnteredTime: Date;
+  toEnteredTime: Date;
+  status?: string;
+  maxResults?: number;
+}
+
+export interface BrokerAccountOrders {
+  accountNumber: string;
+  orders: BrokerOrder[];
 }
 
 export interface BrokerQuoteReference {
@@ -137,4 +199,10 @@ export interface BrokerClient {
   getAccountBalances(): Promise<AccountBalances>;
   getPositions(symbol?: string): Promise<BrokerPosition[]>;
   getQuotes(symbols: string[]): Promise<Record<string, BrokerQuote>>;
+  searchInstruments(
+    symbol: string,
+    projection?: BrokerInstrumentSearchProjection
+  ): Promise<BrokerInstrument[]>;
+  fetchTransactionHistory(startDate: Date, endDate: Date): Promise<BrokerTransactionHistory[]>;
+  fetchOrders(options: BrokerOrdersOptions): Promise<BrokerAccountOrders[]>;
 }

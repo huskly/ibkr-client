@@ -2,8 +2,9 @@
 
 A terminal trading CLI for the **Interactive Brokers Web API**, authenticating
 over **OAuth 1.0a** (no Client Portal Gateway required). Built to mirror the
-architecture of [huskly-cli](https://github.com/felipecsl/huskly-cli) so the two
-can merge into a single multi-broker CLI (IBKR + Schwab) over time.
+IBKR transport boundary used by
+[huskly-cli](https://github.com/felipecsl/huskly-cli), the multi-broker CLI for
+IBKR and Schwab.
 
 The OAuth 1.0a live-session-token handshake is performed by the
 [`ibkr-client`](https://github.com/art1c0/ibkr-client) package. See the
@@ -56,6 +57,7 @@ Optional environment variables:
 - `IBKR_KEYS_DIR` — directory holding the `.pem` files (defaults to the current
   working directory).
 - `IBKR_ACCOUNT_ID` — target a specific account (otherwise the first is used).
+- `IBKR_TRANSACTION_CURRENCY` — transaction-query currency (defaults to `USD`).
 
 ## Usage
 
@@ -92,7 +94,19 @@ Available Funds:  $...
 ...
 ```
 
-## Strategy market data
+## Library API
+
+`IbkrClient` owns IBKR authentication, requests, raw response types, and
+normalization. Consumers such as `@huskly/cli` provide only presentation and
+caching adapters. Its broker-neutral account API includes:
+
+- `getAccountBalances()` and `getPositions()` for account state.
+- `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes.
+- `fetchTransactionHistory()` for normalized portfolio transactions.
+- `fetchOrders()` for normalized live orders, including aggregate `WORKING`
+  matching across IBKR's active order states.
+
+### Strategy market data
 
 The reusable `IbkrClient` also exposes typed, read-only strategy data:
 
