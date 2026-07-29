@@ -3,8 +3,7 @@
 A reusable TypeScript client for the **Interactive Brokers Web API**,
 authenticating over **OAuth 1.0a** without the Client Portal Gateway. This
 package contains no command-line interface; terminal commands and presentation
-belong exclusively in
-[huskly-cli](https://github.com/felipecsl/huskly-cli).
+belong exclusively in [huskly/cli](https://github.com/huskly/cli).
 
 The OAuth 1.0a live-session-token handshake is performed by the
 [`ibkr-client`](https://github.com/art1c0/ibkr-client) package. See the
@@ -15,13 +14,13 @@ the keys below are generated and registered in the IBKR self-service portal.
 
 The repository contains only the reusable client library:
 
-| Path                     | Purpose                                                                  |
-| ------------------------ | ------------------------------------------------------------------------ |
-| `src/types.ts`           | Broker-neutral `BrokerClient` interface and normalized domain types         |
-| `src/ibkr/ibkrClient.ts` | `IbkrClient` — typed wrapper over `ibkr-client` implementing `BrokerClient` |
-| `src/ibkr/oauthConfig.ts`| Builds the OAuth config from `.pem` files + env vars                      |
-| `src/ibkr/dhPrime.ts`    | Extracts the DH prime (hex) from `dhparam.pem`                            |
-| `src/ibkr/optionContract.ts` | Canonical OSI parsing and formatting for IBKR option contracts        |
+| Path                         | Purpose                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `src/types.ts`               | Broker-neutral `BrokerClient` interface and normalized domain types         |
+| `src/ibkr/ibkrClient.ts`     | `IbkrClient` — typed wrapper over `ibkr-client` implementing `BrokerClient` |
+| `src/ibkr/oauthConfig.ts`    | Builds the OAuth config from `.pem` files + env vars                        |
+| `src/ibkr/dhPrime.ts`        | Extracts the DH prime (hex) from `dhparam.pem`                              |
+| `src/ibkr/optionContract.ts` | Canonical OSI parsing and formatting for IBKR option contracts              |
 
 The `*.pem` files (`private_signature.pem`, `private_encryption.pem`,
 `dhparam.pem`, plus the public keys) are the cryptographic material from the
