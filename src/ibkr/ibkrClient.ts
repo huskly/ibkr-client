@@ -18,7 +18,10 @@ import type {
   DerivativeAssetClass,
   DerivativeContract,
   DerivativeContractQuery,
+  DerivativeComboPreviewRequest,
+  DerivativeComboPreviewResult,
   DerivativeDiscoveryClient,
+  DerivativePreviewClient,
   DerivativeExpiry,
   DerivativeExpiryQuery,
   DerivativeQuote,
@@ -29,6 +32,7 @@ import type {
   OptionRight,
   PriceHistoryBar,
   PriceHistoryRequest,
+  TradingDiagnostics,
 } from "../types.js";
 import { ASSET_CLASS_LABELS, toNumber } from "../helpers.js";
 import type {
@@ -53,6 +57,7 @@ import type {
   IbkrSwitchAccountResponse,
   IbkrTransaction,
   IbkrTransactionsResponse,
+  IbkrWhatIfResponse,
 } from "./ibkrApiTypes.js";
 import { normalizeOptionContract, parseOsiOptionSymbol } from "./optionContract.js";
 import {
@@ -238,7 +243,9 @@ function monthCodes(fromDate: string, toDate: string): string[] {
  * live-session-token handshake. Ports the data access from the Python PoC
  * (main.py): account summary, positions paging, and day-P/L snapshots.
  */
-export class IbkrClient implements BrokerClient, DerivativeDiscoveryClient {
+export class IbkrClient
+  implements BrokerClient, DerivativeDiscoveryClient, DerivativePreviewClient
+{
   private readonly raw: RawIbkrClient;
   private initPromise?: Promise<void>;
   private accountIdPromise?: Promise<string>;
@@ -268,6 +275,70 @@ export class IbkrClient implements BrokerClient, DerivativeDiscoveryClient {
       authenticated: status.authenticated ?? false,
       competing: status.competing ?? false,
     };
+  }
+
+  async getTradingDiagnostics(accountId: string): Promise<TradingDiagnostics> {
+    if (!accountId.trim()) throw new Error("An explicit IBKR account ID is required");
+    const [status, accounts] = await Promise.all([
+      this.getAuthStatus(),
+      this.req<IbkrBrokerageAccountsResponse>({ path: "iserver/accounts" }),
+    ]);
+    if (!accounts.accounts?.includes(accountId)) {
+      throw new Error(`IBKR account ${accountId} is not available to this session`);
+    }
+    return {
+      accountId,
+      selectedAccountId: accounts.selectedAccount ?? null,
+      environment: accounts.isPaper === true ? "paper" : "live",
+      authenticated: status.authenticated,
+      competingSession: status.competing,
+      marketDataAvailable: accounts.allowFeatures?.showGFIS ?? null,
+      advisoryAssetPermissions:
+        accounts.allowFeatures?.allowedAssetTypes
+          ?.split(",")
+          .map((value) => value.trim())
+          .filter(Boolean) ?? [],
+    };
+  }
+
+  async previewDerivativeCombo(
+    request: DerivativeComboPreviewRequest
+  ): Promise<DerivativeComboPreviewResult> {
+    this.validateComboPreview(request);
+    const diagnostics = await this.getTradingDiagnostics(request.accountId);
+    if (!diagnostics.authenticated || diagnostics.competingSession) {
+      throw new Error("IBKR brokerage session is not safely authenticated for What-If");
+    }
+    await this.prepareBrokerageAccount(request.accountId);
+    const conids = request.legs.map(({ contract }) => contract.conid).join(",");
+    await this.req<unknown>({
+      path: "iserver/marketdata/snapshot",
+      params: { conids, fields: "6509" },
+    });
+    const exchange = request.legs[0].contract.exchange;
+    const spreadConid = exchange === "SMART" ? "28812380" : `28812380@${exchange}`;
+    const conidex = `${spreadConid};;;${request.legs
+      .map(({ contract, ratio }) => `${String(contract.conid)}/${String(ratio)}`)
+      .join(",")}`;
+    const response = await this.req<IbkrWhatIfResponse>({
+      path: `iserver/account/${request.accountId}/orders/whatif`,
+      method: "POST",
+      data: {
+        orders: [
+          {
+            acctId: request.accountId,
+            conidex,
+            orderType: "LMT",
+            price: request.priceEffect === "CREDIT" ? -request.limit : request.limit,
+            side: "BUY",
+            tif: request.tif,
+            quantity: request.quantity,
+            outsideRTH: request.session === "OVERNIGHT",
+          },
+        ],
+      },
+    });
+    return this.normalizeComboPreview(request.accountId, diagnostics, response);
   }
 
   async getAccountId(): Promise<string> {
@@ -494,6 +565,89 @@ export class IbkrClient implements BrokerClient, DerivativeDiscoveryClient {
 
     if (options.maxResults !== undefined) orders = orders.slice(0, options.maxResults);
     return [{ accountNumber: accountId, orders }];
+  }
+
+  private validateComboPreview(request: DerivativeComboPreviewRequest): void {
+    if (!request.accountId.trim()) throw new Error("An explicit IBKR account ID is required");
+    if (!Number.isSafeInteger(request.quantity) || request.quantity <= 0) {
+      throw new Error("Combo quantity must be a positive integer");
+    }
+    if (!Number.isFinite(request.limit) || request.limit <= 0) {
+      throw new Error("Combo limit must be a positive number");
+    }
+    const [first, second] = request.legs;
+    if (first.ratio === second.ratio) throw new Error("Combo requires one long and one short leg");
+    if (first.contract.conid === second.contract.conid) {
+      throw new Error("Combo legs must reference distinct contracts");
+    }
+    for (const { contract } of request.legs) {
+      if (!Number.isSafeInteger(contract.conid) || contract.conid <= 0) {
+        throw new Error("Combo leg has an invalid IBKR conid");
+      }
+    }
+    const identityFields: (keyof DerivativeContract)[] = [
+      "assetClass",
+      "underlying",
+      "expiration",
+      "right",
+      "tradingClass",
+      "exchange",
+      "multiplier",
+    ];
+    for (const field of identityFields) {
+      if (first.contract[field] !== second.contract[field]) {
+        throw new Error(`Combo legs differ on ${field}`);
+      }
+    }
+  }
+
+  private normalizeComboPreview(
+    accountId: string,
+    diagnostics: TradingDiagnostics,
+    response: IbkrWhatIfResponse
+  ): DerivativeComboPreviewResult {
+    const commission = this.whatIfNumber(response.amount?.commission);
+    const initialMargin = this.whatIfMargin(response.initial);
+    const maintenanceMargin = this.whatIfMargin(response.maintenance);
+    const warnings = response.warn?.trim() ? [response.warn.trim()] : [];
+    const rejectionReasons = response.error?.trim() ? [response.error.trim()] : [];
+    if (
+      rejectionReasons.length === 0 &&
+      (commission === null || initialMargin === null || maintenanceMargin === null)
+    ) {
+      rejectionReasons.push("IBKR returned an incomplete What-If result");
+    }
+    return {
+      accountId,
+      environment: diagnostics.environment,
+      accepted: rejectionReasons.length === 0,
+      submitted: false,
+      commission,
+      initialMargin,
+      maintenanceMargin,
+      warnings,
+      rejectionReasons,
+      advisoryAssetPermissions: diagnostics.advisoryAssetPermissions,
+    };
+  }
+
+  private whatIfMargin(
+    value: { current?: string; change?: string; after?: string } | undefined
+  ): { current: number; change: number; after: number } | null {
+    const current = this.whatIfNumber(value?.current);
+    const change = this.whatIfNumber(value?.change);
+    const after = this.whatIfNumber(value?.after);
+    return current === null || change === null || after === null
+      ? null
+      : { current, change, after };
+  }
+
+  private whatIfNumber(value: string | undefined): number | null {
+    if (value === undefined) return null;
+    const match = /[-+]?\d[\d,]*(?:\.\d+)?/.exec(value);
+    if (match === null) return null;
+    const parsed = Number(match[0].replace(/,/g, ""));
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   private async prepareBrokerageAccount(accountId: string): Promise<void> {
