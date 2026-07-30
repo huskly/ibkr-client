@@ -82,6 +82,13 @@ import {
   normalizeDerivativeContract,
   normalizeDerivativeDataAvailability,
 } from "./derivativeContract.js";
+import {
+  IbkrRequestScheduler,
+  type IbkrRequestErrorClassification,
+  type IbkrRequestPriority,
+  type IbkrRequestSchedulerOptions,
+  type IbkrRequestTelemetry,
+} from "./requestScheduler.js";
 
 // `ibkr-client`'s published ESM build is broken: its `import` condition points
 // at files that use extensionless relative imports, which Node's strict ESM
@@ -149,9 +156,6 @@ const QUOTE_FIELDS = [
 const OPTION_DISCOVERY_MONTH_CONCURRENCY = 1;
 const OPTION_SECDEF_INFO_BATCH_SIZE = 8;
 const OPTION_MARKETDATA_BATCH_SIZE = 100;
-const READ_ONLY_REQUEST_MAX_RETRIES = 3;
-const REQUEST_RETRY_BASE_DELAY_MS = 250;
-const REQUEST_RETRY_MAX_DELAY_MS = 5_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const IBKR_STATUS_FILTERS: Readonly<Record<string, string>> = {
   CANCELED: "cancelled",
@@ -256,6 +260,21 @@ function monthCodes(fromDate: string, toDate: string): string[] {
   return result;
 }
 
+interface IbkrRequestInput {
+  path: string;
+  method?: string;
+  params?: Record<string, string | number | boolean | null | undefined>;
+  data?: object;
+}
+
+export interface IbkrClientOptions {
+  requestScheduler?: Omit<
+    IbkrRequestSchedulerOptions,
+    "now" | "sleep" | "random" | "classifyError" | "onTelemetry"
+  >;
+  onRequestTelemetry?: (event: IbkrRequestTelemetry) => void;
+}
+
 /**
  * Typed IBKR Web API client implementing the broker-neutral {@link BrokerClient}.
  * Wraps the `ibkr-client` npm package, which performs the OAuth 1.0a
@@ -274,9 +293,20 @@ export class IbkrClient
   private accountIdPromise?: Promise<string>;
   private readonly optionDiscovery = new Map<string, Promise<OptionContract[]>>();
   private readonly derivativeDiscovery = new Map<string, Promise<DerivativeContract[]>>();
+  private readonly requestScheduler: IbkrRequestScheduler;
 
-  constructor(config: IbkrOauth1Config) {
+  constructor(config: IbkrOauth1Config, options: IbkrClientOptions = {}) {
     this.raw = new RawIbkrClientCtor(config);
+    this.requestScheduler = new IbkrRequestScheduler({
+      ...options.requestScheduler,
+      now: () => this.now(),
+      sleep: (ms) => this.wait(ms),
+      random: () => this.random(),
+      classifyError: (error) => this.classifyRequestError(error),
+      ...(options.onRequestTelemetry === undefined
+        ? {}
+        : { onTelemetry: options.onRequestTelemetry }),
+    });
   }
 
   /** Obtain the live session token (idempotent — safe to await repeatedly). */
@@ -364,7 +394,7 @@ export class IbkrClient
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(request.accountId);
-    const response = await this.sendRequest<
+    const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
       path: `iserver/account/${request.accountId}/orders`,
@@ -387,7 +417,7 @@ export class IbkrClient
     confirmed: true;
   }): Promise<DerivativeOrderSubmissionResult> {
     if (!input.replyId.trim()) throw new Error("An exact warning reply ID is required");
-    const response = await this.sendRequest<
+    const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
       path: `iserver/reply/${encodeURIComponent(input.replyId)}`,
@@ -512,7 +542,7 @@ export class IbkrClient
     }
     const cmeOperatorMetadata = this.cmeOperatorMetadata(input.assetClass, input);
     await this.prepareBrokerageAccount(input.accountId);
-    const response = await this.sendRequest<IbkrOrderCancellationResponse>({
+    const response = await this.singleAttemptRequest<IbkrOrderCancellationResponse>({
       path: `iserver/account/${input.accountId}/order/${encodeURIComponent(input.orderId)}`,
       method: "DELETE",
       ...(Object.keys(cmeOperatorMetadata).length > 0 ? { params: cmeOperatorMetadata } : {}),
@@ -1392,19 +1422,18 @@ export class IbkrClient
 
   /** Discover listed derivative series over an inclusive calendar range. */
   async getDerivativeExpiries(query: DerivativeExpiryQuery): Promise<DerivativeExpiry[]> {
-    const contracts = (
-      await Promise.all(
-        monthCodes(query.from, query.to).map((month) =>
-          this.discoverDerivativeMonth(
-            query.underlying,
-            query.assetClass,
-            month,
-            query.exchange,
-            query.right
-          )
-        )
-      )
-    ).flat();
+    const contracts: DerivativeContract[] = [];
+    for (const month of monthCodes(query.from, query.to)) {
+      contracts.push(
+        ...(await this.discoverDerivativeMonth(
+          query.underlying,
+          query.assetClass,
+          month,
+          query.exchange,
+          query.right
+        ))
+      );
+    }
     const filtered = contracts.filter(
       (contract) =>
         contract.expiration >= query.from &&
@@ -2261,6 +2290,11 @@ export class IbkrClient
     return Date.now();
   }
 
+  /** Overridable entropy source for deterministic scheduler jitter tests. */
+  protected random(): number {
+    return Math.random();
+  }
+
   private normalizeQuote(
     contract: QuoteContract,
     snapshot: IbkrMarketDataSnapshot,
@@ -2395,36 +2429,92 @@ export class IbkrClient
   }
 
   /** Typed wrapper around the raw client's untyped `request()`. */
-  protected async sendRequest<T>(input: {
-    path: string;
-    method?: string;
-    params?: Record<string, string | number | boolean | null | undefined>;
-    data?: object;
-  }): Promise<T> {
+  protected async sendRequest<T>(input: IbkrRequestInput): Promise<T> {
     return (await this.raw.request(input)) as T;
   }
 
-  protected async req<T>(input: {
-    path: string;
-    method?: string;
-    params?: Record<string, string | number | boolean | null | undefined>;
-    data?: object;
-  }): Promise<T> {
-    let retries = 0;
-    for (;;) {
-      try {
-        return await this.sendRequest<T>(input);
-      } catch (error) {
-        const status = this.httpStatusFromError(error);
-        if (status !== 429 || retries >= READ_ONLY_REQUEST_MAX_RETRIES) {
-          throw error;
-        }
-        const retryAfter = this.retryAfterFromError(error);
-        const delayMs = this.computeBackoffDelayMs(retries, retryAfter);
-        retries += 1;
-        await this.wait(delayMs);
-      }
+  protected req<T>(input: IbkrRequestInput): Promise<T> {
+    return this.scheduledRequest(input, true);
+  }
+
+  private singleAttemptRequest<T>(input: IbkrRequestInput): Promise<T> {
+    return this.scheduledRequest(input, false);
+  }
+
+  private scheduledRequest<T>(input: IbkrRequestInput, retryable: boolean): Promise<T> {
+    return this.requestScheduler.schedule(
+      {
+        endpoint: this.requestEndpoint(input.path),
+        priority: this.requestPriority(input.path),
+        retryable,
+      },
+      () => this.sendRequest<T>(input)
+    );
+  }
+
+  private requestPriority(path: string): IbkrRequestPriority {
+    if (
+      path === "iserver/accounts" ||
+      path === "iserver/auth/status" ||
+      path.includes("/orders") ||
+      path.includes("/order/status/") ||
+      path === "iserver/account/trades" ||
+      path.startsWith("iserver/reply/")
+    ) {
+      return "EXECUTION";
     }
+    if (path.includes("secdef")) return "DISCOVERY";
+    return "STANDARD";
+  }
+
+  private requestEndpoint(path: string): string {
+    if (path.includes("secdef/")) return path.slice(path.indexOf("secdef/"));
+    if (path.includes("/order/status/")) return "account/order/status";
+    if (path.includes("/orders/whatif")) return "account/orders/whatif";
+    if (path.endsWith("/orders")) return "account/orders";
+    if (path.includes("/order/")) return "account/order";
+    if (path.startsWith("iserver/reply/")) return "reply";
+    if (path === "iserver/account/trades") return "account/trades";
+    return path.split("/").slice(0, 2).join("/");
+  }
+
+  private classifyRequestError(error: unknown): IbkrRequestErrorClassification {
+    if (
+      /temporar(?:ily|y).*(?:block|ban)|(?:ip|access).*(?:temporar(?:ily|y) )?blocked/i.test(
+        this.requestErrorText(error)
+      )
+    ) {
+      return { kind: "TEMPORARILY_BLOCKED" };
+    }
+    if (this.httpStatusFromError(error) === 429) {
+      const retryAfterMs = this.retryAfterFromError(error);
+      return retryAfterMs === undefined
+        ? { kind: "THROTTLED" }
+        : { kind: "THROTTLED", retryAfterMs };
+    }
+    return { kind: "OTHER" };
+  }
+
+  private requestErrorText(error: unknown): string {
+    if (typeof error !== "object" || error === null) return String(error);
+    const message = (error as { message?: unknown }).message;
+    const response = (error as { response?: unknown }).response;
+    const responseData =
+      typeof response === "object" && response !== null && "data" in response
+        ? response.data
+        : undefined;
+    const body = (error as { body?: unknown }).body;
+    return [message, responseData, body]
+      .flatMap((value) => {
+        if (typeof value === "string") return [value];
+        if (value === undefined) return [];
+        try {
+          return [JSON.stringify(value)];
+        } catch {
+          return [];
+        }
+      })
+      .join(" ");
   }
 
   private httpStatusFromError(error: unknown): number | undefined {
@@ -2460,11 +2550,6 @@ export class IbkrClient
       this.headerValue(responseHeaders, "Retry-After") ??
       this.headerValue(directHeaders, "Retry-After");
     return parseRetryAfter(retryAfterRaw);
-  }
-
-  private computeBackoffDelayMs(retry: number, retryAfterMs: number | undefined): number {
-    if (retryAfterMs !== undefined) return Math.min(retryAfterMs, REQUEST_RETRY_MAX_DELAY_MS);
-    return Math.min(REQUEST_RETRY_BASE_DELAY_MS * 2 ** retry, REQUEST_RETRY_MAX_DELAY_MS);
   }
 
   private numberFromUnknown(value: unknown): number | undefined {

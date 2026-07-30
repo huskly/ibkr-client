@@ -1,5 +1,13 @@
 /** Package entry point — the broker-neutral types and the IBKR client. */
 export { IbkrClient } from "./ibkr/ibkrClient.js";
+export type { IbkrClientOptions } from "./ibkr/ibkrClient.js";
+export { IbkrRequestSchedulerError } from "./ibkr/requestScheduler.js";
+export type {
+  IbkrRequestPriority,
+  IbkrRequestErrorClassification,
+  IbkrRequestTelemetry,
+  IbkrRequestSchedulerOptions,
+} from "./ibkr/requestScheduler.js";
 export { buildOauthConfig } from "./ibkr/oauthConfig.js";
 export type {
   AccountBalances,

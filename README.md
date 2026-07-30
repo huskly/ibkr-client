@@ -200,6 +200,22 @@ the IBKR boundary, matching the What-If ticket exactly. Every write requires the
 the library never falls back to the first account. Broker-declared order rejections retain their
 structured response in `BrokerErrorDetail.details`; transport exceptions are rethrown intact.
 
+### Request pacing and temporary blocks
+
+Every authenticated request runs through one priority scheduler per `IbkrClient`. The default
+limits allow at most ten requests globally and one exploratory security-definition request at a
+time. Order preview, status, warning, cancellation, and immediate-trade requests take priority
+over queued discovery. Multi-month derivative discovery also primes each month serially, while an
+exact expiry/strike/right request expands only that requested contract.
+
+A 429 pauses the shared queue behind one `Retry-After`-aware exponential backoff with jitter;
+individual queued reads do not start independent retry loops. Exhausted throttling throws
+`IbkrRequestSchedulerError` with code `IBKR_THROTTLED`. A broker temporary-block response opens a
+bounded circuit, rejects queued work, and throws code `IBKR_TEMPORARILY_BLOCKED` without retrying.
+`IbkrClient` accepts optional scheduler limits and an `onRequestTelemetry` callback. Telemetry
+contains only a sanitized endpoint category, event, attempt, and delay—never account IDs, order
+IDs, credentials, or request payloads.
+
 ### Authorized read-only smoke test
 
 Run this only after the account owner authorizes a read-only brokerage request and the OAuth

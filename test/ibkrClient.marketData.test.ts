@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { IbkrClient } from "../src/ibkr/ibkrClient.js";
+import { IbkrClient, type IbkrClientOptions } from "../src/ibkr/ibkrClient.js";
+import { IbkrRequestSchedulerError } from "../src/ibkr/requestScheduler.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
 interface RequestInput {
@@ -23,8 +24,11 @@ const config: IbkrOauth1Config = {
 class FakeIbkrClient extends IbkrClient {
   readonly calls: RequestInput[] = [];
 
-  constructor(private readonly responder: (input: RequestInput, calls: RequestInput[]) => unknown) {
-    super(config);
+  constructor(
+    private readonly responder: (input: RequestInput, calls: RequestInput[]) => unknown,
+    options: IbkrClientOptions = {}
+  ) {
+    super(config, options);
   }
 
   protected override sendRequest<T>(input: RequestInput): Promise<T> {
@@ -207,7 +211,7 @@ void test("multi-month option discovery bounds secdef/info concurrency", async (
   const expiries = await client.getOptionExpiries("MSTR", "C", "2026-07-01", "2026-09-30");
   assert.deepEqual(expiries, ["2026-07-14", "2026-08-14", "2026-09-14"]);
   assert.ok(
-    maxActiveInfo <= 8,
+    maxActiveInfo <= 1,
     `expected bounded concurrent info requests, observed max ${String(maxActiveInfo)}`
   );
 
@@ -377,7 +381,7 @@ void test("429 responses are retried and eventually succeed when status clears",
   assert.equal(strikesCalls, 2);
 });
 
-void test("exhausted 429 retries preserve the original read failure", async () => {
+void test("exhausted 429 retries surface a structured throttling failure", async () => {
   let strikesCalls = 0;
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/secdef/search") {
@@ -397,9 +401,38 @@ void test("exhausted 429 retries preserve the original read failure", async () =
   } catch (error) {
     caught = error;
   }
-  assert.ok(caught instanceof Error);
-  assert.equal(caught.message, "Response status 429");
+  assert.ok(caught instanceof IbkrRequestSchedulerError);
+  assert.equal(caught.code, "IBKR_THROTTLED");
+  assert.equal(caught.endpoint, "secdef/strikes");
+  assert.ok(caught.cause instanceof Error);
+  assert.equal(caught.cause.message, "Response status 429");
   assert.equal(strikesCalls, 4);
+});
+
+void test("temporary broker blocks open a structured circuit without retries", async () => {
+  const telemetry: string[] = [];
+  let calls = 0;
+  const client = new FakeIbkrClient(
+    () => {
+      calls += 1;
+      const error = new Error("IP temporarily blocked after pacing violation") as RateLimitedError;
+      error.status = 429;
+      throw error;
+    },
+    {
+      onRequestTelemetry: (event) => telemetry.push(`${event.event}:${event.endpoint}`),
+    }
+  );
+
+  await assert.rejects(
+    () => client.getOptionExpiries("MSTR", "C", "2026-08-01", "2026-08-31"),
+    (error: unknown) =>
+      error instanceof IbkrRequestSchedulerError &&
+      error.code === "IBKR_TEMPORARILY_BLOCKED" &&
+      error.endpoint === "secdef/search"
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(telemetry, ["CIRCUIT_OPEN:secdef/search"]);
 });
 
 void test("missing option delta fails closed", async () => {

@@ -103,7 +103,9 @@ const ndxAug20Definitions = [
 void test("NQ Aug 21 puts resolve as exact QN3 FOP identity from real response shapes", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/secdef/search") return nqSearch;
-    if (input.path === "iserver/secdef/strikes") return { call: [], put: [26600] };
+    if (input.path === "iserver/secdef/strikes") {
+      return { call: [], put: [26400, 26600, 26800] };
+    }
     if (input.path === "iserver/secdef/info") return nqAug26600Definitions;
     throw new Error(`Unexpected request: ${input.path}`);
   });
@@ -135,7 +137,62 @@ void test("NQ Aug 21 puts resolve as exact QN3 FOP identity from real response s
   assert.equal(client.calls[0]?.params?.["secType"], "FUT");
   assert.equal(client.calls[1]?.params?.["sectype"], "FOP");
   assert.equal(client.calls[1]?.params?.["exchange"], "CME");
+  assert.equal(client.calls[2]?.params?.["strike"], 26600);
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/info").length, 1);
   assert.ok(client.calls.every((call) => call.method === undefined || call.method === "GET"));
+});
+
+void test("multi-month derivative discovery serializes session priming and secdef expansion", async () => {
+  let activeInfo = 0;
+  let maximumInfo = 0;
+  const observed: string[] = [];
+  const maturity: Record<string, string> = { AUG26: "20260821", SEP26: "20260918" };
+  const client = new FakeIbkrClient((input) => {
+    const month = String(input.params?.["month"] ?? "");
+    observed.push(`${input.path}:${month}`);
+    if (input.path === "iserver/secdef/search") return nqSearch;
+    if (input.path === "iserver/secdef/strikes") return { call: [], put: [26600, 26700] };
+    if (input.path === "iserver/secdef/info") {
+      activeInfo += 1;
+      maximumInfo = Math.max(maximumInfo, activeInfo);
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          resolve([
+            {
+              conid: Number(`${month === "AUG26" ? "8" : "9"}${String(input.params?.["strike"])}`),
+              symbol: "NQ",
+              secType: "FOP",
+              exchange: "CME",
+              right: "P",
+              strike: Number(input.params?.["strike"]),
+              maturityDate: maturity[month],
+              multiplier: "20",
+              tradingClass: "QN3",
+            },
+          ]);
+        }, 5);
+      }).finally(() => {
+        activeInfo -= 1;
+      });
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const expiries = await client.getDerivativeExpiries({
+    assetClass: "FOP",
+    underlying: "NQ",
+    from: "2026-08-01",
+    to: "2026-09-30",
+    right: "P",
+  });
+  assert.deepEqual(
+    expiries.map(({ expiration }) => expiration),
+    ["2026-08-21", "2026-09-18"]
+  );
+  assert.equal(maximumInfo, 1);
+  const firstSeptember = observed.findIndex((entry) => entry.includes(":SEP26"));
+  const lastAugust = observed.findLastIndex((entry) => entry.includes(":AUG26"));
+  assert.ok(firstSeptember > lastAugust);
 });
 
 void test("NDX and NDXP at the same expiry and strike remain distinct and ambiguous selection fails closed", async () => {
