@@ -182,6 +182,130 @@ void test("fresh lifecycle reads retain combo legs and partial-fill economics", 
   });
 });
 
+void test("customer order IDs resolve the same typed lifecycle", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U123"], selectedAccount: "U123" };
+    }
+    if (input.path === "iserver/account/orders") {
+      return {
+        orders: [
+          {
+            account: "U123",
+            orderId: "777",
+            cOID: "huskly-20260729-abc",
+            status: "Submitted",
+            totalSize: 2,
+            filledQuantity: 0,
+            remainingQuantity: 2,
+          },
+        ],
+      };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  const result = await client.findDerivativeOrder({
+    accountId: "U123",
+    clientOrderId: "huskly-20260729-abc",
+  });
+  assert.equal(result.orderId, "777");
+  assert.equal(result.clientOrderId, "huskly-20260729-abc");
+  assert.equal(result.status, "WORKING");
+});
+
+void test("trade reads expose per-leg executions and commissions", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U123"], selectedAccount: "U123" };
+    }
+    if (input.path === "iserver/account/trades") {
+      return [
+        {
+          execution_id: "exec-long",
+          account: "U123",
+          order_ref: "huskly-20260729-abc",
+          order_id: "777",
+          conid: 892767804,
+          contract_description_1: "NQ AUG 26 26400 Put",
+          side: "B",
+          size: 1,
+          price: "19.25",
+          commission: "2.05 USD",
+          net_amount: -387,
+          trade_time_r: 1785355200000,
+          exchange: "CME",
+        },
+        {
+          execution_id: "exec-short",
+          account: "U123",
+          order_ref: "huskly-20260729-abc",
+          order_id: "777",
+          conid: 892767774,
+          symbol: "QN3",
+          side: "S",
+          size: 1,
+          price: "58.25",
+          commission: "2.15 USD",
+          net_amount: 1163,
+          trade_time: "20260729-20:00:01",
+          exchange: "CME",
+        },
+        {
+          execution_id: "other-account",
+          account: "U999",
+          order_ref: "huskly-20260729-abc",
+          conid: 1,
+        },
+      ];
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  const executions = await client.getDerivativeExecutions({
+    accountId: "U123",
+    clientOrderId: "huskly-20260729-abc",
+    days: 7,
+  });
+  assert.deepEqual(executions, [
+    {
+      accountId: "U123",
+      executionId: "exec-long",
+      orderId: "777",
+      clientOrderId: "huskly-20260729-abc",
+      conid: 892767804,
+      symbol: "NQ AUG 26 26400 Put",
+      side: "BUY",
+      quantity: 1,
+      price: 19.25,
+      commission: 2.05,
+      commissionCurrency: "USD",
+      netAmount: -387,
+      exchange: "CME",
+      executedAt: "2026-07-29T20:00:00.000Z",
+    },
+    {
+      accountId: "U123",
+      executionId: "exec-short",
+      orderId: "777",
+      clientOrderId: "huskly-20260729-abc",
+      conid: 892767774,
+      symbol: "QN3",
+      side: "SELL",
+      quantity: 1,
+      price: 58.25,
+      commission: 2.15,
+      commissionCurrency: "USD",
+      netAmount: 1163,
+      exchange: "CME",
+      executedAt: "2026-07-29T20:00:01.000Z",
+    },
+  ]);
+  assert.deepEqual(client.calls.find(({ path }) => path === "iserver/account/trades")?.params, {
+    days: 7,
+  });
+});
+
 void test("lifecycle normalizes terminal filled, canceled, and rejected states", async () => {
   for (const [raw, expected] of [
     ["Filled", "FILLED"],
@@ -201,15 +325,17 @@ void test("lifecycle normalizes terminal filled, canceled, and rejected states",
   }
 });
 
-void test("cancel sends one explicit request with operator metadata", async () => {
+void test("cancel sends one explicit request and returns a typed request acknowledgement", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/accounts") {
       return { accounts: ["U123"], selectedAccount: "U123" };
     }
-    if (input.method === "DELETE") return { msg: "Request was submitted" };
+    if (input.method === "DELETE") {
+      return { msg: "Request was submitted", order_id: "777", account: "U123", conid: 123 };
+    }
     throw new Error(`Unexpected request ${input.path}`);
   });
-  await client.cancelDerivativeOrder({
+  const result = await client.cancelDerivativeOrder({
     accountId: "U123",
     orderId: "777",
     extOperator: "felipecsl",
@@ -220,4 +346,59 @@ void test("cancel sends one explicit request with operator metadata", async () =
     method: "DELETE",
     params: { extOperator: "felipecsl", manualIndicator: true },
   });
+  assert.deepEqual(result, {
+    state: "requested",
+    accountId: "U123",
+    orderId: "777",
+    message: "Request was submitted",
+  });
+});
+
+void test("structured broker rejections are preserved", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return {
+        error: { code: "ORDER_REJECTED", message: "Order is not permitted", leg: 2 },
+        statusCode: 400,
+      };
+    }
+    return sessionResponse(input);
+  });
+
+  const result = await client.submitDerivativeCombo(executionRequest());
+  assert.deepEqual(result, {
+    state: "rejected",
+    reasons: ["Order is not permitted"],
+    errors: [
+      {
+        message: "Order is not permitted",
+        code: "ORDER_REJECTED",
+        statusCode: 400,
+        details: {
+          error: { code: "ORDER_REJECTED", message: "Order is not permitted", leg: 2 },
+          statusCode: 400,
+        },
+      },
+    ],
+  });
+});
+
+void test("placement transport errors retain their structured details and are never retried", async () => {
+  const transportError = Object.assign(new Error("broker unavailable"), {
+    status: 503,
+    response: { data: { error: { code: "BROKER_DOWN", retryable: false } } },
+  });
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") throw transportError;
+    return sessionResponse(input);
+  });
+
+  await assert.rejects(client.submitDerivativeCombo(executionRequest()), (error) => {
+    assert.equal(error, transportError);
+    assert.deepEqual(transportError.response.data, {
+      error: { code: "BROKER_DOWN", retryable: false },
+    });
+    return true;
+  });
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/account/U123/orders").length, 1);
 });

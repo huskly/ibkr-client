@@ -174,14 +174,22 @@ whether live execution is allowed.
 - `getDerivativeOrderStatus(...)` performs a fresh order read and normalizes pending, working,
   partial-fill, fill, canceled, rejected, and unknown lifecycle states with leg ratios and order
   economics.
+- `findDerivativeOrder(...)` performs the same fresh read using exactly one broker order ID or the
+  caller-supplied customer order ID (`cOID`/`order_ref`). This is the read callers poll; the library
+  does not hide polling intervals, deadlines, or terminal-state policy.
+- `getDerivativeExecutions(...)` reads up to seven calendar days from IBKR's trade history and
+  returns individual leg fills with execution ID, conid, side, quantity, price, commission,
+  commission currency, net amount, venue, and execution time. Customer order IDs allow fills to be
+  reconciled back to the atomic combo. Missing provider values remain `null` rather than estimated.
 - `cancelDerivativeOrder(...)` sends one exact cancellation request with the required operator
-  metadata. Callers remain responsible for reading until a terminal state and verifying that a
-  cancellation actually reached `CANCELED`.
+  metadata and returns only a typed `requested` acknowledgement. Callers remain responsible for
+  reading until a terminal state and verifying that a cancellation actually reached `CANCELED`.
 
 Placement, warning replies, and cancellation deliberately use single-attempt HTTP writes so a
 transport retry cannot duplicate a broker action. A BUY-oriented net credit remains negative at
 the IBKR boundary, matching the What-If ticket exactly. Every write requires the exact account ID;
-the library never falls back to the first account.
+the library never falls back to the first account. Broker-declared order rejections retain their
+structured response in `BrokerErrorDetail.details`; transport exceptions are rethrown intact.
 
 ### Authorized read-only smoke test
 

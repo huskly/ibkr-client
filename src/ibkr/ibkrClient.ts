@@ -15,6 +15,7 @@ import type {
   BrokerQuote,
   BrokerTransaction,
   BrokerTransactionHistory,
+  BrokerErrorDetail,
   DerivativeAssetClass,
   DerivativeContract,
   DerivativeContractQuery,
@@ -23,7 +24,11 @@ import type {
   DerivativeComboPreviewResult,
   DerivativeDiscoveryClient,
   DerivativeExecutionClient,
+  DerivativeExecution,
+  DerivativeExecutionQuery,
+  DerivativeOrderCancellationResult,
   DerivativeOrderLifecycle,
+  DerivativeOrderLookup,
   DerivativeOrderStatus,
   DerivativeOrderSubmissionResult,
   DerivativePreviewClient,
@@ -46,6 +51,7 @@ import type {
   IbkrLiveOrder,
   IbkrLiveOrdersResponse,
   IbkrOrderSubmissionResponse,
+  IbkrOrderCancellationResponse,
   IbkrMarketDataHistoryBar,
   IbkrMarketDataHistoryResponse,
   IbkrMarketDataSnapshot,
@@ -61,6 +67,7 @@ import type {
   IbkrStockListing,
   IbkrStocksResponse,
   IbkrSwitchAccountResponse,
+  IbkrTrade,
   IbkrTransaction,
   IbkrTransactionsResponse,
   IbkrWhatIfResponse,
@@ -387,22 +394,61 @@ export class IbkrClient
     accountId: string,
     orderId: string
   ): Promise<DerivativeOrderLifecycle> {
-    if (!accountId.trim() || !orderId.trim()) {
-      throw new Error("Exact account and order IDs are required");
-    }
-    await this.prepareBrokerageAccount(accountId);
+    return this.findDerivativeOrder({ accountId, orderId });
+  }
+
+  async findDerivativeOrder(input: DerivativeOrderLookup): Promise<DerivativeOrderLifecycle> {
+    if (!input.accountId.trim()) throw new Error("An exact account ID is required");
+    const identity = input.orderId ?? input.clientOrderId;
+    if (!identity.trim()) throw new Error("An exact broker or client order ID is required");
+    await this.prepareBrokerageAccount(input.accountId);
     const response = await this.req<IbkrLiveOrdersResponse>({
       path: "iserver/account/orders",
-      params: { force: true, accountId },
+      params: { force: true, accountId: input.accountId },
     });
-    const order = response.orders?.find(
-      (candidate) => String(candidate.order_id ?? candidate.orderId) === orderId
-    );
-    if (order === undefined) throw new Error(`IBKR order ${orderId} was not found`);
-    if (!this.orderBelongsToAccount(order, accountId)) {
-      throw new Error(`IBKR order ${orderId} does not belong to the requested account`);
+    const order = response.orders?.find((candidate) => {
+      if (!this.orderBelongsToAccount(candidate, input.accountId)) return false;
+      return input.orderId !== undefined
+        ? String(candidate.order_id ?? candidate.orderId) === input.orderId
+        : (candidate.cOID ?? candidate.order_ref) === input.clientOrderId;
+    });
+    if (order === undefined) throw new Error(`IBKR order ${identity} was not found`);
+    const orderId = order.order_id ?? order.orderId;
+    if (orderId === undefined) {
+      throw new Error(`IBKR order ${identity} did not include a broker order ID`);
     }
-    return this.normalizeDerivativeOrderLifecycle(accountId, orderId, order);
+    return this.normalizeDerivativeOrderLifecycle(input.accountId, String(orderId), order);
+  }
+
+  async getDerivativeExecutions(input: DerivativeExecutionQuery): Promise<DerivativeExecution[]> {
+    if (!input.accountId.trim()) throw new Error("An exact account ID is required");
+    if (
+      input.days !== undefined &&
+      (!Number.isSafeInteger(input.days) || input.days < 1 || input.days > 7)
+    ) {
+      throw new Error("Execution history days must be an integer from 1 through 7");
+    }
+    if (input.orderId !== undefined && !input.orderId.trim()) {
+      throw new Error("Broker order ID cannot be empty");
+    }
+    if (input.clientOrderId !== undefined && !input.clientOrderId.trim()) {
+      throw new Error("Client order ID cannot be empty");
+    }
+    await this.prepareBrokerageAccount(input.accountId);
+    const response = await this.req<IbkrTrade[]>({
+      path: "iserver/account/trades",
+      ...(input.days === undefined ? {} : { params: { days: input.days } }),
+    });
+    return response
+      .filter((trade) => (trade.account ?? trade.accountCode) === input.accountId)
+      .filter((trade) => input.orderId === undefined || String(trade.order_id) === input.orderId)
+      .filter(
+        (trade) => input.clientOrderId === undefined || trade.order_ref === input.clientOrderId
+      )
+      .flatMap((trade) => {
+        const execution = this.normalizeDerivativeExecution(input.accountId, trade);
+        return execution === undefined ? [] : [execution];
+      });
   }
 
   async cancelDerivativeOrder(input: {
@@ -410,12 +456,12 @@ export class IbkrClient
     orderId: string;
     extOperator: string;
     manualIndicator: boolean;
-  }): Promise<void> {
+  }): Promise<DerivativeOrderCancellationResult> {
     if (!input.accountId.trim() || !input.orderId.trim() || !input.extOperator.trim()) {
       throw new Error("Exact account, order, and external operator are required");
     }
     await this.prepareBrokerageAccount(input.accountId);
-    await this.sendRequest<unknown>({
+    const response = await this.sendRequest<IbkrOrderCancellationResponse>({
       path: `iserver/account/${input.accountId}/order/${encodeURIComponent(input.orderId)}`,
       method: "DELETE",
       params: {
@@ -423,6 +469,12 @@ export class IbkrClient
         manualIndicator: input.manualIndicator,
       },
     });
+    return {
+      state: "requested",
+      accountId: input.accountId,
+      orderId: input.orderId,
+      message: this.trimmedString(response.msg),
+    };
   }
 
   async getAccountId(): Promise<string> {
@@ -718,35 +770,42 @@ export class IbkrClient
     const items = Array.isArray(response) ? response : [response];
     const warnings = items.flatMap((item) => {
       if (!("id" in item) || typeof item.id !== "string") return [];
-      const messageIds = item.messageIds?.filter((value) => typeof value === "string") ?? [];
+      const messageIds = Array.isArray(item.messageIds)
+        ? item.messageIds.filter((value): value is string => typeof value === "string")
+        : [];
       return [
         {
           replyId: item.id,
-          messages: item.message?.filter((value) => typeof value === "string") ?? [],
+          messages: Array.isArray(item.message)
+            ? item.message.filter((value): value is string => typeof value === "string")
+            : [],
           messageIds,
           known: messageIds.length > 0 && messageIds.every((id) => KNOWN_ORDER_WARNING_IDS.has(id)),
         },
       ];
     });
     if (warnings.length > 0) return { state: "warning", warnings };
-    const reasons = items.flatMap((item) =>
-      "error" in item && typeof item.error === "string" && item.error.trim()
-        ? [item.error.trim()]
-        : []
-    );
-    if (reasons.length > 0) return { state: "rejected", reasons };
+    const errors = items.flatMap((item) => {
+      if (!("error" in item) || item.error === undefined || item.error === null) return [];
+      return [this.normalizeBrokerError(item.error, item)];
+    });
+    if (errors.length > 0) {
+      return { state: "rejected", reasons: errors.map(({ message }) => message), errors };
+    }
     const accepted = items.find((item) => "order_id" in item || "orderId" in item);
     if (accepted !== undefined) {
       const orderId =
         ("order_id" in accepted ? accepted.order_id : undefined) ??
         ("orderId" in accepted ? accepted.orderId : undefined);
-      if (orderId !== undefined) {
+      if (typeof orderId === "string" || typeof orderId === "number") {
+        const orderStatus =
+          ("order_status" in accepted ? accepted.order_status : undefined) ??
+          ("orderStatus" in accepted ? accepted.orderStatus : undefined);
         return {
           state: "accepted",
           orderId: String(orderId),
           status: this.normalizeDerivativeOrderStatus(
-            ("order_status" in accepted ? accepted.order_status : undefined) ??
-              ("orderStatus" in accepted ? accepted.orderStatus : undefined),
+            typeof orderStatus === "string" ? orderStatus : undefined,
             0,
             0
           ),
@@ -755,7 +814,38 @@ export class IbkrClient
         };
       }
     }
-    return { state: "rejected", reasons: ["IBKR returned an unknown order response"] };
+    const unknown = "IBKR returned an unknown order response";
+    return {
+      state: "rejected",
+      reasons: [unknown],
+      errors: [{ message: unknown, code: null, statusCode: null, details: {} }],
+    };
+  }
+
+  private normalizeBrokerError(
+    error: unknown,
+    response: Readonly<Record<string, unknown>>
+  ): BrokerErrorDetail {
+    const nested = typeof error === "object" && error !== null ? error : undefined;
+    const nestedMessage = nested ? (nested as { message?: unknown }).message : undefined;
+    const responseMessage = response["message"];
+    const message =
+      (typeof nestedMessage === "string" && nestedMessage.trim()) ||
+      (typeof error === "string" && error.trim()) ||
+      (typeof responseMessage === "string" && responseMessage.trim()) ||
+      "IBKR rejected the order";
+    const nestedCode = nested ? (nested as { code?: unknown }).code : undefined;
+    const responseCode = response["code"];
+    const codeValue = nestedCode ?? responseCode;
+    const statusValue = response["statusCode"];
+    return {
+      message,
+      code:
+        typeof codeValue === "string" || typeof codeValue === "number" ? String(codeValue) : null,
+      statusCode:
+        typeof statusValue === "number" && Number.isFinite(statusValue) ? statusValue : null,
+      details: response,
+    };
   }
 
   private normalizeDerivativeOrderLifecycle(
@@ -773,7 +863,7 @@ export class IbkrClient
     return {
       accountId,
       orderId,
-      clientOrderId: order.cOID ?? null,
+      clientOrderId: order.cOID ?? order.order_ref ?? null,
       status: this.normalizeDerivativeOrderStatus(
         order.order_status ?? order.orderStatus ?? order.status,
         filledQuantity,
@@ -792,6 +882,64 @@ export class IbkrClient
       legs: this.parseComboLegs(order.conidex),
       updatedAt: this.parseOrderTime(order)?.toISOString() ?? null,
     };
+  }
+
+  private normalizeDerivativeExecution(
+    accountId: string,
+    trade: IbkrTrade
+  ): DerivativeExecution | undefined {
+    if (!trade.execution_id || !Number.isSafeInteger(trade.conid) || Number(trade.conid) <= 0) {
+      return undefined;
+    }
+    const commission =
+      typeof trade.commission === "number" ? trade.commission : this.whatIfNumber(trade.commission);
+    const commissionCurrency =
+      typeof trade.commission === "string"
+        ? (/\b(?<currency>[A-Z]{3})\s*$/.exec(trade.commission.trim())?.groups?.["currency"] ??
+          null)
+        : null;
+    const side = trade.side?.trim().toUpperCase();
+    return {
+      accountId,
+      executionId: trade.execution_id,
+      orderId: trade.order_id === undefined ? null : String(trade.order_id),
+      clientOrderId: this.trimmedString(trade.order_ref),
+      conid: Number(trade.conid),
+      symbol: this.trimmedString(trade.contract_description_1) ?? this.trimmedString(trade.symbol),
+      side:
+        side === "B" || side === "BUY" || side === "BOT"
+          ? "BUY"
+          : side === "S" || side === "SELL" || side === "SLD"
+            ? "SELL"
+            : "UNKNOWN",
+      quantity: this.firstNumber(trade.size) ?? 0,
+      price: this.firstNumber(trade.price) ?? null,
+      commission,
+      commissionCurrency,
+      netAmount: this.firstNumber(trade.net_amount) ?? null,
+      exchange: this.trimmedString(trade.exchange),
+      executedAt: this.parseTradeTime(trade),
+    };
+  }
+
+  private parseTradeTime(trade: IbkrTrade): string | null {
+    if (trade.trade_time_r !== undefined) {
+      const epoch = new Date(trade.trade_time_r);
+      if (!Number.isNaN(epoch.getTime())) return epoch.toISOString();
+    }
+    const value = trade.trade_time;
+    const match = value ? /^(\d{4})(\d{2})(\d{2})-(\d{2}):(\d{2}):(\d{2})$/.exec(value) : null;
+    if (!match) return null;
+    const [, year, month, day, hour, minute, second] = match;
+    if (!year || !month || !day || !hour || !minute || !second) return null;
+    const parsed = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}Z`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+
+  private trimmedString(value: string | undefined): string | null {
+    if (value === undefined) return null;
+    const trimmed = value.trim();
+    return trimmed.length === 0 ? null : trimmed;
   }
 
   private parseComboLegs(conidex: string | undefined): { conid: number; ratio: number }[] {

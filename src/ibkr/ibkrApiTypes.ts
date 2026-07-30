@@ -160,6 +160,7 @@ export interface IbkrLiveOrder {
   order_time?: string;
   conidex?: string;
   cOID?: string;
+  order_ref?: string;
   commissionAndFees?: string | number;
 }
 
@@ -177,11 +178,41 @@ export interface IbkrOrderWarningResponse {
 }
 
 export interface IbkrOrderRejectedResponse {
-  error?: string;
+  error?: unknown;
+  statusCode?: number;
+  code?: string | number;
+  message?: string;
+  [key: string]: unknown;
 }
 
 export type IbkrOrderSubmissionResponse =
   IbkrOrderAcceptedResponse | IbkrOrderWarningResponse | IbkrOrderRejectedResponse;
+
+export interface IbkrOrderCancellationResponse {
+  msg?: string;
+  order_id?: string | number;
+  conid?: number;
+  account?: string;
+}
+
+export interface IbkrTrade {
+  execution_id?: string;
+  order_id?: string | number;
+  order_ref?: string;
+  account?: string;
+  accountCode?: string;
+  conid?: number;
+  symbol?: string;
+  contract_description_1?: string;
+  side?: string;
+  size?: string | number;
+  price?: string | number;
+  commission?: string | number;
+  net_amount?: string | number;
+  exchange?: string;
+  trade_time?: string;
+  trade_time_r?: number;
+}
 
 /** One OHLCV bar from `iserver/marketdata/history`. */
 export interface IbkrMarketDataHistoryBar {

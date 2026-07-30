@@ -304,6 +304,14 @@ export interface OrderWarning {
   known: boolean;
 }
 
+/** A normalized broker rejection with the complete provider response retained for diagnostics. */
+export interface BrokerErrorDetail {
+  message: string;
+  code: string | null;
+  statusCode: number | null;
+  details: Readonly<Record<string, unknown>>;
+}
+
 export type DerivativeOrderSubmissionResult =
   | {
       state: "accepted";
@@ -313,7 +321,7 @@ export type DerivativeOrderSubmissionResult =
       warnings: OrderWarning[];
     }
   | { state: "warning"; warnings: OrderWarning[] }
-  | { state: "rejected"; reasons: string[] };
+  | { state: "rejected"; reasons: string[]; errors: BrokerErrorDetail[] };
 
 export type DerivativeOrderStatus =
   | "WARNING_PENDING"
@@ -345,6 +353,43 @@ export interface DerivativeOrderLifecycle {
   updatedAt: string | null;
 }
 
+export type DerivativeOrderLookup =
+  | { accountId: string; orderId: string; clientOrderId?: never }
+  | { accountId: string; orderId?: never; clientOrderId: string };
+
+export interface DerivativeExecutionQuery {
+  accountId: string;
+  /** IBKR supports the current day through the previous six days. */
+  days?: number;
+  orderId?: string;
+  clientOrderId?: string;
+}
+
+/** One broker execution/fill. Combo orders produce one or more records per leg. */
+export interface DerivativeExecution {
+  accountId: string;
+  executionId: string;
+  orderId: string | null;
+  clientOrderId: string | null;
+  conid: number;
+  symbol: string | null;
+  side: "BUY" | "SELL" | "UNKNOWN";
+  quantity: number;
+  price: number | null;
+  commission: number | null;
+  commissionCurrency: string | null;
+  netAmount: number | null;
+  exchange: string | null;
+  executedAt: string | null;
+}
+
+export interface DerivativeOrderCancellationResult {
+  state: "requested";
+  accountId: string;
+  orderId: string;
+  message: string | null;
+}
+
 export interface DerivativeExecutionClient {
   submitDerivativeCombo(
     request: DerivativeComboExecutionRequest
@@ -354,12 +399,14 @@ export interface DerivativeExecutionClient {
     confirmed: true;
   }): Promise<DerivativeOrderSubmissionResult>;
   getDerivativeOrderStatus(accountId: string, orderId: string): Promise<DerivativeOrderLifecycle>;
+  findDerivativeOrder(input: DerivativeOrderLookup): Promise<DerivativeOrderLifecycle>;
+  getDerivativeExecutions(input: DerivativeExecutionQuery): Promise<DerivativeExecution[]>;
   cancelDerivativeOrder(input: {
     accountId: string;
     orderId: string;
     extOperator: string;
     manualIndicator: boolean;
-  }): Promise<void>;
+  }): Promise<DerivativeOrderCancellationResult>;
 }
 
 /**
