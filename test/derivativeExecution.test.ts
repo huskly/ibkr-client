@@ -196,29 +196,25 @@ void test("warning replies distinguish known chains from unknown warnings", asyn
   });
 });
 
-void test("fresh lifecycle reads retain combo legs and partial-fill economics", async () => {
+void test("exact lifecycle reads retain an evicted combo's partial-fill economics", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/accounts") {
       return { accounts: ["U123"], selectedAccount: "U123" };
     }
-    if (input.path === "iserver/account/orders") {
+    if (input.path === "iserver/account/order/status/777") {
       return {
-        orders: [
-          {
-            account: "U123",
-            orderId: "777",
-            cOID: "huskly-20260729-abc",
-            status: "Submitted",
-            conidex: "28812380@CME;;;892767804/1,892767774/-1",
-            totalSize: 2,
-            filledQuantity: 1,
-            remainingQuantity: 1,
-            avgPrice: -38.5,
-            price: -39,
-            commissionAndFees: "3.25 USD",
-            lastExecutionTime_r: 1785355200000,
-          },
-        ],
+        account: "U123",
+        orderId: "777",
+        cOID: "huskly-20260729-abc",
+        status: "Submitted",
+        conidex: "28812380@CME;;;892767804/1,892767774/-1",
+        totalSize: 2,
+        filledQuantity: 1,
+        remainingQuantity: 1,
+        avgPrice: -38.5,
+        price: -39,
+        commissionAndFees: "3.25 USD",
+        lastExecutionTime_r: 1785355200000,
       };
     }
     throw new Error(`Unexpected request ${input.path}`);
@@ -231,10 +227,14 @@ void test("fresh lifecycle reads retain combo legs and partial-fill economics", 
     { conid: 892767804, ratio: 1 },
     { conid: 892767774, ratio: -1 },
   ]);
-  assert.deepEqual(client.calls.find(({ path }) => path === "iserver/account/orders")?.params, {
-    force: true,
-    accountId: "U123",
-  });
+  assert.equal(
+    client.calls.some(({ path }) => path === "iserver/account/orders"),
+    false
+  );
+  assert.equal(
+    client.calls.some(({ path }) => path === "iserver/account/order/status/777"),
+    true
+  );
 });
 
 void test("customer order IDs resolve the same typed lifecycle", async () => {
@@ -255,6 +255,17 @@ void test("customer order IDs resolve the same typed lifecycle", async () => {
             remainingQuantity: 2,
           },
         ],
+      };
+    }
+    if (input.path === "iserver/account/order/status/777") {
+      return {
+        account: "U123",
+        orderId: "777",
+        cOID: "huskly-20260729-abc",
+        status: "Submitted",
+        totalSize: 2,
+        filledQuantity: 0,
+        remainingQuantity: 2,
       };
     }
     throw new Error(`Unexpected request ${input.path}`);
@@ -371,12 +382,41 @@ void test("lifecycle normalizes terminal filled, canceled, and rejected states",
       if (input.path === "iserver/accounts") {
         return { accounts: ["U123"], selectedAccount: "U123" };
       }
-      if (input.path === "iserver/account/orders") {
-        return { orders: [{ account: "U123", orderId: "777", status: raw }] };
+      if (input.path === "iserver/account/order/status/777") {
+        return {
+          account: "U123",
+          orderId: "777",
+          status: raw,
+          totalSize: 1,
+          filledQuantity: raw === "Filled" ? 1 : 0,
+          remainingQuantity: 0,
+        };
       }
       throw new Error(`Unexpected request ${input.path}`);
     });
     assert.equal((await client.getDerivativeOrderStatus("U123", "777")).status, expected);
+  }
+});
+
+void test("exact lifecycle lookup fails closed on identity or status mismatch", async () => {
+  for (const fixture of [
+    { account: "U999", orderId: "777", status: "Filled" },
+    { account: "U123", orderId: "999", status: "Filled" },
+    { account: "U123", orderId: "777", status: "MysteryState" },
+  ]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/accounts") {
+        return { accounts: ["U123"], selectedAccount: "U123" };
+      }
+      if (input.path === "iserver/account/order/status/777") {
+        return { ...fixture, totalSize: 1, filledQuantity: 1, remainingQuantity: 0 };
+      }
+      throw new Error(`Unexpected request ${input.path}`);
+    });
+    await assert.rejects(
+      () => client.getDerivativeOrderStatus("U123", "777"),
+      /does not (belong to the requested account|match the requested order)|unrecognized status/
+    );
   }
 });
 

@@ -397,13 +397,33 @@ export class IbkrClient
     accountId: string,
     orderId: string
   ): Promise<DerivativeOrderLifecycle> {
-    return this.findDerivativeOrder({ accountId, orderId });
+    if (!accountId.trim() || !orderId.trim()) {
+      throw new Error("Exact account and order IDs are required");
+    }
+    await this.prepareBrokerageAccount(accountId);
+    const order = await this.req<IbkrLiveOrder>({
+      path: `iserver/account/order/status/${encodeURIComponent(orderId)}`,
+    });
+    if (String(order.order_id ?? order.orderId ?? "") !== orderId) {
+      throw new Error(`IBKR response does not match the requested order ${orderId}`);
+    }
+    if ((order.account ?? order.acct) !== accountId) {
+      throw new Error(`IBKR order ${orderId} does not belong to the requested account`);
+    }
+    const lifecycle = this.normalizeDerivativeOrderLifecycle(accountId, orderId, order);
+    if (lifecycle.status === "UNKNOWN") {
+      throw new Error(`IBKR order ${orderId} returned an unrecognized status`);
+    }
+    return lifecycle;
   }
 
   async findDerivativeOrder(input: DerivativeOrderLookup): Promise<DerivativeOrderLifecycle> {
     if (!input.accountId.trim()) throw new Error("An exact account ID is required");
     const identity = input.orderId ?? input.clientOrderId;
     if (!identity.trim()) throw new Error("An exact broker or client order ID is required");
+    if (input.orderId !== undefined) {
+      return this.getDerivativeOrderStatus(input.accountId, input.orderId);
+    }
     await this.prepareBrokerageAccount(input.accountId);
     const response = await this.req<IbkrLiveOrdersResponse>({
       path: "iserver/account/orders",
@@ -411,16 +431,14 @@ export class IbkrClient
     });
     const order = response.orders?.find((candidate) => {
       if (!this.orderBelongsToAccount(candidate, input.accountId)) return false;
-      return input.orderId !== undefined
-        ? String(candidate.order_id ?? candidate.orderId) === input.orderId
-        : (candidate.cOID ?? candidate.order_ref) === input.clientOrderId;
+      return (candidate.cOID ?? candidate.order_ref) === input.clientOrderId;
     });
     if (order === undefined) throw new Error(`IBKR order ${identity} was not found`);
     const orderId = order.order_id ?? order.orderId;
     if (orderId === undefined) {
       throw new Error(`IBKR order ${identity} did not include a broker order ID`);
     }
-    return this.normalizeDerivativeOrderLifecycle(input.accountId, String(orderId), order);
+    return this.getDerivativeOrderStatus(input.accountId, String(orderId));
   }
 
   async getDerivativeExecutions(input: DerivativeExecutionQuery): Promise<DerivativeExecution[]> {
@@ -865,13 +883,27 @@ export class IbkrClient
     orderId: string,
     order: IbkrLiveOrder
   ): DerivativeOrderLifecycle {
-    const quantity = this.firstPositiveNumber(order.total_size, order.totalSize, order.size) ?? 0;
-    const filledQuantity =
-      this.firstNumber(order.cum_fill, order.cumFill, order.filledQuantity) ?? 0;
-    const remainingQuantity =
-      order.remainingQuantity === undefined
-        ? Math.max(0, quantity - filledQuantity)
-        : toNumber(order.remainingQuantity);
+    const quantity = this.firstPositiveNumber(order.total_size, order.totalSize, order.size);
+    const filledQuantity = this.firstNumber(
+      order.cum_fill,
+      order.cumFill,
+      order.filledQuantity,
+      order.filled
+    );
+    const remainingQuantity = this.firstNumber(
+      order.remainingQuantity,
+      order.remaining_size,
+      order.remaining
+    );
+    if (
+      quantity === undefined ||
+      filledQuantity === undefined ||
+      filledQuantity < 0 ||
+      remainingQuantity === undefined ||
+      remainingQuantity < 0
+    ) {
+      throw new Error(`IBKR order ${orderId} returned incomplete fill quantities`);
+    }
     return {
       accountId,
       orderId,
@@ -885,8 +917,13 @@ export class IbkrClient
       filledQuantity,
       remainingQuantity,
       averagePrice:
-        this.firstNumber(order.avgPrice, order.average_price, order.averagePrice) ?? null,
-      limitPrice: this.firstNumber(order.limitPrice, order.price) ?? null,
+        this.firstNumber(
+          order.avgPrice,
+          order.avg_price,
+          order.average_price,
+          order.averagePrice
+        ) ?? null,
+      limitPrice: this.firstNumber(order.limitPrice, order.limit_price, order.price) ?? null,
       commissionAndFees:
         typeof order.commissionAndFees === "number"
           ? order.commissionAndFees

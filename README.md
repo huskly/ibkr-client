@@ -173,12 +173,13 @@ whether live execution is allowed.
   both CME-only fields.
 - `acknowledgeOrderWarning(...)` replies once to an exact broker warning ID. Only documented
   warning message IDs are marked `known`; consumers must stop on unknown warnings.
-- `getDerivativeOrderStatus(...)` performs a fresh order read and normalizes pending, working,
-  partial-fill, fill, canceled, rejected, and unknown lifecycle states with leg ratios and order
-  economics.
-- `findDerivativeOrder(...)` performs the same fresh read using exactly one broker order ID or the
-  caller-supplied customer order ID (`cOID`/`order_ref`). This is the read callers poll; the library
-  does not hide polling intervals, deadlines, or terminal-state policy.
+- `getDerivativeOrderStatus(...)` uses IBKR's exact order-ID status endpoint so fast terminal
+  orders remain visible after live-list eviction. It normalizes pending, working, partial-fill,
+  fill, canceled, and rejected lifecycle states with leg ratios and order economics, and fails
+  closed on identity mismatch, unknown status, or missing aggregate quantities.
+- `findDerivativeOrder(...)` accepts exactly one broker order ID or caller-supplied customer order
+  ID (`cOID`/`order_ref`). Broker IDs go directly to the exact endpoint; a customer ID is resolved
+  through the live list and then read by exact broker ID.
 - `getDerivativeExecutions(...)` reads up to seven calendar days from IBKR's trade history and
   returns individual leg fills with execution ID, conid, side, quantity, price, commission,
   commission currency, net amount, venue, and execution time. Customer order IDs allow fills to be
