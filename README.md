@@ -184,6 +184,11 @@ whether live execution is allowed.
   returns individual leg fills with execution ID, conid, side, quantity, price, commission,
   commission currency, net amount, venue, and execution time. Customer order IDs allow fills to be
   reconciled back to the atomic combo. Missing provider values remain `null` rather than estimated.
+- `reconcileDerivativeComboExecution(...)` polls delayed trade publication to a bounded deadline,
+  correlates by the unique client order reference, rejects duplicate or mismatched evidence, and
+  validates each expected leg's side and ratio-derived quantity. Its sanitized result separates
+  gross option points, multiplier-adjusted gross dollars, commission, and net dollars without
+  exposing account or execution IDs.
 - `cancelDerivativeOrder(...)` sends one exact cancellation request and returns only a typed
   `requested` acknowledgement. Its required `assetClass` lets the client apply the same
   product-aware CME metadata rule without guessing from an order ID. Callers remain responsible

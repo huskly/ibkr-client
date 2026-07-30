@@ -399,6 +399,43 @@ export interface DerivativeOrderCancellationResult {
   message: string | null;
 }
 
+export type DerivativeExecutionSide = "BUY" | "SELL";
+
+export interface DerivativeComboReconciliationRequest {
+  accountId: string;
+  orderId: string;
+  clientOrderId: string;
+  legs: [{ conid: number; ratio: number }, { conid: number; ratio: number }];
+  quantity: number;
+  multiplier: number;
+  timeoutMs?: number;
+  pollMs?: number;
+}
+
+export interface DerivativeLegExecutionSummary {
+  conid: number;
+  side: DerivativeExecutionSide;
+  quantity: number;
+  averagePrice: number;
+  commission: number;
+  executionCount: number;
+}
+
+/** Sanitized aggregate output; raw execution and account identifiers are intentionally omitted. */
+export interface DerivativeComboReconciliation {
+  state: "PENDING" | "VERIFIED" | "RECOVERY_REQUIRED";
+  reason: string | null;
+  aggregateStatus: DerivativeOrderStatus;
+  filledQuantity: number;
+  remainingQuantity: number;
+  legs: DerivativeLegExecutionSummary[];
+  grossPoints: number | null;
+  multiplier: number;
+  grossAmount: number | null;
+  commission: number | null;
+  netAmount: number | null;
+}
+
 export interface DerivativeExecutionClient {
   submitDerivativeCombo(
     request: DerivativeComboExecutionRequest
@@ -410,6 +447,9 @@ export interface DerivativeExecutionClient {
   getDerivativeOrderStatus(accountId: string, orderId: string): Promise<DerivativeOrderLifecycle>;
   findDerivativeOrder(input: DerivativeOrderLookup): Promise<DerivativeOrderLifecycle>;
   getDerivativeExecutions(input: DerivativeExecutionQuery): Promise<DerivativeExecution[]>;
+  reconcileDerivativeComboExecution(
+    request: DerivativeComboReconciliationRequest
+  ): Promise<DerivativeComboReconciliation>;
   cancelDerivativeOrder(
     input: DerivativeOrderCancelRequest
   ): Promise<DerivativeOrderCancellationResult>;

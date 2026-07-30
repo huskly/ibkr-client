@@ -20,14 +20,18 @@ import type {
   DerivativeContract,
   DerivativeContractQuery,
   DerivativeComboExecutionRequest,
-  DerivativeOrderCancelRequest,
+  DerivativeComboReconciliation,
+  DerivativeComboReconciliationRequest,
   DerivativeComboPreviewRequest,
   DerivativeComboPreviewResult,
   DerivativeDiscoveryClient,
   DerivativeExecutionClient,
   DerivativeExecution,
   DerivativeExecutionQuery,
+  DerivativeExecutionSide,
+  DerivativeLegExecutionSummary,
   DerivativeOrderCancellationResult,
+  DerivativeOrderCancelRequest,
   DerivativeOrderLifecycle,
   DerivativeOrderLookup,
   DerivativeOrderStatus,
@@ -470,6 +474,34 @@ export class IbkrClient
         const execution = this.normalizeDerivativeExecution(input.accountId, trade);
         return execution === undefined ? [] : [execution];
       });
+  }
+
+  async reconcileDerivativeComboExecution(
+    request: DerivativeComboReconciliationRequest
+  ): Promise<DerivativeComboReconciliation> {
+    this.validateReconciliationRequest(request);
+    const lifecycle = await this.getDerivativeOrderStatus(request.accountId, request.orderId);
+    const deadline = this.now() + (request.timeoutMs ?? 30_000);
+    const pollMs = request.pollMs ?? 1_000;
+
+    for (;;) {
+      const executions = await this.getDerivativeExecutions({
+        accountId: request.accountId,
+        clientOrderId: request.clientOrderId,
+        days: 1,
+      });
+      const result = this.evaluateDerivativeReconciliation(request, lifecycle, executions);
+      if (result.state !== "PENDING") return result;
+      if (!this.isTerminalDerivativeStatus(lifecycle.status)) return result;
+      if (this.now() >= deadline) {
+        return {
+          ...result,
+          state: "RECOVERY_REQUIRED",
+          reason: result.reason ?? "Terminal order is missing expected execution evidence",
+        };
+      }
+      await this.wait(Math.min(pollMs, Math.max(0, deadline - this.now())));
+    }
   }
 
   async cancelDerivativeOrder(
@@ -989,6 +1021,186 @@ export class IbkrClient
     if (value === undefined) return null;
     const trimmed = value.trim();
     return trimmed.length === 0 ? null : trimmed;
+  }
+
+  private validateReconciliationRequest(request: DerivativeComboReconciliationRequest): void {
+    if (!request.accountId.trim() || !request.orderId.trim() || !request.clientOrderId.trim()) {
+      throw new Error("Exact account, order, and client order IDs are required for reconciliation");
+    }
+    if (!Number.isSafeInteger(request.quantity) || request.quantity <= 0) {
+      throw new Error("Reconciliation quantity must be a positive integer");
+    }
+    if (!Number.isFinite(request.multiplier) || request.multiplier <= 0) {
+      throw new Error("Reconciliation multiplier must be positive");
+    }
+    if (
+      request.legs.some(
+        ({ conid, ratio }) =>
+          !Number.isSafeInteger(conid) || conid <= 0 || !Number.isSafeInteger(ratio) || ratio === 0
+      ) ||
+      request.legs[0].conid === request.legs[1].conid
+    ) {
+      throw new Error("Reconciliation legs require distinct conids and non-zero integer ratios");
+    }
+    if ((request.timeoutMs ?? 30_000) < 0 || (request.pollMs ?? 1_000) <= 0) {
+      throw new Error("Reconciliation timing must use a non-negative timeout and positive poll");
+    }
+  }
+
+  private evaluateDerivativeReconciliation(
+    request: DerivativeComboReconciliationRequest,
+    lifecycle: DerivativeOrderLifecycle,
+    trades: DerivativeExecution[]
+  ): DerivativeComboReconciliation {
+    const base = {
+      aggregateStatus: lifecycle.status,
+      filledQuantity: lifecycle.filledQuantity,
+      remainingQuantity: lifecycle.remainingQuantity,
+      multiplier: request.multiplier,
+    };
+    const recovery = (reason: string): DerivativeComboReconciliation => ({
+      ...base,
+      state: "RECOVERY_REQUIRED",
+      reason,
+      legs: [],
+      grossPoints: null,
+      grossAmount: null,
+      commission: null,
+      netAmount: null,
+    });
+    if (lifecycle.quantity !== request.quantity) {
+      return recovery("Aggregate order quantity does not match the reviewed combo");
+    }
+    if (lifecycle.clientOrderId !== null && lifecycle.clientOrderId !== request.clientOrderId) {
+      return recovery("Aggregate client order reference does not match the reviewed combo");
+    }
+    const expectedLegs = request.legs.map(({ conid, ratio }) => ({ conid, ratio }));
+    if (JSON.stringify(lifecycle.legs) !== JSON.stringify(expectedLegs)) {
+      return recovery("Aggregate combo legs do not match the reviewed combo");
+    }
+
+    const matching = trades.filter(({ clientOrderId }) => clientOrderId === request.clientOrderId);
+    const executionIds = new Set<string>();
+    for (const trade of matching) {
+      if (executionIds.has(trade.executionId)) {
+        return recovery("Duplicate execution ID requires manual recovery");
+      }
+      executionIds.add(trade.executionId);
+      if (trade.orderId !== null && trade.orderId !== request.orderId) {
+        return recovery("Execution order ID does not match the reviewed combo");
+      }
+      const expected = request.legs.find(({ conid }) => conid === trade.conid);
+      if (expected === undefined) {
+        return recovery("Execution contains an unexpected combo leg");
+      }
+      if (trade.side !== this.sideForRatio(expected.ratio)) {
+        return recovery("Execution side does not match the reviewed combo ratio");
+      }
+      if (
+        trade.quantity <= 0 ||
+        trade.price === null ||
+        trade.price < 0 ||
+        trade.commission === null ||
+        trade.commission < 0 ||
+        trade.executedAt === null
+      ) {
+        return recovery("Execution contains incomplete economics or timing evidence");
+      }
+    }
+
+    const completeExecutions = matching.flatMap((trade) =>
+      trade.side !== "UNKNOWN" &&
+      trade.price !== null &&
+      trade.commission !== null &&
+      trade.executedAt !== null
+        ? [
+            {
+              ...trade,
+              side: trade.side,
+              price: trade.price,
+              commission: trade.commission,
+              executedAt: trade.executedAt,
+            },
+          ]
+        : []
+    );
+
+    const summaries: DerivativeLegExecutionSummary[] = [];
+    for (const expected of request.legs) {
+      const executions = completeExecutions.filter(({ conid }) => conid === expected.conid);
+      const quantity = executions.reduce((sum, trade) => sum + trade.quantity, 0);
+      const expectedQuantity = lifecycle.filledQuantity * Math.abs(expected.ratio);
+      if (quantity > expectedQuantity) {
+        return recovery("Execution quantity exceeds the aggregate fill");
+      }
+      if (quantity < expectedQuantity) {
+        return {
+          ...base,
+          state: "PENDING",
+          reason: "Terminal order is missing expected execution evidence",
+          legs: summaries,
+          grossPoints: null,
+          grossAmount: null,
+          commission: null,
+          netAmount: null,
+        };
+      }
+      if (quantity > 0) {
+        summaries.push({
+          conid: expected.conid,
+          side: this.sideForRatio(expected.ratio),
+          quantity,
+          averagePrice: this.round(
+            executions.reduce((sum, trade) => sum + trade.price * trade.quantity, 0) / quantity,
+            8
+          ),
+          commission: this.round(
+            executions.reduce((sum, trade) => sum + trade.commission, 0),
+            2
+          ),
+          executionCount: executions.length,
+        });
+      }
+    }
+
+    const cashFlowPoints = completeExecutions.reduce(
+      (sum, trade) => sum + (trade.side === "SELL" ? 1 : -1) * trade.price * trade.quantity,
+      0
+    );
+    const grossPoints =
+      lifecycle.filledQuantity > 0 ? this.round(cashFlowPoints / lifecycle.filledQuantity, 8) : 0;
+    const grossAmount = this.round(cashFlowPoints * request.multiplier, 2);
+    const commission = this.round(
+      completeExecutions.reduce((sum, trade) => sum + trade.commission, 0),
+      2
+    );
+    const result: DerivativeComboReconciliation = {
+      ...base,
+      state: this.isTerminalDerivativeStatus(lifecycle.status) ? "VERIFIED" : "PENDING",
+      reason: null,
+      legs: summaries,
+      grossPoints,
+      grossAmount,
+      commission,
+      netAmount: this.round(grossAmount - commission, 2),
+    };
+    if (lifecycle.status === "FILLED" && lifecycle.filledQuantity !== request.quantity) {
+      return recovery("Filled aggregate quantity does not match the reviewed combo");
+    }
+    return result;
+  }
+
+  private sideForRatio(ratio: number): DerivativeExecutionSide {
+    return ratio > 0 ? "BUY" : "SELL";
+  }
+
+  private isTerminalDerivativeStatus(status: DerivativeOrderStatus): boolean {
+    return status === "FILLED" || status === "CANCELED" || status === "REJECTED";
+  }
+
+  private round(value: number, decimalPlaces: number): number {
+    const factor = 10 ** decimalPlaces;
+    return Math.round((value + Number.EPSILON) * factor) / factor;
   }
 
   private parseComboLegs(conidex: string | undefined): { conid: number; ratio: number }[] {
@@ -2042,6 +2254,11 @@ export class IbkrClient
   /** Overridable in request-level tests so snapshot warm-up does not sleep. */
   protected wait(ms: number): Promise<void> {
     return sleep(ms);
+  }
+
+  /** Overridable monotonic-enough wall clock for bounded polling tests. */
+  protected now(): number {
+    return Date.now();
   }
 
   private normalizeQuote(
