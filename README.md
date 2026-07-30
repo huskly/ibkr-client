@@ -168,7 +168,9 @@ whether live execution is allowed.
 
 - `submitDerivativeCombo(...)` places one atomic combo with the exact legs, signed ratios,
   quantity, price effect, limit, TIF, and session supplied by the caller. The request requires a
-  unique client order ID plus CME `manualIndicator` and `extOperator` metadata.
+  unique client order ID. Futures-option (`FOP`) writes also require the caller's exact CME
+  `extOperator` and manual/automated-origin `manualIndicator`; equity-option (`OPT`) writes omit
+  both CME-only fields.
 - `acknowledgeOrderWarning(...)` replies once to an exact broker warning ID. Only documented
   warning message IDs are marked `known`; consumers must stop on unknown warnings.
 - `getDerivativeOrderStatus(...)` performs a fresh order read and normalizes pending, working,
@@ -181,9 +183,10 @@ whether live execution is allowed.
   returns individual leg fills with execution ID, conid, side, quantity, price, commission,
   commission currency, net amount, venue, and execution time. Customer order IDs allow fills to be
   reconciled back to the atomic combo. Missing provider values remain `null` rather than estimated.
-- `cancelDerivativeOrder(...)` sends one exact cancellation request with the required operator
-  metadata and returns only a typed `requested` acknowledgement. Callers remain responsible for
-  reading until a terminal state and verifying that a cancellation actually reached `CANCELED`.
+- `cancelDerivativeOrder(...)` sends one exact cancellation request and returns only a typed
+  `requested` acknowledgement. Its required `assetClass` lets the client apply the same
+  product-aware CME metadata rule without guessing from an order ID. Callers remain responsible
+  for reading until a terminal state and verifying that cancellation reached `CANCELED`.
 
 Placement, warning replies, and cancellation deliberately use single-attempt HTTP writes so a
 transport retry cannot duplicate a broker action. A BUY-oriented net credit remains negative at

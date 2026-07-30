@@ -20,6 +20,7 @@ import type {
   DerivativeContract,
   DerivativeContractQuery,
   DerivativeComboExecutionRequest,
+  DerivativeOrderCancelRequest,
   DerivativeComboPreviewRequest,
   DerivativeComboPreviewResult,
   DerivativeDiscoveryClient,
@@ -350,7 +351,10 @@ export class IbkrClient
     if (!request.clientOrderId.trim() || request.clientOrderId.length > 64) {
       throw new Error("Client order ID must contain 1 to 64 characters");
     }
-    if (!request.extOperator.trim()) throw new Error("External operator is required");
+    const cmeOperatorMetadata = this.cmeOperatorMetadata(
+      request.legs[0].contract.assetClass,
+      request
+    );
     const diagnostics = await this.getTradingDiagnostics(request.accountId);
     if (!diagnostics.authenticated || diagnostics.competingSession) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
@@ -366,8 +370,7 @@ export class IbkrClient
           {
             ...this.comboOrderTicket(request),
             cOID: request.clientOrderId,
-            extOperator: request.extOperator,
-            manualIndicator: request.manualIndicator,
+            ...cmeOperatorMetadata,
           },
         ],
       },
@@ -451,23 +454,18 @@ export class IbkrClient
       });
   }
 
-  async cancelDerivativeOrder(input: {
-    accountId: string;
-    orderId: string;
-    extOperator: string;
-    manualIndicator: boolean;
-  }): Promise<DerivativeOrderCancellationResult> {
-    if (!input.accountId.trim() || !input.orderId.trim() || !input.extOperator.trim()) {
-      throw new Error("Exact account, order, and external operator are required");
+  async cancelDerivativeOrder(
+    input: DerivativeOrderCancelRequest
+  ): Promise<DerivativeOrderCancellationResult> {
+    if (!input.accountId.trim() || !input.orderId.trim()) {
+      throw new Error("Exact account and order IDs are required");
     }
+    const cmeOperatorMetadata = this.cmeOperatorMetadata(input.assetClass, input);
     await this.prepareBrokerageAccount(input.accountId);
     const response = await this.sendRequest<IbkrOrderCancellationResponse>({
       path: `iserver/account/${input.accountId}/order/${encodeURIComponent(input.orderId)}`,
       method: "DELETE",
-      params: {
-        extOperator: input.extOperator,
-        manualIndicator: input.manualIndicator,
-      },
+      ...(Object.keys(cmeOperatorMetadata).length > 0 ? { params: cmeOperatorMetadata } : {}),
     });
     return {
       state: "requested",
@@ -735,6 +733,20 @@ export class IbkrClient
         throw new Error(`Combo legs differ on ${field}`);
       }
     }
+  }
+
+  private cmeOperatorMetadata(
+    assetClass: DerivativeAssetClass,
+    input: { extOperator?: string; manualIndicator?: boolean }
+  ): { extOperator: string; manualIndicator: boolean } | Record<string, never> {
+    if (assetClass === "OPT") return {};
+    if (!input.extOperator?.trim() || input.manualIndicator === undefined) {
+      throw new Error(`${assetClass} orders require exact CME operator metadata`);
+    }
+    return {
+      extOperator: input.extOperator,
+      manualIndicator: input.manualIndicator,
+    };
   }
 
   private comboOrderTicket(request: DerivativeComboPreviewRequest): {

@@ -38,17 +38,37 @@ class FakeIbkrClient extends IbkrClient {
   }
 }
 
-function contract(conid: number, strike: number): DerivativeContract {
+function contract(
+  conid: number,
+  strike: number,
+  assetClass: DerivativeContract["assetClass"] = "FOP"
+): DerivativeContract {
   return {
     conid,
-    assetClass: "FOP",
-    underlying: "NQ",
+    assetClass,
+    underlying: assetClass === "OPT" ? "SPY" : "NQ",
     expiration: "2026-08-21",
     strike,
     right: "P",
-    tradingClass: "QN3",
-    exchange: "CME",
+    tradingClass: assetClass === "OPT" ? "SPY" : "QN3",
+    exchange: assetClass === "OPT" ? "SMART" : "CME",
     multiplier: 20,
+  };
+}
+
+function equityOptionExecutionRequest(): DerivativeComboExecutionRequest {
+  return {
+    accountId: "U123",
+    legs: [
+      { contract: contract(111, 620, "OPT"), ratio: 1 },
+      { contract: contract(222, 625, "OPT"), ratio: -1 },
+    ],
+    quantity: 1,
+    priceEffect: "CREDIT",
+    limit: 0.96,
+    tif: "DAY",
+    session: "REGULAR",
+    clientOrderId: "huskly-spy-vertical",
   };
 }
 
@@ -114,6 +134,41 @@ void test("atomic submission includes exact ratios, signed credit, client ID, an
     ],
   });
   assert.equal(client.calls.filter(({ path }) => path === "iserver/account/U123/orders").length, 1);
+});
+
+void test("equity-option submission omits CME operator metadata", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [{ order_id: "777", order_status: "PreSubmitted" }];
+    }
+    return sessionResponse(input);
+  });
+
+  const result = await client.submitDerivativeCombo(equityOptionExecutionRequest());
+  assert.equal(result.state, "accepted");
+  const placement = client.calls.find(({ path }) => path === "iserver/account/U123/orders");
+  const ticket = (placement?.data as { orders?: Record<string, unknown>[] } | undefined)
+    ?.orders?.[0];
+  assert.ok(ticket);
+  assert.equal("extOperator" in ticket, false);
+  assert.equal("manualIndicator" in ticket, false);
+});
+
+void test("futures-option submission fails before broker access without CME metadata", async () => {
+  const client = new FakeIbkrClient(() => {
+    throw new Error("broker must not be called");
+  });
+  const {
+    extOperator: _extOperator,
+    manualIndicator: _manualIndicator,
+    ...request
+  } = executionRequest();
+
+  await assert.rejects(
+    () => client.submitDerivativeCombo(request),
+    /FOP orders require exact CME operator metadata/
+  );
+  assert.equal(client.calls.length, 0);
 });
 
 void test("warning replies distinguish known chains from unknown warnings", async () => {
@@ -338,6 +393,7 @@ void test("cancel sends one explicit request and returns a typed request acknowl
   const result = await client.cancelDerivativeOrder({
     accountId: "U123",
     orderId: "777",
+    assetClass: "FOP",
     extOperator: "felipecsl",
     manualIndicator: true,
   });
@@ -401,4 +457,24 @@ void test("placement transport errors retain their structured details and are ne
     return true;
   });
   assert.equal(client.calls.filter(({ path }) => path === "iserver/account/U123/orders").length, 1);
+});
+
+void test("equity-option cancellation omits CME operator metadata", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U123"], selectedAccount: "U123" };
+    }
+    if (input.method === "DELETE") return { msg: "Request was submitted" };
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  await client.cancelDerivativeOrder({
+    accountId: "U123",
+    orderId: "777",
+    assetClass: "OPT",
+  });
+  assert.deepEqual(client.calls.at(-1), {
+    path: "iserver/account/U123/order/777",
+    method: "DELETE",
+  });
 });

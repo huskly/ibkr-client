@@ -291,11 +291,20 @@ export interface DerivativePreviewClient {
   ): Promise<DerivativeComboPreviewResult>;
 }
 
-export interface DerivativeComboExecutionRequest extends DerivativeComboPreviewRequest {
+/** CME Rule 536-B metadata. Both fields must be supplied together when required. */
+export type CmeOperatorMetadata =
+  | { extOperator: string; manualIndicator: boolean }
+  | { extOperator?: never; manualIndicator?: never };
+
+export type DerivativeComboExecutionRequest = DerivativeComboPreviewRequest & {
   clientOrderId: string;
-  extOperator: string;
-  manualIndicator: boolean;
-}
+} & CmeOperatorMetadata;
+
+export type DerivativeOrderCancelRequest = {
+  accountId: string;
+  orderId: string;
+  assetClass: DerivativeAssetClass;
+} & CmeOperatorMetadata;
 
 export interface OrderWarning {
   replyId: string;
@@ -401,12 +410,9 @@ export interface DerivativeExecutionClient {
   getDerivativeOrderStatus(accountId: string, orderId: string): Promise<DerivativeOrderLifecycle>;
   findDerivativeOrder(input: DerivativeOrderLookup): Promise<DerivativeOrderLifecycle>;
   getDerivativeExecutions(input: DerivativeExecutionQuery): Promise<DerivativeExecution[]>;
-  cancelDerivativeOrder(input: {
-    accountId: string;
-    orderId: string;
-    extOperator: string;
-    manualIndicator: boolean;
-  }): Promise<DerivativeOrderCancellationResult>;
+  cancelDerivativeOrder(
+    input: DerivativeOrderCancelRequest
+  ): Promise<DerivativeOrderCancellationResult>;
 }
 
 /**
