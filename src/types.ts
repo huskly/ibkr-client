@@ -304,6 +304,9 @@ export type DerivativeOrderSide = "BUY" | "SELL";
 
 export type DerivativeSingleOrderType = "LMT" | "STP";
 
+/** Order kinds accepted in a derivative graph. MARKET is intentionally graph-only. */
+export type DerivativeOrderGraphOrderType = DerivativeSingleOrderType | "MKT";
+
 type DerivativeSingleOrderFields = {
   accountId: string;
   contract: DerivativeContract;
@@ -345,6 +348,90 @@ export interface DerivativeContingentWarningContinuation {
   replyId: string;
   parentClientOrderId: string;
 }
+
+/** Caller-stable identity and complete placement evidence for one graph member. */
+export type DerivativeOrderGraphNode =
+  | ({
+      memberId: string;
+      parentMemberId?: string;
+    } & DerivativeComboPreviewRequest &
+      CmeOperatorMetadata)
+  | ({
+      memberId: string;
+      parentMemberId?: string;
+      accountId: string;
+      contract: DerivativeContract;
+      side: DerivativeOrderSide;
+      quantity: number;
+      tif: "DAY" | "GTC";
+      session: "REGULAR" | "OVERNIGHT";
+    } & (
+      | { orderType: "LMT"; limit: number; stopPrice?: never }
+      | { orderType: "STP"; stopPrice: number; limit?: never }
+      | { orderType: "MKT"; limit?: never; stopPrice?: never }
+    ) &
+      CmeOperatorMetadata);
+
+export interface DerivativeOrderGraphRequest {
+  accountId: string;
+  /** Durable caller correlation for the root and the complete graph. */
+  rootClientOrderId: string;
+  /** Parent nodes must precede children; graphs are deliberately bounded to eight members. */
+  nodes: readonly DerivativeOrderGraphNode[];
+}
+
+export interface DerivativeOrderGraphMemberEvidence {
+  memberId: string;
+  role: "root" | "child" | "grandchild" | "descendant" | "unknown";
+  parentMemberId: string | null;
+  parentOrderId: string | null;
+  orderId: string | null;
+  status: DerivativeOrderStatus;
+  clientOrderId: string;
+  request: DerivativeOrderGraphNode;
+}
+
+/** JSON-safe evidence required to resume the exact broker reply after restart. */
+export interface DerivativeOrderGraphWarningContinuation {
+  replyId: string;
+  request: DerivativeOrderGraphRequest;
+  members: DerivativeOrderGraphMemberEvidence[];
+}
+
+export type DerivativeOrderGraphResult =
+  | {
+      state: "accepted";
+      rootClientOrderId: string;
+      members: DerivativeOrderGraphMemberEvidence[];
+      warnings: OrderWarning[];
+    }
+  | {
+      state: "warning";
+      rootClientOrderId: string;
+      members: DerivativeOrderGraphMemberEvidence[];
+      warnings: OrderWarning[];
+      continuation: DerivativeOrderGraphWarningContinuation;
+    }
+  | {
+      state: "rejected";
+      rootClientOrderId: string;
+      members: DerivativeOrderGraphMemberEvidence[];
+      reasons: string[];
+      errors: BrokerErrorDetail[];
+    }
+  | {
+      state: "recovery_required";
+      rootClientOrderId: string;
+      members: DerivativeOrderGraphMemberEvidence[];
+      reasons: string[];
+      warnings: OrderWarning[];
+      errors: BrokerErrorDetail[];
+      unrecognizedResponses: unknown[];
+    };
+
+export type DerivativeOrderGraphLookup =
+  | { accountId: string; rootClientOrderId: string; orderId?: never }
+  | { accountId: string; orderId: string; rootClientOrderId?: never };
 
 export type DerivativeMultiOrderResult =
   | {
@@ -524,6 +611,17 @@ export interface DerivativeComboReconciliation {
 }
 
 export interface DerivativeExecutionClient {
+  submitDerivativeOrderGraph(
+    request: DerivativeOrderGraphRequest
+  ): Promise<DerivativeOrderGraphResult>;
+  acknowledgeDerivativeOrderGraphWarning(input: {
+    continuation: DerivativeOrderGraphWarningContinuation;
+    confirmed: true;
+  }): Promise<DerivativeOrderGraphResult>;
+  recoverDerivativeOrderGraph(
+    input: DerivativeOrderGraphLookup,
+    request: DerivativeOrderGraphRequest
+  ): Promise<DerivativeOrderGraphResult>;
   submitDerivativeCombo(
     request: DerivativeComboExecutionRequest
   ): Promise<DerivativeOrderSubmissionResult>;

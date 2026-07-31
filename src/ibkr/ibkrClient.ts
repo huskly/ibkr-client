@@ -34,6 +34,12 @@ import type {
   DerivativeExecutionSide,
   DerivativeLegExecutionSummary,
   DerivativeMultiOrderResult,
+  DerivativeOrderGraphMemberEvidence,
+  DerivativeOrderGraphLookup,
+  DerivativeOrderGraphNode,
+  DerivativeOrderGraphRequest,
+  DerivativeOrderGraphResult,
+  DerivativeOrderGraphWarningContinuation,
   DerivativeOrderCancellationResult,
   DerivativeOrderCancelRequest,
   DerivativeOrderLifecycle,
@@ -509,6 +515,109 @@ export class IbkrClient
     return this.normalizeMultiOrderSubmission(response, parent.clientOrderId);
   }
 
+  async submitDerivativeOrderGraph(
+    request: DerivativeOrderGraphRequest
+  ): Promise<DerivativeOrderGraphResult> {
+    this.validateOrderGraph(request);
+    const diagnostics = await this.getTradingDiagnostics(request.accountId);
+    if (!diagnostics.authenticated || diagnostics.competingSession) {
+      throw new Error("IBKR brokerage session is not safely authenticated for submission");
+    }
+    await this.prepareBrokerageAccount(request.accountId);
+    const response = await this.singleAttemptRequest<
+      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+    >({
+      path: `iserver/account/${request.accountId}/orders`,
+      method: "POST",
+      data: { orders: request.nodes.map((node) => this.graphOrderTicket(request, node)) },
+    });
+    return this.normalizeOrderGraphSubmission(response, request, []);
+  }
+
+  async acknowledgeDerivativeOrderGraphWarning(input: {
+    continuation: DerivativeOrderGraphWarningContinuation;
+    confirmed: true;
+  }): Promise<DerivativeOrderGraphResult> {
+    if ((input.confirmed as unknown) !== true)
+      throw new Error("Order warning confirmation must be true");
+    this.validateOrderGraph(input.continuation.request);
+    if (!input.continuation.replyId.trim())
+      throw new Error("An exact warning reply ID is required");
+    const response = await this.singleAttemptRequest<
+      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+    >({
+      path: `iserver/reply/${encodeURIComponent(input.continuation.replyId)}`,
+      method: "POST",
+      data: { confirmed: true },
+    });
+    return this.normalizeOrderGraphSubmission(
+      response,
+      input.continuation.request,
+      input.continuation.members
+    );
+  }
+
+  async recoverDerivativeOrderGraph(
+    input: DerivativeOrderGraphLookup,
+    request: DerivativeOrderGraphRequest
+  ): Promise<DerivativeOrderGraphResult> {
+    this.validateOrderGraph(request);
+    if (input.accountId !== request.accountId)
+      throw new Error("Graph recovery account does not match request");
+    await this.prepareBrokerageAccount(input.accountId);
+    const response = await this.req<IbkrLiveOrdersResponse>({
+      path: "iserver/account/orders",
+      params: { force: true, accountId: input.accountId },
+    });
+    const expectedIds = new Set(
+      request.nodes.map((node) => this.graphClientOrderId(request, node))
+    );
+    const candidates = (response.orders ?? []).filter(
+      (order) =>
+        this.orderBelongsToAccount(order, input.accountId) &&
+        expectedIds.has(order.cOID ?? order.order_ref ?? "")
+    );
+    if (
+      input.orderId !== undefined &&
+      !candidates.some((order) => String(order.order_id ?? order.orderId) === input.orderId)
+    ) {
+      throw new Error(`Broker order ${input.orderId} is not a member of the requested graph`);
+    }
+    if (
+      input.rootClientOrderId !== undefined &&
+      input.rootClientOrderId !== request.rootClientOrderId
+    ) {
+      throw new Error("Root client order ID does not match the requested graph");
+    }
+    const byClientId = new Map(
+      candidates.map((order) => [order.cOID ?? order.order_ref ?? "", order])
+    );
+    const members = request.nodes.map((node) => {
+      const order = byClientId.get(this.graphClientOrderId(request, node));
+      return this.graphMemberEvidence(request, node, order);
+    });
+    const ids = members.flatMap(({ orderId }) => (orderId === null ? [] : [orderId]));
+    if (candidates.length !== request.nodes.length || new Set(ids).size !== request.nodes.length) {
+      return {
+        state: "recovery_required",
+        rootClientOrderId: request.rootClientOrderId,
+        members,
+        reasons: [
+          "Exact graph recovery found incomplete, duplicated, or ambiguous member evidence",
+        ],
+        warnings: [],
+        errors: [],
+        unrecognizedResponses: [],
+      };
+    }
+    return {
+      state: "accepted",
+      rootClientOrderId: request.rootClientOrderId,
+      members: this.attachGraphParentOrderIds(members),
+      warnings: [],
+    };
+  }
+
   async acknowledgeOrderWarning(input: {
     replyId: string;
     confirmed: true;
@@ -936,6 +1045,105 @@ export class IbkrClient
     }
   }
 
+  private validateOrderGraph(request: DerivativeOrderGraphRequest): void {
+    if (!request.accountId.trim()) throw new Error("An explicit IBKR account ID is required");
+    if (!request.rootClientOrderId.trim() || request.rootClientOrderId.length > 48) {
+      throw new Error("Root client order ID must contain 1 to 48 characters");
+    }
+    if (request.nodes.length < 1 || request.nodes.length > 8) {
+      throw new Error("Derivative order graphs require 1 to 8 members");
+    }
+    const seen = new Set<string>();
+    let roots = 0;
+    for (const node of request.nodes) {
+      if (
+        !node.memberId.trim() ||
+        node.memberId.length > 15 ||
+        !/^[A-Za-z0-9_-]+$/.test(node.memberId)
+      ) {
+        throw new Error("Graph member IDs must contain 1 to 15 safe characters");
+      }
+      if (seen.has(node.memberId)) throw new Error("Graph member IDs must be unique");
+      if (node.accountId !== request.accountId)
+        throw new Error("Every graph member must target the graph account");
+      if (node.parentMemberId === undefined) roots += 1;
+      else if (!seen.has(node.parentMemberId))
+        throw new Error("Graph parents must precede their children");
+      if ("legs" in node) {
+        this.validateComboPreview(node);
+      } else {
+        this.validateGraphSingleNode(node);
+      }
+      seen.add(node.memberId);
+    }
+    if (roots !== 1 || request.nodes[0]?.parentMemberId !== undefined) {
+      throw new Error("Derivative order graphs require exactly one root as the first member");
+    }
+  }
+
+  private validateGraphSingleNode(
+    node: Exclude<DerivativeOrderGraphNode, { legs: unknown }>
+  ): void {
+    const orderType: unknown = node.orderType;
+    if (orderType !== "LMT" && orderType !== "STP" && orderType !== "MKT") {
+      throw new Error("Graph single order type must be LMT, STP, or MKT");
+    }
+    if (!Number.isSafeInteger(node.quantity) || node.quantity <= 0)
+      throw new Error("Order quantity must be a positive integer");
+    if (!Number.isSafeInteger(node.contract.conid) || node.contract.conid <= 0)
+      throw new Error("Order contract has an invalid IBKR conid");
+    if (node.orderType === "LMT" && (!Number.isFinite(node.limit) || node.limit <= 0))
+      throw new Error("LIMIT order requires a positive limit price");
+    if (node.orderType === "STP" && (!Number.isFinite(node.stopPrice) || node.stopPrice <= 0))
+      throw new Error("STOP order requires a positive stop price");
+    this.cmeOperatorMetadata(node.contract.assetClass, node);
+  }
+
+  private graphClientOrderId(
+    request: DerivativeOrderGraphRequest,
+    node: DerivativeOrderGraphNode
+  ): string {
+    return node.parentMemberId === undefined
+      ? request.rootClientOrderId
+      : `${request.rootClientOrderId}:${node.memberId}`;
+  }
+
+  private graphOrderTicket(
+    request: DerivativeOrderGraphRequest,
+    node: DerivativeOrderGraphNode
+  ): Record<string, unknown> {
+    const parent = request.nodes.find(({ memberId }) => memberId === node.parentMemberId);
+    if (node.parentMemberId !== undefined && parent === undefined) {
+      throw new Error("Graph parent evidence was lost after validation");
+    }
+    const identity: Record<string, string> = {
+      cOID: this.graphClientOrderId(request, node),
+    };
+    if (parent !== undefined) identity["parentId"] = this.graphClientOrderId(request, parent);
+    if ("legs" in node)
+      return {
+        ...this.comboOrderTicket(node),
+        ...identity,
+        ...this.cmeOperatorMetadata(node.legs[0].contract.assetClass, node),
+      };
+    return {
+      acctId: node.accountId,
+      conid: node.contract.conid,
+      orderType: node.orderType,
+      side: node.side,
+      ...(node.orderType === "LMT"
+        ? { price: node.limit }
+        : node.orderType === "STP"
+          ? { price: node.stopPrice }
+          : {}),
+      tif: node.tif,
+      quantity: node.quantity,
+      outsideRTH: node.session === "OVERNIGHT",
+      ...identity,
+      ...this.cmeOperatorMetadata(node.contract.assetClass, node),
+    };
+  }
+
   private validateSingleOrder(request: DerivativeSingleOrderRequest): void {
     this.validateSingleOrderFields(request);
     const identityFields = request as unknown as {
@@ -1111,6 +1319,147 @@ export class IbkrClient
     }
 
     return this.singleOrderRecoveryResult(decoded, orders);
+  }
+
+  private graphMemberEvidence(
+    request: DerivativeOrderGraphRequest,
+    node: DerivativeOrderGraphNode,
+    order?: IbkrLiveOrder
+  ): DerivativeOrderGraphMemberEvidence {
+    const index = request.nodes.findIndex(({ memberId }) => memberId === node.memberId);
+    let depth = 0;
+    let parentId = node.parentMemberId;
+    while (parentId !== undefined) {
+      depth += 1;
+      parentId = request.nodes.find(({ memberId }) => memberId === parentId)?.parentMemberId;
+    }
+    const rawId = order?.order_id ?? order?.orderId;
+    const orderId =
+      typeof rawId === "string" || typeof rawId === "number" ? String(rawId).trim() || null : null;
+    return {
+      memberId: node.memberId,
+      role:
+        index < 0
+          ? "unknown"
+          : depth === 0
+            ? "root"
+            : depth === 1
+              ? "child"
+              : depth === 2
+                ? "grandchild"
+                : "descendant",
+      parentMemberId: node.parentMemberId ?? null,
+      parentOrderId: null,
+      orderId,
+      status:
+        order === undefined
+          ? "WARNING_PENDING"
+          : this.normalizeDerivativeOrderStatus(
+              order.order_status ?? order.orderStatus ?? order.status,
+              0,
+              0
+            ),
+      clientOrderId: this.graphClientOrderId(request, node),
+      request: node,
+    };
+  }
+
+  private attachGraphParentOrderIds(
+    members: DerivativeOrderGraphMemberEvidence[]
+  ): DerivativeOrderGraphMemberEvidence[] {
+    const ids = new Map(members.map(({ memberId, orderId }) => [memberId, orderId]));
+    return members.map((member) => ({
+      ...member,
+      parentOrderId:
+        member.parentMemberId === null ? null : (ids.get(member.parentMemberId) ?? null),
+    }));
+  }
+
+  private normalizeOrderGraphSubmission(
+    response: IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[],
+    request: DerivativeOrderGraphRequest,
+    previousMembers: DerivativeOrderGraphMemberEvidence[]
+  ): DerivativeOrderGraphResult {
+    const decoded = this.decodeOrderSubmission(response);
+    const cleanOrders =
+      decoded.warnings.length === 0 &&
+      decoded.errors.length === 0 &&
+      decoded.unrecognizedResponses.length === 0;
+    const distinct =
+      new Set(decoded.orders.map(({ orderId }) => orderId)).size === decoded.orders.length;
+    const members = this.attachGraphParentOrderIds(
+      request.nodes.map((node, index) => {
+        const order = decoded.orders[index];
+        if (order === undefined)
+          return (
+            previousMembers.find(({ memberId }) => memberId === node.memberId) ??
+            this.graphMemberEvidence(request, node)
+          );
+        const evidence = this.graphMemberEvidence(request, node, {
+          order_id: order.orderId,
+          order_status: order.status,
+        });
+        return { ...evidence, status: order.status };
+      })
+    );
+    if (
+      decoded.warnings.length === 1 &&
+      decoded.orders.length === 0 &&
+      decoded.errors.length === 0 &&
+      decoded.unrecognizedResponses.length === 0
+    ) {
+      const warning = decoded.warnings[0];
+      if (warning === undefined) throw new Error("Graph warning evidence was lost");
+      return {
+        state: "warning",
+        rootClientOrderId: request.rootClientOrderId,
+        members,
+        warnings: decoded.warnings,
+        continuation: { replyId: warning.replyId, request, members },
+      };
+    }
+    if (
+      decoded.errors.length > 0 &&
+      !decoded.responseIsArray &&
+      decoded.orders.length === 0 &&
+      decoded.warnings.length === 0 &&
+      decoded.unrecognizedResponses.length === 0
+    ) {
+      return {
+        state: "rejected",
+        rootClientOrderId: request.rootClientOrderId,
+        members,
+        reasons: decoded.errors.map(({ message }) => message),
+        errors: decoded.errors,
+      };
+    }
+    if (
+      cleanOrders &&
+      distinct &&
+      decoded.orders.length === request.nodes.length &&
+      decoded.pendingCancelOrderIds.length === 0 &&
+      decoded.orders.every(
+        ({ status }) => status !== "UNKNOWN" && status !== "REJECTED" && status !== "CANCELED"
+      )
+    ) {
+      return {
+        state: "accepted",
+        rootClientOrderId: request.rootClientOrderId,
+        members,
+        warnings: [],
+      };
+    }
+    return {
+      state: "recovery_required",
+      rootClientOrderId: request.rootClientOrderId,
+      members,
+      reasons: [
+        this.submissionRecoveryReason(decoded, decoded.orders.length, request.nodes.length),
+      ],
+      warnings: decoded.warnings,
+      errors: decoded.errors,
+      unrecognizedResponses: decoded.unrecognizedResponses,
+    };
   }
 
   private normalizeMultiOrderSubmission(

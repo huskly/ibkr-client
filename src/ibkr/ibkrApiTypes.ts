@@ -165,6 +165,7 @@ export interface IbkrLiveOrder {
   order_time?: string;
   conidex?: string;
   cOID?: string;
+  parentId?: string | number;
   order_ref?: string;
   commissionAndFees?: string | number;
 }

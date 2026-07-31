@@ -14,14 +14,14 @@ the keys below are generated and registered in the IBKR self-service portal.
 
 The repository contains only the reusable client library:
 
-| Path                         | Purpose                                                                     |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| `src/types.ts`               | Broker-neutral `BrokerClient` interface and normalized domain types         |
-| `src/ibkr/ibkrClient.ts`     | `IbkrClient` — typed wrapper over `ibkr-client` implementing `BrokerClient` |
-| `src/ibkr/oauthConfig.ts`    | Builds the OAuth config from `.pem` files + env vars                        |
-| `src/ibkr/dhPrime.ts`        | Extracts the DH prime (hex) from `dhparam.pem`                              |
-| `src/ibkr/optionContract.ts` | Canonical OSI parsing and formatting for IBKR option contracts              |
-| `src/ibkr/derivativeContract.ts` | Normalizes OPT/FOP identity and market-data availability              |
+| Path                             | Purpose                                                                     |
+| -------------------------------- | --------------------------------------------------------------------------- |
+| `src/types.ts`                   | Broker-neutral `BrokerClient` interface and normalized domain types         |
+| `src/ibkr/ibkrClient.ts`         | `IbkrClient` — typed wrapper over `ibkr-client` implementing `BrokerClient` |
+| `src/ibkr/oauthConfig.ts`        | Builds the OAuth config from `.pem` files + env vars                        |
+| `src/ibkr/dhPrime.ts`            | Extracts the DH prime (hex) from `dhparam.pem`                              |
+| `src/ibkr/optionContract.ts`     | Canonical OSI parsing and formatting for IBKR option contracts              |
+| `src/ibkr/derivativeContract.ts` | Normalizes OPT/FOP identity and market-data availability                    |
 
 The `*.pem` files (`private_signature.pem`, `private_encryption.pem`,
 `dhparam.pem`, plus the public keys) are the cryptographic material from the
@@ -298,3 +298,24 @@ to guard against committed secrets.
 - The private keys and `.env` are git-ignored — do not commit them.
 - Credentials are read from the environment, never hardcoded.
 - CI scans every change with gitleaks to catch accidentally committed secrets.
+
+#### Resumable derivative order graphs
+
+`submitDerivativeOrderGraph(...)` is the bounded (one through eight member) bracket API for
+broker-hosted derivative protection. A graph may combine atomic two-leg LIMIT combos with
+single-option LIMIT, STOP, and MARKET members. Every node has a caller-stable `memberId`; exactly
+one root carries `rootClientOrderId`, and each later node names an already-declared
+`parentMemberId`. This makes root → child → grandchild activation explicit. Accepted and
+fail-closed results retain each node's immutable request evidence (contracts/conids, signed ratios,
+side, quantity, TIF, session, and prices), stable depth role, parent member/broker IDs, and every
+broker order ID. Conids remain correlation evidence only; callers still own durable semantic option
+identity.
+
+Warnings are never acknowledged automatically. A warning result contains a JSON-safe
+`continuation` with the exact reply ID, full graph request, and all correlation accumulated so far;
+persist it before calling `acknowledgeDerivativeOrderGraphWarning(...)`. Each placement or reply is
+attempted once, chained and unknown warnings remain pending for the caller, and mixed, partial,
+duplicated, terminal, malformed, or ambiguous acknowledgements return `recovery_required`.
+`recoverDerivativeOrderGraph(...)` reconstructs the exact graph from its root client ID or any known
+member broker ID and fails closed unless every expected member correlates uniquely. This typed API
+is the safety boundary: consumers should not bypass it with the private raw request client.
