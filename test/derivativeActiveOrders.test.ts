@@ -20,7 +20,11 @@ const config: IbkrOauth1Config = {
 
 class FakeIbkrClient extends IbkrClient {
   readonly calls: RequestInput[] = [];
-  constructor(private readonly orders: unknown) {
+  constructor(
+    private readonly orders: unknown,
+    private readonly selectedAccount = "U123",
+    private readonly switchResponse: unknown = { set: true, acctId: "U123" }
+  ) {
     super(config);
   }
   protected override sendRequest<T>(input: RequestInput): Promise<T> {
@@ -29,8 +33,9 @@ class FakeIbkrClient extends IbkrClient {
       return Promise.resolve({ authenticated: true, competing: false } as T);
     }
     if (input.path === "iserver/accounts") {
-      return Promise.resolve({ accounts: ["U123"], selectedAccount: "U123" } as T);
+      return Promise.resolve({ accounts: ["U123"], selectedAccount: this.selectedAccount } as T);
     }
+    if (input.path === "iserver/account") return Promise.resolve(this.switchResponse as T);
     if (input.path === "iserver/account/orders") return Promise.resolve(this.orders as T);
     throw new Error(`Unexpected request: ${input.path}`);
   }
@@ -456,6 +461,55 @@ void test("fails closed when active order account aliases conflict", async () =>
     orders: [{ account: "U123", acct: "OTHER", orderId: 50 }],
   });
   await assert.rejects(client.listActiveDerivativeOrders("U123"), /unambiguous account identity/);
+});
+
+void test("fails closed when a provided account alias is malformed", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [{ account: 123, acct: "U123", orderId: 50 }],
+  });
+  await assert.rejects(client.listActiveDerivativeOrders("U123"), /unambiguous account identity/);
+});
+
+void test("includes active children from both provider collection aliases", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [
+      {
+        account: "U123",
+        orderId: 50,
+        childOrders: [],
+        children: [{ account: "U123", orderId: 51, parentOrderId: 50 }],
+      },
+    ],
+  });
+  const orders = await client.listActiveDerivativeOrders("U123");
+  assert.deepEqual(
+    orders.map(({ orderId }) => orderId),
+    ["50", "51"]
+  );
+});
+
+void test("fails closed when an account switch is not acknowledged", async () => {
+  const client = new FakeIbkrClient({ snapshot: true, orders: [] }, "OTHER", {
+    set: false,
+    acctId: "U123",
+  });
+  await assert.rejects(
+    client.listActiveDerivativeOrders("U123"),
+    /account switch was not confirmed/
+  );
+});
+
+void test("fails closed when an account switch acknowledges another account", async () => {
+  const client = new FakeIbkrClient({ snapshot: true, orders: [] }, "OTHER", {
+    set: true,
+    acctId: "OTHER",
+  });
+  await assert.rejects(
+    client.listActiveDerivativeOrders("U123"),
+    /account switch was not confirmed/
+  );
 });
 
 void test("fails closed when the active-order snapshot is incomplete", async () => {

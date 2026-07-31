@@ -745,12 +745,13 @@ export class IbkrClient
     }
     const flattened = this.flattenActiveOrders(response.orders);
     const invalidAccountEvidence = flattened.find(({ order }) => {
-      const returnedAccounts = [order.account, order.acct].filter(
-        (value): value is string => typeof value === "string"
-      );
+      const returnedAccounts: readonly unknown[] = [order.account, order.acct];
+      const providedAccounts = returnedAccounts.filter((value) => value !== undefined);
       return (
-        returnedAccounts.length === 0 ||
-        returnedAccounts.some((returnedAccount) => returnedAccount !== accountId)
+        providedAccounts.length === 0 ||
+        providedAccounts.some(
+          (returnedAccount) => typeof returnedAccount !== "string" || returnedAccount !== accountId
+        )
       );
     });
     if (invalidAccountEvidence !== undefined) {
@@ -1949,10 +1950,10 @@ export class IbkrClient
     orders: readonly IbkrLiveOrder[],
     nestedParent: IbkrLiveOrder | null = null
   ): { order: IbkrLiveOrder; nestedParent: IbkrLiveOrder | null }[] {
-    return orders.flatMap((order) => [
-      { order, nestedParent },
-      ...this.flattenActiveOrders(order.childOrders ?? order.children ?? [], order),
-    ]);
+    return orders.flatMap((order) => {
+      const children = [...new Set([...(order.childOrders ?? []), ...(order.children ?? [])])];
+      return [{ order, nestedParent }, ...this.flattenActiveOrders(children, order)];
+    });
   }
 
   private normalizeActiveDerivativeOrder(
@@ -2468,11 +2469,14 @@ export class IbkrClient
     if (brokerageAccounts.accounts && !brokerageAccounts.accounts.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available for trading/order queries.`);
     }
-    await this.req<IbkrSwitchAccountResponse>({
+    const switchedAccount = await this.req<IbkrSwitchAccountResponse>({
       path: "iserver/account",
       method: "POST",
       data: { acctId: accountId },
     });
+    if (switchedAccount.set !== true || switchedAccount.acctId !== accountId) {
+      throw new Error(`IBKR account switch was not confirmed for ${accountId}.`);
+    }
   }
 
   private normalizeStockListing(symbol: string, listing: IbkrStockListing): BrokerInstrument[] {
