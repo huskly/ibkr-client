@@ -304,32 +304,75 @@ export type DerivativeOrderSide = "BUY" | "SELL";
 
 export type DerivativeSingleOrderType = "LMT" | "STP";
 
-export type DerivativeSingleOrderRequest = {
+type DerivativeSingleOrderFields = {
   accountId: string;
   contract: DerivativeContract;
   side: DerivativeOrderSide;
   quantity: number;
-  orderType: DerivativeSingleOrderType;
-  limit?: number;
-  stopPrice?: number;
   tif: "DAY" | "GTC";
   session: "REGULAR" | "OVERNIGHT";
+} & (
+  | { orderType: "LMT"; limit: number; stopPrice?: never }
+  | { orderType: "STP"; stopPrice: number; limit?: never }
+) &
+  CmeOperatorMetadata;
+
+export type DerivativeSingleOrderRequest = DerivativeSingleOrderFields &
+  ({ clientOrderId: string; parentId?: never } | { clientOrderId?: never; parentId: string });
+
+export type DerivativeContingentParentOrderRequest = DerivativeSingleOrderFields & {
   clientOrderId: string;
-  parentId?: string;
-} & CmeOperatorMetadata;
+  parentId?: never;
+};
+
+/** IBKR bracket children use parentId and must not send their own cOID. */
+export type DerivativeContingentChildOrderRequest = DerivativeSingleOrderFields & {
+  clientOrderId?: never;
+  parentId?: never;
+};
+
+export interface DerivativeSubmittedOrder {
+  orderId: string;
+  status: DerivativeOrderStatus;
+  clientOrderId: string | null;
+}
+
+export interface DerivativeContingentOrderEvidence extends DerivativeSubmittedOrder {
+  role: "parent" | "child" | "unknown";
+}
+
+export interface DerivativeContingentWarningContinuation {
+  replyId: string;
+  parentClientOrderId: string;
+}
 
 export type DerivativeMultiOrderResult =
   | {
       state: "accepted";
-      orders: {
-        orderId: string;
-        status: DerivativeOrderStatus;
-        clientOrderId: string | null;
-      }[];
+      orders: [DerivativeContingentOrderEvidence, DerivativeContingentOrderEvidence];
       warnings: OrderWarning[];
     }
-  | { state: "warning"; warnings: OrderWarning[] }
-  | { state: "rejected"; reasons: string[]; errors: BrokerErrorDetail[] };
+  | {
+      state: "warning";
+      warnings: OrderWarning[];
+      continuation: DerivativeContingentWarningContinuation;
+    }
+  | {
+      state: "rejected";
+      parentClientOrderId: string;
+      reasons: string[];
+      errors: BrokerErrorDetail[];
+      orders?: DerivativeContingentOrderEvidence[];
+    }
+  | {
+      state: "recovery_required";
+      parentClientOrderId: string;
+      reasons: string[];
+      orders: DerivativeContingentOrderEvidence[];
+      warnings: OrderWarning[];
+      errors: BrokerErrorDetail[];
+      unrecognizedResponses: Readonly<Record<string, unknown>>[];
+    };
 
 export type DerivativeOrderCancelRequest = {
   accountId: string;
@@ -361,7 +404,20 @@ export type DerivativeOrderSubmissionResult =
       warnings: OrderWarning[];
     }
   | { state: "warning"; warnings: OrderWarning[] }
-  | { state: "rejected"; reasons: string[]; errors: BrokerErrorDetail[] };
+  | {
+      state: "rejected";
+      reasons: string[];
+      errors: BrokerErrorDetail[];
+      orders?: DerivativeSubmittedOrder[];
+    }
+  | {
+      state: "recovery_required";
+      reasons: string[];
+      orders: DerivativeSubmittedOrder[];
+      warnings: OrderWarning[];
+      errors: BrokerErrorDetail[];
+      unrecognizedResponses: Readonly<Record<string, unknown>>[];
+    };
 
 export type DerivativeOrderStatus =
   | "WARNING_PENDING"
@@ -476,18 +532,16 @@ export interface DerivativeExecutionClient {
   ): Promise<DerivativeOrderSubmissionResult>;
   submitDerivativeContingentOrders(request: {
     accountId: string;
-    parent: DerivativeSingleOrderRequest;
-    child: DerivativeSingleOrderRequest;
+    parent: DerivativeContingentParentOrderRequest;
+    child: DerivativeContingentChildOrderRequest;
   }): Promise<DerivativeMultiOrderResult>;
   acknowledgeOrderWarning(input: {
     replyId: string;
     confirmed: true;
   }): Promise<DerivativeOrderSubmissionResult>;
   acknowledgeContingentOrderWarning(input: {
-    replyId: string;
+    continuation: DerivativeContingentWarningContinuation;
     confirmed: true;
-    parentClientOrderId: string;
-    childClientOrderId: string;
   }): Promise<DerivativeMultiOrderResult>;
   getDerivativeOrderStatus(accountId: string, orderId: string): Promise<DerivativeOrderLifecycle>;
   findDerivativeOrder(input: DerivativeOrderLookup): Promise<DerivativeOrderLifecycle>;

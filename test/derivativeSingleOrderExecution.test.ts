@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { IbkrClient } from "../src/ibkr/ibkrClient.js";
-import type { DerivativeContract, DerivativeSingleOrderRequest } from "../src/types.js";
+import type {
+  DerivativeContingentChildOrderRequest,
+  DerivativeContingentParentOrderRequest,
+  DerivativeContract,
+  DerivativeSingleOrderRequest,
+} from "../src/types.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
 interface RequestInput {
@@ -64,9 +69,23 @@ function sessionResponse(input: RequestInput): unknown {
   throw new Error(`Unexpected request ${input.path}`);
 }
 
-function singleOrderRequest(
-  overrides: Partial<DerivativeSingleOrderRequest> = {}
-): DerivativeSingleOrderRequest {
+type SingleOrderOverrides = Partial<{
+  accountId: string;
+  contract: DerivativeContract;
+  side: "BUY" | "SELL";
+  quantity: number;
+  orderType: "LMT" | "STP";
+  limit: number;
+  stopPrice: number;
+  tif: "DAY" | "GTC";
+  session: "REGULAR" | "OVERNIGHT";
+  clientOrderId: string;
+  parentId: string;
+  extOperator: string;
+  manualIndicator: boolean;
+}>;
+
+function singleOrderRequest(overrides: SingleOrderOverrides = {}): DerivativeSingleOrderRequest {
   return {
     accountId: "U123",
     contract: contract(12345, 620, "OPT"),
@@ -78,7 +97,22 @@ function singleOrderRequest(
     session: "REGULAR",
     clientOrderId: "huskly-cc-entry",
     ...overrides,
-  };
+  } as DerivativeSingleOrderRequest;
+}
+
+function contingentParent(
+  request: DerivativeSingleOrderRequest
+): DerivativeContingentParentOrderRequest {
+  if (request.clientOrderId === undefined) throw new Error("test parent requires clientOrderId");
+  const { parentId: _parentId, ...parent } = request;
+  return parent as DerivativeContingentParentOrderRequest;
+}
+
+function contingentChild(
+  request: DerivativeSingleOrderRequest
+): DerivativeContingentChildOrderRequest {
+  const { clientOrderId: _clientOrderId, parentId: _parentId, ...child } = request;
+  return child;
 }
 
 void test("single-leg LIMIT BUY order places a covered-call entry", async () => {
@@ -265,8 +299,8 @@ void test("contingent parent-child orders submit both in one request", async () 
 
   const result = await client.submitDerivativeContingentOrders({
     accountId: "U123",
-    parent,
-    child,
+    parent: contingentParent(parent),
+    child: contingentChild(child),
   });
 
   assert.equal(result.state, "accepted");
@@ -282,7 +316,7 @@ void test("contingent parent-child orders submit both in one request", async () 
   assert.equal(orders.length, 2);
   assert.equal(orders[0]?.["cOID"], "huskly-parent");
   assert.equal(orders[0]?.["orderType"], "LMT");
-  assert.equal(orders[1]?.["cOID"], "huskly-child");
+  assert.equal("cOID" in (orders[1] as Record<string, unknown>), false);
   assert.equal(orders[1]?.["parentId"], "huskly-parent");
   assert.equal(orders[1]?.["orderType"], "STP");
   assert.equal(orders[1]?.["price"], 1.5);
@@ -299,33 +333,26 @@ void test("contingent orders reject mismatched accounts", async () => {
   const child = singleOrderRequest({ accountId: "U999", contract: contract(99999, 100, "OPT") });
 
   await assert.rejects(
-    () => client.submitDerivativeContingentOrders({ accountId: "U123", parent, child }),
+    () =>
+      client.submitDerivativeContingentOrders({
+        accountId: "U123",
+        parent: contingentParent(parent),
+        child: contingentChild(child),
+      }),
     /Contingent parent and child orders must target the exact same account/
   );
   assert.equal(client.calls.length, 0);
 });
 
-void test("contingent orders reject identical client order IDs", async () => {
-  const client = new FakeIbkrClient(() => {
-    throw new Error("broker must not be called");
-  });
-
-  const parent = singleOrderRequest({ clientOrderId: "same-id" });
-  const child = singleOrderRequest({
-    clientOrderId: "same-id",
-    contract: contract(99999, 100, "OPT"),
-  });
-
-  await assert.rejects(
-    () => client.submitDerivativeContingentOrders({ accountId: "U123", parent, child }),
-    /Contingent parent and child orders require distinct client order IDs/
-  );
-  assert.equal(client.calls.length, 0);
-});
-
-void test("contingent orders reject identical contracts", async () => {
-  const client = new FakeIbkrClient(() => {
-    throw new Error("broker must not be called");
+void test("contingent orders support documented same-contract brackets", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: "888", order_status: "PreSubmitted" },
+      ];
+    }
+    return sessionResponse(input);
   });
 
   const parent = singleOrderRequest({ clientOrderId: "parent" });
@@ -335,11 +362,12 @@ void test("contingent orders reject identical contracts", async () => {
     parentId: "parent",
   });
 
-  await assert.rejects(
-    () => client.submitDerivativeContingentOrders({ accountId: "U123", parent, child }),
-    /Contingent parent and child orders must reference distinct contracts/
-  );
-  assert.equal(client.calls.length, 0);
+  const result = await client.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent: contingentParent(parent),
+    child: contingentChild(child),
+  });
+  assert.equal(result.state, "accepted");
 });
 
 void test("single order accepted, warning, and rejected outcomes", async () => {
@@ -432,21 +460,33 @@ void test("contingent order warning and rejection outcomes", async () => {
 
     const result = await client.submitDerivativeContingentOrders({
       accountId: "U123",
-      parent,
-      child: childReq,
+      parent: contingentParent(parent),
+      child: contingentChild(childReq),
     });
     assert.equal(result.state, fixture.expected.state, `for ${fixture.name}`);
     if (result.state === "accepted" && fixture.expected.state === "accepted") {
       assert.equal(result.orders.length, fixture.expected.orderCount);
       assert.equal(result.orders[0]?.clientOrderId, `parent-${fixture.name}`);
-      assert.equal(result.orders[1]?.clientOrderId, `child-${fixture.name}`);
+      assert.equal(result.orders[1]?.clientOrderId, null);
+    }
+    if (result.state === "warning" && fixture.expected.state === "warning") {
+      assert.deepEqual(result.continuation, {
+        replyId: "warn-1",
+        parentClientOrderId: "parent-warning",
+      });
     }
   }
 });
 
-void test("contingent orders reject parent that is not LIMIT", async () => {
-  const client = new FakeIbkrClient(() => {
-    throw new Error("broker must not be called");
+void test("contingent orders support general LIMIT and STOP parent-child roles", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: "888", order_status: "PreSubmitted" },
+      ];
+    }
+    return sessionResponse(input);
   });
 
   const parent = singleOrderRequest({
@@ -458,38 +498,17 @@ void test("contingent orders reject parent that is not LIMIT", async () => {
   const child = singleOrderRequest({
     clientOrderId: "child",
     contract: contract(99999, 100, "OPT"),
-    orderType: "STP",
-    stopPrice: 1.5,
-    parentId: "bad-parent",
-  });
-  delete (child as Record<string, unknown>)["limit"];
-
-  await assert.rejects(
-    () => client.submitDerivativeContingentOrders({ accountId: "U123", parent, child }),
-    /Contingent parent order must be a LIMIT order/
-  );
-  assert.equal(client.calls.length, 0);
-});
-
-void test("contingent orders reject child that is not STOP", async () => {
-  const client = new FakeIbkrClient(() => {
-    throw new Error("broker must not be called");
-  });
-
-  const parent = singleOrderRequest({ clientOrderId: "parent" });
-  const child = singleOrderRequest({
-    clientOrderId: "bad-child",
-    contract: contract(99999, 100, "OPT"),
     orderType: "LMT",
     limit: 2.5,
-    parentId: "parent",
+    parentId: "bad-parent",
   });
 
-  await assert.rejects(
-    () => client.submitDerivativeContingentOrders({ accountId: "U123", parent, child }),
-    /Contingent child order must be a STOP order/
-  );
-  assert.equal(client.calls.length, 0);
+  const result = await client.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent: contingentParent(parent),
+    child: contingentChild(child),
+  });
+  assert.equal(result.state, "accepted");
 });
 
 void test("contingent result rejects when only one order is recognized", async () => {
@@ -512,12 +531,13 @@ void test("contingent result rejects when only one order is recognized", async (
 
   const result = await client.submitDerivativeContingentOrders({
     accountId: "U123",
-    parent,
-    child,
+    parent: contingentParent(parent),
+    child: contingentChild(child),
   });
-  assert.equal(result.state, "rejected");
-  if (result.state === "rejected") {
-    assert.ok(result.reasons[0]?.includes("only 1 accepted"));
+  assert.equal(result.state, "recovery_required");
+  if (result.state === "recovery_required") {
+    assert.equal(result.orders.length, 1);
+    assert.equal(result.orders[0]?.orderId, "777");
   }
 });
 
@@ -537,6 +557,7 @@ void test("single order forwards parentId when provided", async () => {
     parentId: "parent-order",
   });
   delete (request as Record<string, unknown>)["limit"];
+  delete (request as Record<string, unknown>)["clientOrderId"];
 
   await client.submitDerivativeSingleOrder(request);
   const placement = client.calls.find(({ path }) => path === "iserver/account/U123/orders");
@@ -544,7 +565,7 @@ void test("single order forwards parentId when provided", async () => {
     ?.orders?.[0];
   assert.ok(ticket);
   assert.equal(ticket["parentId"], "parent-order");
-  assert.equal(ticket["cOID"], "child-order");
+  assert.equal("cOID" in (ticket as Record<string, unknown>), false);
 });
 
 void test("acknowledgeContingentOrderWarning returns multi-order result", async () => {
@@ -560,10 +581,8 @@ void test("acknowledgeContingentOrderWarning returns multi-order result", async 
   });
 
   const result = await client.acknowledgeContingentOrderWarning({
-    replyId: "cont-reply",
+    continuation: { replyId: "cont-reply", parentClientOrderId: "parent-ack" },
     confirmed: true,
-    parentClientOrderId: "parent-ack",
-    childClientOrderId: "child-ack",
   });
   assert.equal(result.state, "accepted");
   if (result.state === "accepted") {
@@ -571,7 +590,7 @@ void test("acknowledgeContingentOrderWarning returns multi-order result", async 
     assert.equal(result.orders[0]?.orderId, "777");
     assert.equal(result.orders[0]?.clientOrderId, "parent-ack");
     assert.equal(result.orders[1]?.orderId, "888");
-    assert.equal(result.orders[1]?.clientOrderId, "child-ack");
+    assert.equal(result.orders[1]?.clientOrderId, null);
   }
   assert.equal(client.calls.filter(({ path }) => path.startsWith("iserver/reply/")).length, 1);
 });
@@ -584,12 +603,10 @@ void test("acknowledgeContingentOrderWarning rejects when only one order recogni
   });
 
   const result = await client.acknowledgeContingentOrderWarning({
-    replyId: "partial",
+    continuation: { replyId: "partial", parentClientOrderId: "parent-partial" },
     confirmed: true,
-    parentClientOrderId: "parent-partial",
-    childClientOrderId: "child-partial",
   });
-  assert.equal(result.state, "rejected");
+  assert.equal(result.state, "recovery_required");
 });
 
 void test("contingent result rejects when an order status is REJECTED", async () => {
@@ -615,10 +632,16 @@ void test("contingent result rejects when an order status is REJECTED", async ()
 
   const result = await client.submitDerivativeContingentOrders({
     accountId: "U123",
-    parent,
-    child,
+    parent: contingentParent(parent),
+    child: contingentChild(child),
   });
-  assert.equal(result.state, "rejected");
+  assert.equal(result.state, "recovery_required");
+  if (result.state === "recovery_required") {
+    assert.deepEqual(
+      result.orders.map(({ orderId }) => orderId),
+      ["777", "888"]
+    );
+  }
 });
 
 void test("contingent result rejects when response has extra unrecognized items", async () => {
@@ -645,8 +668,187 @@ void test("contingent result rejects when response has extra unrecognized items"
 
   const result = await client.submitDerivativeContingentOrders({
     accountId: "U123",
-    parent,
-    child,
+    parent: contingentParent(parent),
+    child: contingentChild(child),
   });
+  assert.equal(result.state, "recovery_required");
+});
+
+void test("single order rejects a broker ID with a failed status", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [{ order_id: "777", order_status: "Inactive" }];
+    }
+    return sessionResponse(input);
+  });
+
+  const result = await client.submitDerivativeSingleOrder(singleOrderRequest());
   assert.equal(result.state, "rejected");
+  if (result.state === "rejected") {
+    assert.equal(result.orders?.[0]?.orderId, "777");
+    assert.equal(result.orders?.[0]?.status, "REJECTED");
+  }
+});
+
+void test("contingent result requires recovery when an order is canceled", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: "888", order_status: "Cancelled" },
+      ];
+    }
+    return sessionResponse(input);
+  });
+
+  const parent = singleOrderRequest({ clientOrderId: "parent-canceled" });
+  const child = singleOrderRequest({
+    clientOrderId: "child-canceled",
+    contract: contract(99999, 100, "OPT"),
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "parent-canceled",
+  });
+  delete (child as Record<string, unknown>)["limit"];
+
+  const result = await client.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent: contingentParent(parent),
+    child: contingentChild(child),
+  });
+  assert.equal(result.state, "recovery_required");
+  if (result.state === "recovery_required") {
+    assert.equal(result.orders[1]?.status, "CANCELED");
+  }
+});
+
+void test("mixed contingent warning and rejection requires recovery", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { id: "warn-1", message: ["Warning"], messageIds: ["o163"] },
+        { error: "Child rejected", statusCode: 400 },
+      ];
+    }
+    return sessionResponse(input);
+  });
+
+  const parent = singleOrderRequest({ clientOrderId: "parent-mixed" });
+  const child = singleOrderRequest({
+    clientOrderId: "child-mixed",
+    contract: contract(99999, 100, "OPT"),
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "parent-mixed",
+  });
+  delete (child as Record<string, unknown>)["limit"];
+
+  const result = await client.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent: contingentParent(parent),
+    child: contingentChild(child),
+  });
+  assert.equal(result.state, "recovery_required");
+  if (result.state === "recovery_required") {
+    assert.equal(result.warnings[0]?.replyId, "warn-1");
+    assert.equal(result.errors[0]?.message, "Child rejected");
+  }
+});
+
+void test("FOP single orders require and forward CME metadata", async () => {
+  const missing = new FakeIbkrClient(() => {
+    throw new Error("broker must not be called");
+  });
+  await assert.rejects(
+    () =>
+      missing.submitDerivativeSingleOrder(
+        singleOrderRequest({ contract: contract(12345, 620, "FOP") })
+      ),
+    /FOP orders require exact CME operator metadata/
+  );
+
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [{ order_id: "777", order_status: "PreSubmitted" }];
+    }
+    return sessionResponse(input);
+  });
+  await client.submitDerivativeSingleOrder(
+    singleOrderRequest({
+      contract: contract(12345, 620, "FOP"),
+      extOperator: "operator-1",
+      manualIndicator: false,
+    })
+  );
+  const placement = client.calls.find(({ path }) => path === "iserver/account/U123/orders");
+  const ticket = (placement?.data as { orders?: Record<string, unknown>[] } | undefined)
+    ?.orders?.[0];
+  assert.equal(ticket?.["extOperator"], "operator-1");
+  assert.equal(ticket?.["manualIndicator"], false);
+});
+
+void test("FOP contingent orders require and forward CME metadata for both orders", async () => {
+  const missing = new FakeIbkrClient(() => {
+    throw new Error("broker must not be called");
+  });
+  const missingParent = singleOrderRequest({
+    contract: contract(12345, 620, "FOP"),
+    clientOrderId: "fop-parent-missing",
+  });
+  const validChild = singleOrderRequest({
+    contract: contract(67890, 619, "FOP"),
+    clientOrderId: "fop-child",
+    parentId: "fop-parent-missing",
+    orderType: "STP",
+    stopPrice: 1.5,
+    extOperator: "operator-child",
+    manualIndicator: true,
+  });
+  delete (validChild as Record<string, unknown>)["limit"];
+  await assert.rejects(
+    () =>
+      missing.submitDerivativeContingentOrders({
+        accountId: "U123",
+        parent: contingentParent(missingParent),
+        child: contingentChild(validChild),
+      }),
+    /FOP orders require exact CME operator metadata/
+  );
+
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: "888", order_status: "PreSubmitted" },
+      ];
+    }
+    return sessionResponse(input);
+  });
+  const parent = singleOrderRequest({
+    contract: contract(12345, 620, "FOP"),
+    clientOrderId: "fop-parent",
+    extOperator: "operator-parent",
+    manualIndicator: false,
+  });
+  const child = singleOrderRequest({
+    contract: contract(67890, 619, "FOP"),
+    clientOrderId: "fop-child",
+    parentId: "fop-parent",
+    orderType: "STP",
+    stopPrice: 1.5,
+    extOperator: "operator-child",
+    manualIndicator: true,
+  });
+  delete (child as Record<string, unknown>)["limit"];
+  await client.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent: contingentParent(parent),
+    child: contingentChild(child),
+  });
+  const placement = client.calls.find(({ path }) => path === "iserver/account/U123/orders");
+  const orders = (placement?.data as { orders?: Record<string, unknown>[] } | undefined)?.orders;
+  assert.equal(orders?.[0]?.["extOperator"], "operator-parent");
+  assert.equal(orders?.[0]?.["manualIndicator"], false);
+  assert.equal(orders?.[1]?.["extOperator"], "operator-child");
+  assert.equal(orders?.[1]?.["manualIndicator"], true);
 });

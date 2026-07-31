@@ -24,6 +24,9 @@ import type {
   DerivativeComboReconciliationRequest,
   DerivativeComboPreviewRequest,
   DerivativeComboPreviewResult,
+  DerivativeContingentChildOrderRequest,
+  DerivativeContingentOrderEvidence,
+  DerivativeContingentParentOrderRequest,
   DerivativeDiscoveryClient,
   DerivativeExecutionClient,
   DerivativeExecution,
@@ -38,6 +41,7 @@ import type {
   DerivativeOrderStatus,
   DerivativeOrderSubmissionResult,
   DerivativeSingleOrderRequest,
+  DerivativeSubmittedOrder,
   DerivativePreviewClient,
   DerivativeExpiry,
   DerivativeExpiryQuery,
@@ -47,6 +51,7 @@ import type {
   OptionMarketQuote,
   OptionQuoteRequest,
   OptionRight,
+  OrderWarning,
   PriceHistoryBar,
   PriceHistoryRequest,
   TradingDiagnostics,
@@ -176,6 +181,13 @@ const IBKR_WORKING_STATUSES = new Set([
   "PENDING_CANCEL",
 ]);
 const KNOWN_ORDER_WARNING_IDS = new Set(["o163"]);
+
+interface DecodedOrderSubmission {
+  orders: DerivativeSubmittedOrder[];
+  warnings: OrderWarning[];
+  errors: BrokerErrorDetail[];
+  unrecognizedResponses: Readonly<Record<string, unknown>>[];
+}
 
 /** Extract the canonical OSI symbol embedded in an IBKR option description. */
 function extractOsiPositionSymbol(contractDescription: string): string | undefined {
@@ -433,42 +445,33 @@ export class IbkrClient
         orders: [
           {
             ...this.singleOrderTicket(request),
-            cOID: request.clientOrderId,
+            ...(request.clientOrderId !== undefined ? { cOID: request.clientOrderId } : {}),
             ...(request.parentId !== undefined ? { parentId: request.parentId } : {}),
             ...cmeOperatorMetadata,
           },
         ],
       },
     });
-    return this.normalizeOrderSubmission(response, request.clientOrderId);
+    return this.normalizeOrderSubmission(response, request.clientOrderId ?? null);
   }
 
   async submitDerivativeContingentOrders(request: {
     accountId: string;
-    parent: DerivativeSingleOrderRequest;
-    child: DerivativeSingleOrderRequest;
+    parent: DerivativeContingentParentOrderRequest;
+    child: DerivativeContingentChildOrderRequest;
   }): Promise<DerivativeMultiOrderResult> {
     const { accountId, parent, child } = request;
     if (!accountId.trim()) throw new Error("An explicit IBKR account ID is required");
     if (parent.accountId !== accountId || child.accountId !== accountId) {
       throw new Error("Contingent parent and child orders must target the exact same account");
     }
-    this.validateSingleOrder(parent);
-    this.validateSingleOrder(child);
-    if (parent.clientOrderId === child.clientOrderId) {
-      throw new Error("Contingent parent and child orders require distinct client order IDs");
+    this.validateSingleOrderFields(parent);
+    this.validateSingleOrderFields(child);
+    if (!parent.clientOrderId.trim() || parent.clientOrderId.length > 64) {
+      throw new Error("Parent client order ID must contain 1 to 64 characters");
     }
-    if (child.parentId !== undefined && child.parentId !== parent.clientOrderId) {
-      throw new Error("Contingent child parentId must match the parent client order ID");
-    }
-    if (parent.contract.conid === child.contract.conid) {
-      throw new Error("Contingent parent and child orders must reference distinct contracts");
-    }
-    if (parent.orderType !== "LMT") {
-      throw new Error("Contingent parent order must be a LIMIT order");
-    }
-    if (child.orderType !== "STP") {
-      throw new Error("Contingent child order must be a STOP order");
+    if ("clientOrderId" in child || "parentId" in child) {
+      throw new Error("Contingent child identity is derived from the parent order");
     }
     const parentMetadata = this.cmeOperatorMetadata(parent.contract.assetClass, parent);
     const childMetadata = this.cmeOperatorMetadata(child.contract.assetClass, child);
@@ -491,17 +494,13 @@ export class IbkrClient
           },
           {
             ...this.singleOrderTicket(child),
-            cOID: child.clientOrderId,
             parentId: parent.clientOrderId,
             ...childMetadata,
           },
         ],
       },
     });
-    return this.normalizeMultiOrderSubmission(response, [
-      parent.clientOrderId,
-      child.clientOrderId,
-    ]);
+    return this.normalizeMultiOrderSubmission(response, parent.clientOrderId);
   }
 
   async acknowledgeOrderWarning(input: {
@@ -520,26 +519,23 @@ export class IbkrClient
   }
 
   async acknowledgeContingentOrderWarning(input: {
-    replyId: string;
+    continuation: { replyId: string; parentClientOrderId: string };
     confirmed: true;
-    parentClientOrderId: string;
-    childClientOrderId: string;
   }): Promise<DerivativeMultiOrderResult> {
-    if (!input.replyId.trim()) throw new Error("An exact warning reply ID is required");
-    if (!input.parentClientOrderId.trim() || !input.childClientOrderId.trim()) {
-      throw new Error("Exact parent and child client order IDs are required");
+    if (!input.continuation.replyId.trim()) {
+      throw new Error("An exact warning reply ID is required");
+    }
+    if (!input.continuation.parentClientOrderId.trim()) {
+      throw new Error("An exact parent client order ID is required");
     }
     const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
-      path: `iserver/reply/${encodeURIComponent(input.replyId)}`,
+      path: `iserver/reply/${encodeURIComponent(input.continuation.replyId)}`,
       method: "POST",
       data: { confirmed: true },
     });
-    return this.normalizeMultiOrderSubmission(response, [
-      input.parentClientOrderId,
-      input.childClientOrderId,
-    ]);
+    return this.normalizeMultiOrderSubmission(response, input.continuation.parentClientOrderId);
   }
 
   async getDerivativeOrderStatus(
@@ -931,25 +927,50 @@ export class IbkrClient
   }
 
   private validateSingleOrder(request: DerivativeSingleOrderRequest): void {
+    this.validateSingleOrderFields(request);
+    const identityFields = request as unknown as {
+      clientOrderId?: unknown;
+      parentId?: unknown;
+    };
+    const clientOrderId =
+      typeof identityFields.clientOrderId === "string" ? identityFields.clientOrderId : undefined;
+    const parentId =
+      typeof identityFields.parentId === "string" ? identityFields.parentId : undefined;
+    if (clientOrderId !== undefined && parentId !== undefined) {
+      throw new Error("Attached child orders must not include a client order ID");
+    }
+    const identity = clientOrderId ?? parentId;
+    if (!identity?.trim() || identity.length > 64) {
+      throw new Error(
+        parentId === undefined
+          ? "Client order ID must contain 1 to 64 characters"
+          : "Parent order ID must contain 1 to 64 characters"
+      );
+    }
+  }
+
+  private validateSingleOrderFields(
+    request:
+      | DerivativeSingleOrderRequest
+      | DerivativeContingentParentOrderRequest
+      | DerivativeContingentChildOrderRequest
+  ): void {
     if (!request.accountId.trim()) throw new Error("An explicit IBKR account ID is required");
     if (!Number.isSafeInteger(request.quantity) || request.quantity <= 0) {
       throw new Error("Order quantity must be a positive integer");
-    }
-    if (!request.clientOrderId.trim() || request.clientOrderId.length > 64) {
-      throw new Error("Client order ID must contain 1 to 64 characters");
     }
     if (!Number.isSafeInteger(request.contract.conid) || request.contract.conid <= 0) {
       throw new Error("Order contract has an invalid IBKR conid");
     }
     if (request.orderType === "LMT") {
-      const limit: number | undefined = request.limit;
-      if (limit === undefined || !Number.isFinite(limit) || limit <= 0) {
+      const limit: unknown = (request as unknown as { limit?: unknown }).limit;
+      if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) {
         throw new Error("LIMIT order requires a positive limit price");
       }
     }
     if (request.orderType === "STP") {
-      const stopPrice: number | undefined = request.stopPrice;
-      if (stopPrice === undefined || !Number.isFinite(stopPrice) || stopPrice <= 0) {
+      const stopPrice: unknown = (request as unknown as { stopPrice?: unknown }).stopPrice;
+      if (typeof stopPrice !== "number" || !Number.isFinite(stopPrice) || stopPrice <= 0) {
         throw new Error("STOP order requires a positive stop price");
       }
     }
@@ -995,12 +1016,17 @@ export class IbkrClient
     };
   }
 
-  private singleOrderTicket(request: DerivativeSingleOrderRequest): {
+  private singleOrderTicket(
+    request:
+      | DerivativeSingleOrderRequest
+      | DerivativeContingentParentOrderRequest
+      | DerivativeContingentChildOrderRequest
+  ): {
     acctId: string;
     conid: number;
     orderType: "LMT" | "STP";
     side: "BUY" | "SELL";
-    price?: number;
+    price: number;
     tif: "DAY" | "GTC";
     quantity: number;
     outsideRTH: boolean;
@@ -1010,12 +1036,7 @@ export class IbkrClient
       conid: request.contract.conid,
       orderType: request.orderType,
       side: request.side,
-      ...(request.orderType === "LMT" && request.limit !== undefined
-        ? { price: request.limit }
-        : {}),
-      ...(request.orderType === "STP" && request.stopPrice !== undefined
-        ? { price: request.stopPrice }
-        : {}),
+      price: request.orderType === "LMT" ? request.limit : request.stopPrice,
       tif: request.tif,
       quantity: request.quantity,
       outsideRTH: request.session === "OVERNIGHT",
@@ -1026,159 +1047,209 @@ export class IbkrClient
     response: IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[],
     clientOrderId: string | null
   ): DerivativeOrderSubmissionResult {
-    const items = Array.isArray(response) ? response : [response];
-    const warnings = items.flatMap((item) => {
-      if (!("id" in item) || typeof item.id !== "string") return [];
-      const messageIds = Array.isArray(item.messageIds)
-        ? item.messageIds.filter((value): value is string => typeof value === "string")
-        : [];
-      return [
-        {
-          replyId: item.id,
-          messages: Array.isArray(item.message)
-            ? item.message.filter((value): value is string => typeof value === "string")
-            : [],
-          messageIds,
-          known: messageIds.length > 0 && messageIds.every((id) => KNOWN_ORDER_WARNING_IDS.has(id)),
-        },
-      ];
-    });
-    if (warnings.length > 0) return { state: "warning", warnings };
-    const errors = items.flatMap((item) => {
-      if (!("error" in item) || item.error === undefined || item.error === null) return [];
-      return [this.normalizeBrokerError(item.error, item)];
-    });
-    if (errors.length > 0) {
-      return { state: "rejected", reasons: errors.map(({ message }) => message), errors };
+    const decoded = this.decodeOrderSubmission(response);
+    const orders = decoded.orders.map((order) => ({ ...order, clientOrderId }));
+    const hasWarnings = decoded.warnings.length > 0;
+    const hasErrors = decoded.errors.length > 0;
+    const hasUnknown = decoded.unrecognizedResponses.length > 0;
+
+    if (hasWarnings && !hasErrors && orders.length === 0 && !hasUnknown) {
+      return { state: "warning", warnings: decoded.warnings };
     }
-    const accepted = items.find((item) => "order_id" in item || "orderId" in item);
-    if (accepted !== undefined) {
-      const orderId =
-        ("order_id" in accepted ? accepted.order_id : undefined) ??
-        ("orderId" in accepted ? accepted.orderId : undefined);
-      if (typeof orderId === "string" || typeof orderId === "number") {
-        const orderStatus =
-          ("order_status" in accepted ? accepted.order_status : undefined) ??
-          ("orderStatus" in accepted ? accepted.orderStatus : undefined);
+    if (hasErrors && !hasWarnings && orders.length === 0 && !hasUnknown) {
+      return {
+        state: "rejected",
+        reasons: decoded.errors.map(({ message }) => message),
+        errors: decoded.errors,
+      };
+    }
+    if (!hasWarnings && !hasErrors && !hasUnknown && orders.length === 1) {
+      const order = orders[0];
+      if (order === undefined) throw new Error("Single-order normalization lost order evidence");
+      if (order.status === "REJECTED" || order.status === "CANCELED") {
         return {
-          state: "accepted",
-          orderId: String(orderId),
-          status: this.normalizeDerivativeOrderStatus(
-            typeof orderStatus === "string" ? orderStatus : undefined,
-            0,
-            0
-          ),
-          clientOrderId,
-          warnings: [],
+          state: "rejected",
+          reasons: [`Order ${order.orderId} returned terminal status ${order.status}`],
+          errors: [],
+          orders,
         };
       }
+      if (order.status !== "UNKNOWN") {
+        return { state: "accepted", ...order, warnings: [] };
+      }
     }
-    const unknown = "IBKR returned an unknown order response";
-    return {
-      state: "rejected",
-      reasons: [unknown],
-      errors: [{ message: unknown, code: null, statusCode: null, details: {} }],
-    };
+
+    return this.singleOrderRecoveryResult(decoded, orders);
   }
+
   private normalizeMultiOrderSubmission(
     response: IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[],
-    clientOrderIds: string[] = []
+    parentClientOrderId: string
   ): DerivativeMultiOrderResult {
+    const decoded = this.decodeOrderSubmission(response);
+    const rolesArePositionallyComplete =
+      decoded.orders.length === 2 &&
+      decoded.warnings.length === 0 &&
+      decoded.errors.length === 0 &&
+      decoded.unrecognizedResponses.length === 0;
+    const orders = decoded.orders.map<DerivativeContingentOrderEvidence>((order, index) => ({
+      ...order,
+      clientOrderId: rolesArePositionallyComplete && index === 0 ? parentClientOrderId : null,
+      role:
+        rolesArePositionallyComplete && index === 0
+          ? "parent"
+          : rolesArePositionallyComplete && index === 1
+            ? "child"
+            : "unknown",
+    }));
+    const hasWarnings = decoded.warnings.length > 0;
+    const hasErrors = decoded.errors.length > 0;
+    const hasUnknown = decoded.unrecognizedResponses.length > 0;
+
+    if (decoded.warnings.length === 1 && !hasErrors && orders.length === 0 && !hasUnknown) {
+      const warning = decoded.warnings[0];
+      if (warning === undefined) throw new Error("Contingent warning evidence was lost");
+      return {
+        state: "warning",
+        warnings: decoded.warnings,
+        continuation: { replyId: warning.replyId, parentClientOrderId },
+      };
+    }
+    if (hasErrors && !hasWarnings && orders.length === 0 && !hasUnknown) {
+      return {
+        state: "rejected",
+        parentClientOrderId,
+        reasons: decoded.errors.map(({ message }) => message),
+        errors: decoded.errors,
+      };
+    }
+    if (!hasWarnings && !hasErrors && !hasUnknown && orders.length === 2) {
+      const [parent, child] = orders;
+      if (parent !== undefined && child !== undefined) {
+        const terminalFailure = orders.find(
+          ({ status }) => status === "REJECTED" || status === "CANCELED"
+        );
+        const unknownStatus = orders.find(({ status }) => status === "UNKNOWN");
+        if (terminalFailure === undefined && unknownStatus === undefined) {
+          return { state: "accepted", orders: [parent, child], warnings: [] };
+        }
+      }
+    }
+
+    return this.contingentRecoveryResult(decoded, orders, parentClientOrderId);
+  }
+
+  private decodeOrderSubmission(
+    response: IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+  ): DecodedOrderSubmission {
     const items = Array.isArray(response) ? response : [response];
-    const warnings = items.flatMap((item) => {
-      if (!("id" in item) || typeof item.id !== "string") return [];
-      const messageIds = Array.isArray(item.messageIds)
-        ? item.messageIds.filter((value): value is string => typeof value === "string")
-        : [];
-      return [
-        {
+    const decoded: DecodedOrderSubmission = {
+      orders: [],
+      warnings: [],
+      errors: [],
+      unrecognizedResponses: [],
+    };
+    for (const item of items) {
+      let recognized = false;
+      if ("id" in item && typeof item.id === "string") {
+        const messageIds = Array.isArray(item.messageIds)
+          ? item.messageIds.filter((value): value is string => typeof value === "string")
+          : [];
+        decoded.warnings.push({
           replyId: item.id,
           messages: Array.isArray(item.message)
             ? item.message.filter((value): value is string => typeof value === "string")
             : [],
           messageIds,
           known: messageIds.length > 0 && messageIds.every((id) => KNOWN_ORDER_WARNING_IDS.has(id)),
-        },
-      ];
-    });
-    if (warnings.length > 0) return { state: "warning", warnings };
-    const errors = items.flatMap((item) => {
-      if (!("error" in item) || item.error === undefined || item.error === null) return [];
-      return [this.normalizeBrokerError(item.error, item)];
-    });
-    if (errors.length > 0) {
-      return { state: "rejected", reasons: errors.map(({ message }) => message), errors };
-    }
-
-    let orderIndex = 0;
-    const acceptedOrders = items
-      .map((item) => {
-        if (!("order_id" in item) && !("orderId" in item)) return undefined;
-        const orderId =
-          ("order_id" in item ? item.order_id : undefined) ??
-          ("orderId" in item ? item.orderId : undefined);
-        if (typeof orderId !== "string" && typeof orderId !== "number") return undefined;
+        });
+        recognized = true;
+      }
+      if ("error" in item && item.error !== undefined && item.error !== null) {
+        decoded.errors.push(this.normalizeBrokerError(item.error, item));
+        recognized = true;
+      }
+      const orderId =
+        ("order_id" in item ? item.order_id : undefined) ??
+        ("orderId" in item ? item.orderId : undefined);
+      if (typeof orderId === "string" || typeof orderId === "number") {
         const orderStatus =
           ("order_status" in item ? item.order_status : undefined) ??
           ("orderStatus" in item ? item.orderStatus : undefined);
-        const clientOrderId =
-          orderIndex < clientOrderIds.length ? (clientOrderIds[orderIndex] ?? null) : null;
-        orderIndex += 1;
-        return {
+        decoded.orders.push({
           orderId: String(orderId),
           status: this.normalizeDerivativeOrderStatus(
             typeof orderStatus === "string" ? orderStatus : undefined,
             0,
             0
           ),
-          clientOrderId,
-        };
-      })
-      .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
-
-    if (clientOrderIds.length > 0) {
-      if (acceptedOrders.length !== items.length) {
-        const message = `${String(items.length)} response item(s) but expected ${String(clientOrderIds.length)} order(s)`;
-        return {
-          state: "rejected",
-          reasons: [message],
-          errors: [{ message, code: null, statusCode: null, details: {} }],
-        };
+          clientOrderId: null,
+        });
+        recognized = true;
       }
-      if (acceptedOrders.length !== clientOrderIds.length) {
-        const message = `${String(clientOrderIds.length)} order(s) submitted but only ${String(acceptedOrders.length)} accepted`;
-        return {
-          state: "rejected",
-          reasons: [message],
-          errors: [{ message, code: null, statusCode: null, details: {} }],
-        };
-      }
-      const rejected = acceptedOrders.find((entry) => entry.status === "REJECTED");
-      if (rejected !== undefined) {
-        const message = `Order ${rejected.orderId} was rejected`;
-        return {
-          state: "rejected",
-          reasons: [message],
-          errors: [{ message, code: null, statusCode: null, details: {} }],
-        };
-      }
-      return { state: "accepted", orders: acceptedOrders, warnings: [] };
+      if (!recognized) decoded.unrecognizedResponses.push({ ...item });
     }
+    if (items.length === 0) decoded.unrecognizedResponses.push({});
+    return decoded;
+  }
 
-    if (acceptedOrders.length === items.length && acceptedOrders.length > 0) {
-      return { state: "accepted", orders: acceptedOrders, warnings: [] };
-    }
-
-    const unrecognizedCount = items.length - acceptedOrders.length;
-    const unknown =
-      unrecognizedCount > 0
-        ? `${String(unrecognizedCount)} order(s) returned an unrecognized response`
-        : "IBKR returned an unknown order response";
+  private singleOrderRecoveryResult(
+    decoded: DecodedOrderSubmission,
+    orders: DerivativeSubmittedOrder[]
+  ): DerivativeOrderSubmissionResult {
     return {
-      state: "rejected",
-      reasons: [unknown],
-      errors: [{ message: unknown, code: null, statusCode: null, details: {} }],
+      state: "recovery_required",
+      reasons: [this.submissionRecoveryReason(decoded, orders.length, 1)],
+      orders,
+      warnings: decoded.warnings,
+      errors: decoded.errors,
+      unrecognizedResponses: decoded.unrecognizedResponses,
     };
+  }
+
+  private contingentRecoveryResult(
+    decoded: DecodedOrderSubmission,
+    orders: DerivativeContingentOrderEvidence[],
+    parentClientOrderId: string
+  ): DerivativeMultiOrderResult {
+    return {
+      state: "recovery_required",
+      parentClientOrderId,
+      reasons: [this.submissionRecoveryReason(decoded, orders.length, 2)],
+      orders,
+      warnings: decoded.warnings,
+      errors: decoded.errors,
+      unrecognizedResponses: decoded.unrecognizedResponses,
+    };
+  }
+
+  private submissionRecoveryReason(
+    decoded: DecodedOrderSubmission,
+    orderCount: number,
+    expectedOrderCount: number
+  ): string {
+    const terminal = decoded.orders.find(
+      ({ status }) => status === "REJECTED" || status === "CANCELED"
+    );
+    if (terminal !== undefined) {
+      return `Order ${terminal.orderId} returned terminal status ${terminal.status}`;
+    }
+    if (decoded.orders.some(({ status }) => status === "UNKNOWN")) {
+      return "IBKR returned an order ID with an unknown status";
+    }
+    if (decoded.errors.length > 0 && decoded.warnings.length > 0) {
+      return "IBKR returned both warnings and rejections for one submission";
+    }
+    if (orderCount !== expectedOrderCount) {
+      return `IBKR returned ${String(orderCount)} of ${String(expectedOrderCount)} expected order acknowledgements`;
+    }
+    if (decoded.unrecognizedResponses.length > 0) {
+      return "IBKR returned one or more unrecognized order responses";
+    }
+    if (decoded.warnings.length > 1) {
+      return "IBKR returned multiple warning continuations for one submission";
+    }
+    return "IBKR returned mixed or incomplete order evidence";
   }
 
   private normalizeBrokerError(

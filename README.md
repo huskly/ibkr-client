@@ -167,21 +167,31 @@ already enforced their own reviewed-preview workflow. It does not persist previe
 whether live execution is allowed.
 
 - `submitDerivativeSingleOrder(...)` places one single-leg LIMIT or STOP option order with exact
-  contract, side, quantity, TIF, session, and a required unique client order ID. LIMIT orders
-  require a positive `limit` price; STOP orders require a positive `stopPrice`. Equity-option
-  (`OPT`) orders omit CME-only fields; futures-option (`FOP`) orders require the caller's exact
-  `extOperator` and `manualIndicator`.
+  contract, side, quantity, TIF, and session. Standalone orders require a unique client order ID;
+  sequentially attached child orders instead require the parent's exact ID and omit their own
+  `cOID`, as required by IBKR. LIMIT and STOP requests are discriminated: LIMIT orders require only
+  a positive `limit`, while STOP orders require only a positive `stopPrice`. Equity-option (`OPT`)
+  orders omit CME-only fields; futures-option (`FOP`) orders require the caller's exact `extOperator`
+  and `manualIndicator`.
 - `submitDerivativeCombo(...)` places one atomic combo with the exact legs, signed ratios,
   quantity, price effect, limit, TIF, and session supplied by the caller. The request requires a
   unique client order ID. Futures-option (`FOP`) writes also require the caller's exact CME
   `extOperator` and manual/automated-origin `manualIndicator`; equity-option (`OPT`) writes omit
   both CME-only fields.
-- `submitDerivativeContingentOrders(...)` places a parent LIMIT and child STOP order in a single
-  atomic request, linked by the child's `parentId` field matching the parent's client order ID.
-  Both orders target the same account, carry distinct client order IDs, and reference distinct
-  contracts. LIMIT and STOP validation follows the same rules as `submitDerivativeSingleOrder`.
+- `submitDerivativeContingentOrders(...)` places a general parent/child LIMIT-or-STOP pair in one
+  bracket request. The parent carries the caller's unique client order ID; the client derives the
+  child's `parentId` from it and deliberately omits a child `cOID`. Parent and child must target the
+  same account, but may reference the same or different contracts. IBKR does not promise an
+  all-or-none response: `accepted` therefore requires exactly two non-failure acknowledgements,
+  while mixed, incomplete, canceled, rejected, unknown, or malformed evidence is returned as
+  `recovery_required` with every observed broker order ID retained.
 - `acknowledgeOrderWarning(...)` replies once to an exact broker warning ID. Only documented
   warning message IDs are marked `known`; consumers must stop on unknown warnings.
+- A warning from `submitDerivativeContingentOrders(...)` includes a typed `continuation` containing
+  the exact reply ID and parent client ID. Pass that object unchanged to
+  `acknowledgeContingentOrderWarning(...)`; its result retains both broker acknowledgements or
+  returns all partial evidence as `recovery_required`. Do not route contingent warnings through the
+  single-order acknowledgement method.
 - `getDerivativeOrderStatus(...)` uses IBKR's exact order-ID status endpoint so fast terminal
   orders remain visible after live-list eviction. It normalizes pending, working, partial-fill,
   fill, canceled, and rejected lifecycle states with leg ratios and order economics, and fails
