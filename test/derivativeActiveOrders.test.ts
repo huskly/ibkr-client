@@ -135,6 +135,57 @@ void test("preserves every signed USD combo leg", async () => {
   assert.equal(order?.status, "WORKING");
 });
 
+void test("normalizes exchange-qualified sell combo legs to their effective sides", async () => {
+  const client = new FakeIbkrClient({
+    orders: [
+      {
+        account: "U123",
+        order_id: "21",
+        conidex: "28812380@CME;;;111/1,222/-2",
+        side: "SELL",
+        total_size: 4,
+        cum_fill: 0,
+        remaining: 4,
+        order_status: "Submitted",
+      },
+    ],
+  });
+
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.deepEqual(
+    order?.legs.map(({ conid, ratio, side, quantity }) => ({ conid, ratio, side, quantity })),
+    [
+      { conid: 111, ratio: -1, side: "SELL", quantity: 4 },
+      { conid: 222, ratio: 2, side: "BUY", quantity: 8 },
+    ]
+  );
+  assert.ok(!order?.uncertainty.includes("MALFORMED_CONIDEX"));
+  assert.ok(!order?.uncertainty.includes("AGGREGATE_ONLY"));
+});
+
+void test("treats an echoed parentId as the caller-supplied parent identity", async () => {
+  const client = new FakeIbkrClient({
+    orders: [
+      {
+        account: "U123",
+        orderId: 32,
+        parentId: "parent-customer-id",
+        conid: 302,
+        side: "BUY",
+        totalSize: 1,
+        filled: 0,
+        remaining: 1,
+        status: "Submitted",
+      },
+    ],
+  });
+
+  const [child] = await client.listActiveDerivativeOrders("U123");
+  assert.equal(child?.graphRole, "CHILD");
+  assert.equal(child?.parentOrderId, null);
+  assert.equal(child?.parentClientOrderId, "parent-customer-id");
+});
+
 void test("retains nested contingent ownership and reports graph uncertainty", async () => {
   const client = new FakeIbkrClient({
     orders: [

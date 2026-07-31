@@ -209,9 +209,11 @@ return `recovery_required`, because they do not prove that every submitted ticke
   ID (`cOID`/`order_ref`). Broker IDs go directly to the exact endpoint; a customer ID is resolved
   through the live list and then read by exact broker ID.
 - `listActiveDerivativeOrders(accountId)` is the pre-placement risk view for one exact account. It
-  preserves every signed USD `conidex` member (or a single conid/side), caller and broker IDs,
-  parent ownership, graph role, quantities, lifecycle, pricing, TIF, session, timestamps, and OSI
-  option identity when supplied. Malformed legs, aggregate-only rows, unknown statuses, missing or
+  preserves every signed USD `conidex` member, including exchange-qualified spreads, and applies
+  the outer order side to each ratio (or preserves a single conid/side). Caller and broker IDs,
+  including echoed client `parentId` ownership, remain distinct alongside graph role, quantities,
+  lifecycle, pricing, TIF, session, timestamps, and OSI option identity. Malformed legs,
+  aggregate-only rows, unknown statuses, missing or
   ambiguous parents, and duplicate graph members are returned with explicit `uncertainty` rather
   than silently discarded. An account mismatch rejects the entire read. This active collection is
   not terminal history: after an order leaves it, use `getDerivativeOrderStatus(...)` with its

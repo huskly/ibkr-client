@@ -1966,9 +1966,9 @@ export class IbkrClient
     if (status === "UNKNOWN") uncertainty.push("UNKNOWN_STATUS");
     const rawOrderId = order.order_id ?? order.orderId;
     if (rawOrderId === undefined) uncertainty.push("MISSING_BROKER_ORDER_ID");
-    const explicitParentOrderId =
-      order.parent_order_id ?? order.parentOrderId ?? order.parent_id ?? order.parentId;
-    const explicitParentClientId = order.parentClientOrderId ?? order.parent_order_ref;
+    const explicitParentOrderId = order.parent_order_id ?? order.parentOrderId ?? order.parent_id;
+    const explicitParentClientId =
+      order.parentClientOrderId ?? order.parent_order_ref ?? order.parentId;
     const nestedBrokerId = nestedParent?.order_id ?? nestedParent?.orderId;
     const nestedClientId = nestedParent?.cOID ?? nestedParent?.order_ref;
     if (
@@ -1990,7 +1990,10 @@ export class IbkrClient
             ? null
             : String(nestedBrokerId)
           : String(explicitParentOrderId),
-      parentClientOrderId: explicitParentClientId ?? nestedClientId ?? null,
+      parentClientOrderId:
+        explicitParentClientId === undefined
+          ? (nestedClientId ?? null)
+          : String(explicitParentClientId),
       graphRole:
         nestedParent !== null ||
         explicitParentOrderId !== undefined ||
@@ -2047,7 +2050,7 @@ export class IbkrClient
     const signedSide = side === "BUY" ? 1 : side === "SELL" ? -1 : null;
     let rawLegs: { conid: number | null; ratio: number | null }[] = [];
     if (order.conidex !== undefined) {
-      const match = /^(\d+);;;(.+)$/.exec(order.conidex.trim());
+      const match = /^(\d+)(?:@[A-Za-z0-9._-]+)?;;;(.+)$/.exec(order.conidex.trim());
       if (match?.[1] !== "28812380") {
         orderUncertainty.push("MALFORMED_CONIDEX");
       } else {
@@ -2064,7 +2067,7 @@ export class IbkrClient
           ) {
             return { conid: null, ratio: null };
           }
-          return { conid, ratio };
+          return { conid, ratio: signedSide === -1 ? -ratio : ratio };
         });
         if (rawLegs.length === 0 || rawLegs.some((leg) => leg.conid === null)) {
           orderUncertainty.push("MALFORMED_CONIDEX");
