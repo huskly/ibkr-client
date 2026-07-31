@@ -937,6 +937,49 @@ void test("contingent result requires recovery when an order is canceled", async
   }
 });
 
+void test("pending cancellation acknowledgements require recovery", async () => {
+  const single = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [{ order_id: "777", order_status: "PendingCancel" }];
+    }
+    return sessionResponse(input);
+  });
+  const singleResult = await single.submitDerivativeSingleOrder(singleOrderRequest());
+  assert.equal(singleResult.state, "recovery_required");
+  if (singleResult.state === "recovery_required") {
+    assert.match(singleResult.reasons[0] ?? "", /pending cancellation/);
+  }
+
+  const contingent = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: "888", order_status: "PendingCancel" },
+      ];
+    }
+    return sessionResponse(input);
+  });
+  const parent = singleOrderRequest({ clientOrderId: "parent-pending-cancel" });
+  const child = singleOrderRequest({
+    contract: contract(99999, 100, "OPT"),
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "parent-pending-cancel",
+  });
+  delete (child as Record<string, unknown>)["limit"];
+  delete (child as Record<string, unknown>)["clientOrderId"];
+
+  const contingentResult = await contingent.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent: contingentParent(parent),
+    child: contingentChild(child),
+  });
+  assert.equal(contingentResult.state, "recovery_required");
+  if (contingentResult.state === "recovery_required") {
+    assert.match(contingentResult.reasons[0] ?? "", /Order 888.*pending cancellation/);
+  }
+});
+
 void test("mixed contingent warning and rejection requires recovery", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/account/U123/orders") {

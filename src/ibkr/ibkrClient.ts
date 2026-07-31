@@ -184,6 +184,7 @@ const KNOWN_ORDER_WARNING_IDS = new Set(["o163"]);
 
 interface DecodedOrderSubmission {
   orders: DerivativeSubmittedOrder[];
+  pendingCancelOrderIds: string[];
   warnings: OrderWarning[];
   errors: BrokerErrorDetail[];
   unrecognizedResponses: unknown[];
@@ -1074,6 +1075,7 @@ export class IbkrClient
     const hasWarnings = decoded.warnings.length > 0;
     const hasErrors = decoded.errors.length > 0;
     const hasUnknown = decoded.unrecognizedResponses.length > 0;
+    const hasPendingCancel = decoded.pendingCancelOrderIds.length > 0;
 
     if (decoded.warnings.length === 1 && !hasErrors && orders.length === 0 && !hasUnknown) {
       return { state: "warning", warnings: decoded.warnings };
@@ -1085,7 +1087,7 @@ export class IbkrClient
         errors: decoded.errors,
       };
     }
-    if (!hasWarnings && !hasErrors && !hasUnknown && orders.length === 1) {
+    if (!hasWarnings && !hasErrors && !hasUnknown && !hasPendingCancel && orders.length === 1) {
       const order = orders[0];
       if (order === undefined) throw new Error("Single-order normalization lost order evidence");
       if (order.status === "REJECTED" || order.status === "CANCELED") {
@@ -1153,6 +1155,7 @@ export class IbkrClient
       !hasWarnings &&
       !hasErrors &&
       !hasUnknown &&
+      decoded.pendingCancelOrderIds.length === 0 &&
       orders.length === 2 &&
       hasDistinctBrokerOrderIds
     ) {
@@ -1175,6 +1178,7 @@ export class IbkrClient
     const items = Array.isArray(response) ? response : [response];
     const decoded: DecodedOrderSubmission = {
       orders: [],
+      pendingCancelOrderIds: [],
       warnings: [],
       errors: [],
       unrecognizedResponses: [],
@@ -1222,6 +1226,12 @@ export class IbkrClient
             : null;
       if (orderId !== null) {
         const orderStatus = record["order_status"] ?? record["orderStatus"];
+        if (
+          typeof orderStatus === "string" &&
+          this.canonicalIbkrOrderStatus(orderStatus) === "PENDING_CANCEL"
+        ) {
+          decoded.pendingCancelOrderIds.push(orderId);
+        }
         decoded.orders.push({
           orderId,
           status: this.normalizeDerivativeOrderStatus(
@@ -1277,6 +1287,10 @@ export class IbkrClient
     orderCount: number,
     expectedOrderCount: number
   ): string {
+    const pendingCancelOrderId = decoded.pendingCancelOrderIds[0];
+    if (pendingCancelOrderId !== undefined) {
+      return `Order ${pendingCancelOrderId} has a pending cancellation`;
+    }
     const terminal = decoded.orders.find(
       ({ status }) => status === "REJECTED" || status === "CANCELED"
     );
@@ -1641,10 +1655,7 @@ export class IbkrClient
     filledQuantity: number,
     remainingQuantity: number
   ): DerivativeOrderStatus {
-    const status = value
-      ?.replace(/([a-z])([A-Z])/g, "$1_$2")
-      .replace(/\s+/g, "_")
-      .toUpperCase();
+    const status = this.canonicalIbkrOrderStatus(value);
     if (filledQuantity > 0 && remainingQuantity > 0) return "PARTIALLY_FILLED";
     if (status === "FILLED") return "FILLED";
     if (status === "CANCELLED" || status === "CANCELED") return "CANCELED";
@@ -1652,6 +1663,13 @@ export class IbkrClient
     if (status === "API_PENDING" || status === "PENDING_SUBMIT") return "PENDING";
     if (status !== undefined && IBKR_WORKING_STATUSES.has(status)) return "WORKING";
     return "UNKNOWN";
+  }
+
+  private canonicalIbkrOrderStatus(value: string | undefined): string | undefined {
+    return value
+      ?.replace(/([a-z])([A-Z])/g, "$1_$2")
+      .replace(/\s+/g, "_")
+      .toUpperCase();
   }
 
   private normalizeComboPreview(

@@ -175,7 +175,8 @@ whether live execution is allowed.
   a positive `limit`, while STOP orders require only a positive `stopPrice`. Equity-option (`OPT`)
   orders omit CME-only fields; futures-option (`FOP`) orders require the caller's exact `extOperator`
   and `manualIndicator`. Mixed, multiple, unknown, or malformed response evidence returns
-  `recovery_required`; callers must reconcile the retained broker order IDs before another write.
+  `recovery_required`; pending-cancel acknowledgements also require recovery. Callers must reconcile
+  the retained broker order IDs before another write.
 - `submitDerivativeCombo(...)` places one atomic combo with the exact legs, signed ratios,
   quantity, price effect, limit, TIF, and session supplied by the caller. The request requires a
   unique client order ID. Futures-option (`FOP`) writes also require the caller's exact CME
@@ -187,8 +188,8 @@ whether live execution is allowed.
   child's `parentId` from it and deliberately omits a child `cOID`. Parent and child must target the
   same account, but may reference the same or different contracts. IBKR does not promise an
   all-or-none response: `accepted` therefore requires exactly two non-failure acknowledgements,
-  while mixed, incomplete, canceled, rejected, unknown, or malformed evidence is returned as
-  `recovery_required` with every observed broker order ID retained.
+  while mixed, incomplete, pending-cancel, canceled, rejected, unknown, or malformed evidence is
+  returned as `recovery_required` with every observed broker order ID retained.
 - `acknowledgeOrderWarning(...)` replies once to an exact broker warning ID. Only documented
   warning message IDs are marked `known`; consumers must stop on unknown warnings.
 - A warning from `submitDerivativeContingentOrders(...)` includes a typed `continuation` containing
