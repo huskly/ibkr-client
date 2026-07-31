@@ -292,6 +292,35 @@ void test("keeps combo directions unknown when the outer side is absent", async 
   assert.ok(order?.uncertainty.includes("UNKNOWN_SIDE"));
 });
 
+void test("does not associate combo option identities by description position", async () => {
+  const client = new FakeIbkrClient({
+    orders: [
+      {
+        account: "U123",
+        order_id: "24",
+        conidex: "28812380;;;111/1,222/-1",
+        side: "BUY",
+        total_size: 1,
+        cum_fill: 0,
+        remaining: 1,
+        order_status: "Submitted",
+        orderDescriptionWithContract: "SPY   260821P00550000",
+        description1: "SPY   260821C00600000",
+        symbol: "SPY   260821P00550000",
+      },
+    ],
+  });
+
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.deepEqual(
+    order?.legs.map(({ conid, option }) => ({ conid, option })),
+    [
+      { conid: 111, option: null },
+      { conid: 222, option: null },
+    ]
+  );
+});
+
 void test("treats an echoed parentId as the caller-supplied parent identity", async () => {
   const client = new FakeIbkrClient({
     orders: [

@@ -2041,11 +2041,17 @@ export class IbkrClient
     ]
       .filter((value): value is string => typeof value === "string")
       .join(" ");
-    const options = [...description.matchAll(/([A-Z ]{1,6}\d{6}[CP]\d{8})/gi)].map((match) => {
-      const symbol = match[1]?.toUpperCase() ?? "";
-      const parsed = parseOsiOptionSymbol(symbol);
-      return parsed === null ? null : { symbol, ...parsed };
-    });
+    const describedOptions = [...description.matchAll(/([A-Z ]{1,6}\d{6}[CP]\d{8})/gi)].flatMap(
+      (match) => {
+        const symbol = match[1]?.toUpperCase() ?? "";
+        const parsed = parseOsiOptionSymbol(symbol);
+        return parsed === null ? [] : [{ symbol, ...parsed }];
+      }
+    );
+    const uniqueDescribedOptions = describedOptions.filter(
+      (option, index) =>
+        describedOptions.findIndex((candidate) => candidate.symbol === option.symbol) === index
+    );
     const side = this.normalizeOrderSide(order.side);
     const signedSide = side === "BUY" ? 1 : side === "SELL" ? -1 : null;
     let rawLegs: {
@@ -2092,7 +2098,7 @@ export class IbkrClient
     if (rawLegs.length === 0) {
       rawLegs = [{ conid: null, ratio: null, quantityRatio: null }];
     }
-    return rawLegs.map((leg, index) => {
+    return rawLegs.map((leg) => {
       const legUncertainty: ActiveDerivativeOrderUncertainty[] = [];
       if (leg.conid === null) legUncertainty.push("MISSING_LEG_IDENTITY");
       if (leg.ratio === null) {
@@ -2108,7 +2114,10 @@ export class IbkrClient
         ratio: leg.ratio,
         side: leg.ratio === null ? "UNKNOWN" : leg.ratio > 0 ? "BUY" : "SELL",
         quantity: total === null || leg.quantityRatio === null ? null : total * leg.quantityRatio,
-        option: options[index] ?? null,
+        option:
+          rawLegs.length === 1 && uniqueDescribedOptions.length === 1
+            ? (uniqueDescribedOptions[0] ?? null)
+            : null,
         uncertainty: legUncertainty,
       };
     });

@@ -212,7 +212,8 @@ return `recovery_required`, because they do not prove that every submitted ticke
   preserves every signed USD `conidex` member, including exchange-qualified spreads, and applies
   the outer order side to each ratio (or preserves a single conid/side). Caller and broker IDs,
   including echoed client `parentId` ownership, remain distinct alongside graph role, quantities,
-  lifecycle, pricing, TIF, session, timestamps, and OSI option identity. Malformed legs,
+  lifecycle, pricing, TIF, session, timestamps, and unambiguous single-leg OSI option identity.
+  Combo identities are not inferred from description order without a conid correlation. Malformed legs,
   aggregate-only rows, unknown statuses or directions, missing or
   ambiguous parents, and duplicate graph members are returned with explicit `uncertainty` rather
   than silently discarded. An account mismatch rejects the entire read. This active collection is
