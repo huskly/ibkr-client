@@ -463,6 +463,12 @@ export class IbkrClient
     if (parent.contract.conid === child.contract.conid) {
       throw new Error("Contingent parent and child orders must reference distinct contracts");
     }
+    if (parent.orderType !== "LMT") {
+      throw new Error("Contingent parent order must be a LIMIT order");
+    }
+    if (child.orderType !== "STP") {
+      throw new Error("Contingent child order must be a STOP order");
+    }
     const parentMetadata = this.cmeOperatorMetadata(parent.contract.assetClass, parent);
     const childMetadata = this.cmeOperatorMetadata(child.contract.assetClass, child);
     const diagnostics = await this.getTradingDiagnostics(accountId);
@@ -491,7 +497,10 @@ export class IbkrClient
         ],
       },
     });
-    return this.normalizeMultiOrderSubmission(response);
+    return this.normalizeMultiOrderSubmission(response, [
+      parent.clientOrderId,
+      child.clientOrderId,
+    ]);
   }
 
   async acknowledgeOrderWarning(input: {
@@ -968,20 +977,21 @@ export class IbkrClient
     orderType: "LMT" | "STP";
     side: "BUY" | "SELL";
     price?: number;
-    stopPrice?: number;
     tif: "DAY" | "GTC";
     quantity: number;
     outsideRTH: boolean;
   } {
-    const price = request.limit;
-    const stopPrice = request.stopPrice;
     return {
       acctId: request.accountId,
       conid: request.contract.conid,
       orderType: request.orderType,
       side: request.side,
-      ...(price !== undefined ? { price } : {}),
-      ...(stopPrice !== undefined ? { stopPrice } : {}),
+      ...(request.orderType === "LMT" && request.limit !== undefined
+        ? { price: request.limit }
+        : {}),
+      ...(request.orderType === "STP" && request.stopPrice !== undefined
+        ? { price: request.stopPrice }
+        : {}),
       tif: request.tif,
       quantity: request.quantity,
       outsideRTH: request.session === "OVERNIGHT",
@@ -1046,9 +1056,9 @@ export class IbkrClient
       errors: [{ message: unknown, code: null, statusCode: null, details: {} }],
     };
   }
-
   private normalizeMultiOrderSubmission(
-    response: IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+    response: IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[],
+    clientOrderIds: string[] = []
   ): DerivativeMultiOrderResult {
     const items = Array.isArray(response) ? response : [response];
     const warnings = items.flatMap((item) => {
@@ -1075,6 +1085,8 @@ export class IbkrClient
     if (errors.length > 0) {
       return { state: "rejected", reasons: errors.map(({ message }) => message), errors };
     }
+
+    let orderIndex = 0;
     const acceptedOrders = items
       .map((item) => {
         if (!("order_id" in item) && !("orderId" in item)) return undefined;
@@ -1085,6 +1097,9 @@ export class IbkrClient
         const orderStatus =
           ("order_status" in item ? item.order_status : undefined) ??
           ("orderStatus" in item ? item.orderStatus : undefined);
+        const clientOrderId =
+          orderIndex < clientOrderIds.length ? (clientOrderIds[orderIndex] ?? null) : null;
+        orderIndex += 1;
         return {
           orderId: String(orderId),
           status: this.normalizeDerivativeOrderStatus(
@@ -1092,14 +1107,33 @@ export class IbkrClient
             0,
             0
           ),
-          clientOrderId: null,
+          clientOrderId,
         };
       })
       .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
-    if (acceptedOrders.length > 0) {
+
+    if (clientOrderIds.length > 0) {
+      if (acceptedOrders.length === clientOrderIds.length) {
+        return { state: "accepted", orders: acceptedOrders, warnings: [] };
+      }
+      const expected = clientOrderIds.length;
+      const message = `${String(expected)} order(s) submitted but only ${String(acceptedOrders.length)} accepted`;
+      return {
+        state: "rejected",
+        reasons: [message],
+        errors: [{ message, code: null, statusCode: null, details: {} }],
+      };
+    }
+
+    if (acceptedOrders.length === items.length && acceptedOrders.length > 0) {
       return { state: "accepted", orders: acceptedOrders, warnings: [] };
     }
-    const unknown = "IBKR returned an unknown order response";
+
+    const unrecognizedCount = items.length - acceptedOrders.length;
+    const unknown =
+      unrecognizedCount > 0
+        ? `${String(unrecognizedCount)} order(s) returned an unrecognized response`
+        : "IBKR returned an unknown order response";
     return {
       state: "rejected",
       reasons: [unknown],

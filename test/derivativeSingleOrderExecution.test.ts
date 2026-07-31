@@ -175,8 +175,8 @@ void test("STOP order places a GTC stop with stop price", async () => {
     ?.orders?.[0];
   assert.ok(ticket);
   assert.equal(ticket["orderType"], "STP");
-  assert.equal(ticket["stopPrice"], 1.5);
-  assert.equal("price" in (ticket as Record<string, unknown>), false);
+  assert.equal(ticket["price"], 1.5);
+  assert.equal("stopPrice" in (ticket as Record<string, unknown>), false);
   assert.equal(ticket["tif"], "GTC");
 });
 
@@ -285,8 +285,8 @@ void test("contingent parent-child orders submit both in one request", async () 
   assert.equal(orders[1]?.["cOID"], "huskly-child");
   assert.equal(orders[1]?.["parentId"], "huskly-parent");
   assert.equal(orders[1]?.["orderType"], "STP");
-  assert.equal(orders[1]?.["stopPrice"], 1.5);
-  assert.equal("price" in (orders[1] as Record<string, unknown>), false);
+  assert.equal(orders[1]?.["price"], 1.5);
+  assert.equal("stopPrice" in (orders[1] as Record<string, unknown>), false);
   assert.equal(client.calls.filter(({ path }) => path === "iserver/account/U123/orders").length, 1);
 });
 
@@ -421,20 +421,102 @@ void test("contingent order warning and rejection outcomes", async () => {
     const parent = singleOrderRequest({
       clientOrderId: `parent-${fixture.name}`,
     });
-    const child = singleOrderRequest({
+    const childReq = singleOrderRequest({
       clientOrderId: `child-${fixture.name}`,
       contract: contract(99999, 100, "OPT"),
+      orderType: "STP",
+      stopPrice: 1.5,
       parentId: `parent-${fixture.name}`,
     });
+    delete (childReq as Record<string, unknown>)["limit"];
 
     const result = await client.submitDerivativeContingentOrders({
       accountId: "U123",
       parent,
-      child,
+      child: childReq,
     });
     assert.equal(result.state, fixture.expected.state, `for ${fixture.name}`);
     if (result.state === "accepted" && fixture.expected.state === "accepted") {
       assert.equal(result.orders.length, fixture.expected.orderCount);
+      assert.equal(result.orders[0]?.clientOrderId, `parent-${fixture.name}`);
+      assert.equal(result.orders[1]?.clientOrderId, `child-${fixture.name}`);
     }
+  }
+});
+
+void test("contingent orders reject parent that is not LIMIT", async () => {
+  const client = new FakeIbkrClient(() => {
+    throw new Error("broker must not be called");
+  });
+
+  const parent = singleOrderRequest({
+    clientOrderId: "bad-parent",
+    orderType: "STP",
+    stopPrice: 1.5,
+  });
+  delete (parent as Record<string, unknown>)["limit"];
+  const child = singleOrderRequest({
+    clientOrderId: "child",
+    contract: contract(99999, 100, "OPT"),
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "bad-parent",
+  });
+  delete (child as Record<string, unknown>)["limit"];
+
+  await assert.rejects(
+    () => client.submitDerivativeContingentOrders({ accountId: "U123", parent, child }),
+    /Contingent parent order must be a LIMIT order/
+  );
+  assert.equal(client.calls.length, 0);
+});
+
+void test("contingent orders reject child that is not STOP", async () => {
+  const client = new FakeIbkrClient(() => {
+    throw new Error("broker must not be called");
+  });
+
+  const parent = singleOrderRequest({ clientOrderId: "parent" });
+  const child = singleOrderRequest({
+    clientOrderId: "bad-child",
+    contract: contract(99999, 100, "OPT"),
+    orderType: "LMT",
+    limit: 2.5,
+    parentId: "parent",
+  });
+
+  await assert.rejects(
+    () => client.submitDerivativeContingentOrders({ accountId: "U123", parent, child }),
+    /Contingent child order must be a STOP order/
+  );
+  assert.equal(client.calls.length, 0);
+});
+
+void test("contingent result rejects when only one order is recognized", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [{ order_id: "777", order_status: "PreSubmitted" }];
+    }
+    return sessionResponse(input);
+  });
+
+  const parent = singleOrderRequest({ clientOrderId: "parent-only" });
+  const child = singleOrderRequest({
+    clientOrderId: "child-missing",
+    contract: contract(99999, 100, "OPT"),
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "parent-only",
+  });
+  delete (child as Record<string, unknown>)["limit"];
+
+  const result = await client.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent,
+    child,
+  });
+  assert.equal(result.state, "rejected");
+  if (result.state === "rejected") {
+    assert.ok(result.reasons[0]?.includes("only 1 accepted"));
   }
 });
