@@ -85,6 +85,19 @@ const graph = (): DerivativeOrderGraphRequest => ({
     },
   ],
 });
+const liveRoot = (): Record<string, unknown> => ({
+  account: "U1",
+  order_id: "10",
+  order_status: "Submitted",
+  cOID: "pcs-42",
+  conidex: "28812380;;;1/-1,2/1",
+  orderType: "LMT",
+  side: "BUY",
+  totalSize: 1,
+  limitPrice: -1.2,
+  tif: "DAY",
+  outsideRTH: false,
+});
 const session = (input: Input): unknown =>
   input.path === "iserver/auth/status"
     ? { authenticated: true, competing: false }
@@ -157,6 +170,31 @@ test("warning continuation is restart-safe and supports chained replies", async 
   assert.equal(client.calls.filter((c) => c.path.startsWith("iserver/reply/")).length, 2);
 });
 
+test("warning acknowledgement rechecks brokerage session safety before replying", async () => {
+  let competing = false;
+  const client = new Fake((input) => {
+    if (input.path === "iserver/auth/status") return { authenticated: true, competing };
+    if (input.path.endsWith("/orders") && input.method === "POST")
+      return [{ id: "w1", message: ["warning"] }];
+    if (input.path.startsWith("iserver/reply/")) throw new Error("unsafe reply attempted");
+    return session(input);
+  });
+  const first = await client.submitDerivativeOrderGraph(graph());
+  assert.equal(first.state, "warning");
+  if (first.state !== "warning") return;
+
+  competing = true;
+  await assert.rejects(
+    () =>
+      client.acknowledgeDerivativeOrderGraphWarning({
+        continuation: first.continuation,
+        confirmed: true,
+      }),
+    /not safely authenticated/
+  );
+  assert.equal(client.calls.filter((call) => call.path.startsWith("iserver/reply/")).length, 0);
+});
+
 test("partial and duplicated graph acknowledgements fail closed", async () => {
   for (const response of [
     [{ order_id: "10", order_status: "Submitted" }],
@@ -218,7 +256,7 @@ test("rejects descendants that IBKR cannot attach to an unidentified child", asy
 test("recovers exact graph from root or a known broker identity", async () => {
   const orders = {
     orders: [
-      { account: "U1", order_id: "10", order_status: "Submitted", cOID: "pcs-42" },
+      liveRoot(),
       {
         account: "U1",
         order_id: "11",
@@ -265,7 +303,7 @@ test("recovery preserves partial fills reported by live orders", async () => {
     input.path === "iserver/account/orders"
       ? {
           orders: [
-            { account: "U1", order_id: "10", order_status: "Submitted", cOID: "pcs-42" },
+            liveRoot(),
             {
               account: "U1",
               order_id: "11",
@@ -307,7 +345,7 @@ test("recovery fails closed when broker parent links are absent or incorrect", a
       input.path === "iserver/account/orders"
         ? {
             orders: [
-              { account: "U1", order_id: "10", order_status: "Submitted", cOID: "pcs-42" },
+              liveRoot(),
               {
                 account: "U1",
                 order_id: "11",
@@ -364,7 +402,7 @@ test("recovery distinguishes same-contract bracket siblings by their complete ti
     input.path === "iserver/account/orders"
       ? {
           orders: [
-            { account: "U1", order_id: "10", order_status: "Submitted", cOID: "pcs-42" },
+            liveRoot(),
             {
               account: "U1",
               order_id: "11",
@@ -432,13 +470,7 @@ test("recovery distinguishes combo siblings by quantity and signed limit price",
     input.path === "iserver/account/orders"
       ? {
           orders: [
-            {
-              account: "U1",
-              order_id: "10",
-              order_status: "Submitted",
-              cOID: "pcs-42",
-              conidex: "28812380;;;1/-1,2/1",
-            },
+            liveRoot(),
             {
               account: "U1",
               order_id: "11",
@@ -486,7 +518,7 @@ test("recovery fails closed for an unexpected order attached to the root", async
     input.path === "iserver/account/orders"
       ? {
           orders: [
-            { account: "U1", order_id: "10", order_status: "Submitted", cOID: "pcs-42" },
+            liveRoot(),
             {
               account: "U1",
               order_id: "11",
@@ -528,4 +560,85 @@ test("recovery fails closed for an unexpected order attached to the root", async
     graph()
   );
   assert.equal(result.state, "recovery_required");
+});
+
+test("recovery validates root economics instead of trusting its client order ID", async () => {
+  const client = new Fake((input) =>
+    input.path === "iserver/account/orders"
+      ? {
+          orders: [
+            { ...liveRoot(), limitPrice: -9.99 },
+            {
+              account: "U1",
+              order_id: "11",
+              conid: 1,
+              orderType: "STP",
+              side: "BUY",
+              totalSize: 1,
+              stopPrice: 2.4,
+              parentId: "pcs-42",
+            },
+            {
+              account: "U1",
+              order_id: "12",
+              conid: 2,
+              orderType: "MKT",
+              side: "SELL",
+              totalSize: 1,
+              parentId: "pcs-42",
+            },
+          ],
+        }
+      : session(input)
+  );
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graph()
+  );
+  assert.equal(result.state, "recovery_required");
+  assert.equal(result.members[0]?.orderId, null);
+});
+
+test("recovery rejects a single child with mismatched TIF or trading session", async () => {
+  for (const schedule of [
+    { tif: "DAY", outsideRTH: false },
+    { tif: "GTC", outsideRTH: true },
+  ]) {
+    const client = new Fake((input) =>
+      input.path === "iserver/account/orders"
+        ? {
+            orders: [
+              liveRoot(),
+              {
+                account: "U1",
+                order_id: "11",
+                conid: 1,
+                orderType: "STP",
+                side: "BUY",
+                totalSize: 1,
+                stopPrice: 2.4,
+                parentId: "pcs-42",
+                ...schedule,
+              },
+              {
+                account: "U1",
+                order_id: "12",
+                conid: 2,
+                orderType: "MKT",
+                side: "SELL",
+                totalSize: 1,
+                parentId: "pcs-42",
+              },
+            ],
+          }
+        : session(input)
+    );
+    const result = await client.recoverDerivativeOrderGraph(
+      { accountId: "U1", rootClientOrderId: "pcs-42" },
+      graph()
+    );
+    assert.equal(result.state, "recovery_required");
+    assert.equal(result.members[1]?.orderId, null);
+  }
 });

@@ -543,6 +543,11 @@ export class IbkrClient
     this.validateOrderGraph(input.continuation.request);
     if (!input.continuation.replyId.trim())
       throw new Error("An exact warning reply ID is required");
+    const diagnostics = await this.getTradingDiagnostics(input.continuation.request.accountId);
+    if (!diagnostics.authenticated || diagnostics.competingSession) {
+      throw new Error("IBKR brokerage session is not safely authenticated for submission");
+    }
+    await this.prepareBrokerageAccount(input.continuation.request.accountId);
     const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
@@ -1172,9 +1177,8 @@ export class IbkrClient
     order: IbkrLiveOrder
   ): boolean {
     if (node.parentMemberId === undefined) {
-      return (order.cOID ?? order.order_ref) === request.rootClientOrderId;
-    }
-    if (String(order.parentId ?? "") !== request.rootClientOrderId) return false;
+      if ((order.cOID ?? order.order_ref) !== request.rootClientOrderId) return false;
+    } else if (String(order.parentId ?? "") !== request.rootClientOrderId) return false;
     if ("legs" in node) {
       const liveLegs = this.parseComboLegs(order.conidex);
       const orderType = this.normalizeOrderType(order.order_type ?? order.orderType);
@@ -1209,12 +1213,15 @@ export class IbkrClient
           : undefined;
     const expectedPrice =
       node.orderType === "LMT" ? node.limit : node.orderType === "STP" ? node.stopPrice : undefined;
+    const outsideRth = order.outsideRTH ?? order.outside_rth;
     return (
       order.conid === node.contract.conid &&
       orderType === expectedOrderType &&
       side === node.side &&
       quantity === node.quantity &&
-      price === expectedPrice
+      price === expectedPrice &&
+      (order.tif === undefined || order.tif.toUpperCase() === node.tif) &&
+      (outsideRth === undefined || outsideRth === (node.session === "OVERNIGHT"))
     );
   }
 

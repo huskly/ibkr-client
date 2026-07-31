@@ -315,14 +315,15 @@ identity.
 Warnings are never acknowledged automatically. A warning result contains a JSON-safe
 `continuation` with the exact reply ID, full graph request, and all correlation accumulated so far;
 persist it before calling `acknowledgeDerivativeOrderGraphWarning(...)`. Each placement or reply is
-attempted once, chained and unknown warnings remain pending for the caller, and mixed, partial,
+attempted once after revalidating the account's authentication and competing-session safety;
+chained and unknown warnings remain pending for the caller, and mixed, partial,
 duplicated, terminal, malformed, or ambiguous acknowledgements return `recovery_required`. Broker
 IDs from ambiguous acknowledgements are retained as uncorrelated responses rather than assigned to
 nodes by position.
 `recoverDerivativeOrderGraph(...)` reconstructs the exact graph from its root client ID or any known
-member broker ID. It correlates the root by the transmitted client ID and children by their
-transmitted parent ID plus contract or complete combo legs, order type, side, quantity, and
-applicable signed limit or stop price;
+member broker ID. It correlates the root by the transmitted client ID and its complete ticket, and
+children by their transmitted parent ID plus contract or complete combo legs, order type, side,
+quantity, applicable signed limit or stop price, TIF, and regular/overnight session;
 synthesized child client IDs are not expected from the broker. Recovery preserves live fill
 quantities when normalizing member status and fails closed
 unless every expected member correlates uniquely, each child reports its expected broker parent
