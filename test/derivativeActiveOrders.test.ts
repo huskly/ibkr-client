@@ -430,3 +430,11 @@ void test("fails closed when the scoped response contains another account", asyn
     /contained an order for another account/
   );
 });
+
+void test("fails closed when the active-order snapshot is incomplete", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: false,
+    orders: [{ account: "U123", orderId: 51 }],
+  });
+  await assert.rejects(client.listActiveDerivativeOrders("U123"), /snapshot is incomplete/);
+});

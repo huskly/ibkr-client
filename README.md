@@ -216,9 +216,10 @@ return `recovery_required`, because they do not prove that every submitted ticke
   Combo identities are not inferred from description order without a conid correlation. Malformed legs,
   aggregate-only rows, unknown statuses or directions, missing or
   ambiguous parents, and duplicate graph members are returned with explicit `uncertainty` rather
-  than silently discarded. An account mismatch rejects the entire read. This active collection is
-  not terminal history: after an order leaves it, use `getDerivativeOrderStatus(...)` with its
-  broker ID as the authoritative exact lookup.
+  than silently discarded. An account mismatch or an incomplete IBKR snapshot rejects the entire
+  read, preventing a partial collection from being used as the pre-placement risk view. This active
+  collection is not terminal history: after an order leaves it, use
+  `getDerivativeOrderStatus(...)` with its broker ID as the authoritative exact lookup.
 - `getDerivativeExecutions(...)` reads up to seven calendar days from IBKR's trade history and
   returns individual leg fills with execution ID, conid, side, quantity, price, commission,
   commission currency, net amount, venue, and execution time. Customer order IDs allow fills to be
