@@ -597,7 +597,21 @@ export class IbkrClient
       return this.graphMemberEvidence(request, node, order);
     });
     const ids = members.flatMap(({ orderId }) => (orderId === null ? [] : [orderId]));
-    if (candidates.length !== request.nodes.length || new Set(ids).size !== request.nodes.length) {
+    const brokerParentsMatch = request.nodes.every((node) => {
+      if (node.parentMemberId === undefined) return true;
+      const order = byClientId.get(this.graphClientOrderId(request, node));
+      const parent = request.nodes.find(({ memberId }) => memberId === node.parentMemberId);
+      return (
+        order !== undefined &&
+        parent !== undefined &&
+        String(order.parentId ?? "") === this.graphClientOrderId(request, parent)
+      );
+    });
+    if (
+      candidates.length !== request.nodes.length ||
+      new Set(ids).size !== request.nodes.length ||
+      !brokerParentsMatch
+    ) {
       return {
         state: "recovery_required",
         rootClientOrderId: request.rootClientOrderId,
@@ -1116,10 +1130,10 @@ export class IbkrClient
     if (node.parentMemberId !== undefined && parent === undefined) {
       throw new Error("Graph parent evidence was lost after validation");
     }
-    const identity: Record<string, string> = {
-      cOID: this.graphClientOrderId(request, node),
-    };
-    if (parent !== undefined) identity["parentId"] = this.graphClientOrderId(request, parent);
+    const identity: Record<string, string> =
+      parent === undefined
+        ? { cOID: this.graphClientOrderId(request, node) }
+        : { parentId: this.graphClientOrderId(request, parent) };
     if ("legs" in node)
       return {
         ...this.comboOrderTicket(node),
@@ -1387,9 +1401,11 @@ export class IbkrClient
       decoded.unrecognizedResponses.length === 0;
     const distinct =
       new Set(decoded.orders.map(({ orderId }) => orderId)).size === decoded.orders.length;
+    const canCorrelatePositionally =
+      cleanOrders && distinct && decoded.orders.length === request.nodes.length;
     const members = this.attachGraphParentOrderIds(
       request.nodes.map((node, index) => {
-        const order = decoded.orders[index];
+        const order = canCorrelatePositionally ? decoded.orders[index] : undefined;
         if (order === undefined)
           return (
             previousMembers.find(({ memberId }) => memberId === node.memberId) ??
@@ -1458,7 +1474,9 @@ export class IbkrClient
       ],
       warnings: decoded.warnings,
       errors: decoded.errors,
-      unrecognizedResponses: decoded.unrecognizedResponses,
+      unrecognizedResponses: canCorrelatePositionally
+        ? decoded.unrecognizedResponses
+        : [...decoded.unrecognizedResponses, ...decoded.orders],
     };
   }
 

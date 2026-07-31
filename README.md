@@ -315,7 +315,10 @@ Warnings are never acknowledged automatically. A warning result contains a JSON-
 `continuation` with the exact reply ID, full graph request, and all correlation accumulated so far;
 persist it before calling `acknowledgeDerivativeOrderGraphWarning(...)`. Each placement or reply is
 attempted once, chained and unknown warnings remain pending for the caller, and mixed, partial,
-duplicated, terminal, malformed, or ambiguous acknowledgements return `recovery_required`.
+duplicated, terminal, malformed, or ambiguous acknowledgements return `recovery_required`. Broker
+IDs from ambiguous acknowledgements are retained as uncorrelated responses rather than assigned to
+nodes by position.
 `recoverDerivativeOrderGraph(...)` reconstructs the exact graph from its root client ID or any known
-member broker ID and fails closed unless every expected member correlates uniquely. This typed API
+member broker ID and fails closed unless every expected member correlates uniquely and each child
+reports its expected broker parent link. This typed API
 is the safety boundary: consumers should not bypass it with the private raw request client.

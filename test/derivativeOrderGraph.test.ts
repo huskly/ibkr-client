@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { IbkrClient } from "../src/ibkr/ibkrClient.js";
-import type { DerivativeContract, DerivativeOrderGraphRequest } from "../src/types.js";
+import type { DerivativeContract, DerivativeOrderGraphRequest } from "../src/index.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
 interface Input {
@@ -117,8 +117,9 @@ test("submits combo, STOP, and MARKET graph with exact activation links", async 
     ?.data as { orders: Record<string, unknown>[] };
   assert.equal(data.orders[0]?.["cOID"], "pcs-42");
   assert.equal(data.orders[1]?.["parentId"], "pcs-42");
-  assert.equal(data.orders[1]?.["cOID"], "pcs-42:stop");
+  assert.equal("cOID" in data.orders[1]!, false);
   assert.equal(data.orders[2]?.["parentId"], "pcs-42:stop");
+  assert.equal("cOID" in data.orders[2]!, false);
   assert.equal(data.orders[2]?.["orderType"], "MKT");
   assert.equal("price" in data.orders[2]!, false);
 });
@@ -168,7 +169,17 @@ test("partial and duplicated graph acknowledgements fail closed", async () => {
     const client = new Fake((input) =>
       input.path.endsWith("/orders") && input.method === "POST" ? response : session(input)
     );
-    assert.equal((await client.submitDerivativeOrderGraph(graph())).state, "recovery_required");
+    const result = await client.submitDerivativeOrderGraph(graph());
+    assert.equal(result.state, "recovery_required");
+    if (result.state !== "recovery_required") continue;
+    assert.deepEqual(
+      result.members.map(({ orderId }) => orderId),
+      [null, null, null]
+    );
+    assert.deepEqual(
+      result.unrecognizedResponses.map((item) => (item as { orderId: string }).orderId),
+      response.map((item) => item.order_id)
+    );
   }
 });
 
@@ -227,4 +238,38 @@ test("recovers exact graph from root or a known broker identity", async () => {
     (await client.recoverDerivativeOrderGraph({ accountId: "U1", orderId: "11" }, graph())).state,
     "accepted"
   );
+});
+
+test("recovery fails closed when broker parent links are absent or incorrect", async () => {
+  for (const childParentId of [undefined, "different-parent"]) {
+    const client = new Fake((input) =>
+      input.path === "iserver/account/orders"
+        ? {
+            orders: [
+              { account: "U1", order_id: "10", order_status: "Submitted", cOID: "pcs-42" },
+              {
+                account: "U1",
+                order_id: "11",
+                order_status: "Submitted",
+                cOID: "pcs-42:stop",
+                ...(childParentId === undefined ? {} : { parentId: childParentId }),
+              },
+              {
+                account: "U1",
+                order_id: "12",
+                order_status: "Submitted",
+                cOID: "pcs-42:hedge",
+                parentId: "pcs-42:stop",
+              },
+            ],
+          }
+        : session(input)
+    );
+    const result = await client.recoverDerivativeOrderGraph(
+      { accountId: "U1", rootClientOrderId: "pcs-42" },
+      graph()
+    );
+    assert.equal(result.state, "recovery_required");
+    assert.equal(result.members[1]?.parentOrderId, null);
+  }
 });
