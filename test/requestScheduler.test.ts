@@ -53,6 +53,7 @@ void test("one 429 pauses queued work behind one coordinated jittered backoff", 
   let firstAttempts = 0;
   const scheduler = new IbkrRequestScheduler({
     maxConcurrent: 1,
+    now: () => 0,
     sleep: (ms) => {
       sleeps.push(ms);
       return backoff.promise;
