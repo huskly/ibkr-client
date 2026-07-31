@@ -1177,7 +1177,25 @@ export class IbkrClient
         })
       );
     }
-    return order.conid === node.contract.conid;
+    const orderType = this.normalizeOrderType(order.order_type ?? order.orderType);
+    const expectedOrderType = this.normalizeOrderType(node.orderType);
+    const side = this.normalizeOrderSide(order.side);
+    const quantity = this.firstPositiveNumber(order.total_size, order.totalSize, order.size);
+    const price =
+      node.orderType === "LMT"
+        ? this.firstNumber(order.limitPrice, order.limit_price, order.price)
+        : node.orderType === "STP"
+          ? this.firstNumber(order.stopPrice, order.price)
+          : undefined;
+    const expectedPrice =
+      node.orderType === "LMT" ? node.limit : node.orderType === "STP" ? node.stopPrice : undefined;
+    return (
+      order.conid === node.contract.conid &&
+      orderType === expectedOrderType &&
+      side === node.side &&
+      quantity === node.quantity &&
+      price === expectedPrice
+    );
   }
 
   private validateSingleOrder(request: DerivativeSingleOrderRequest): void {

@@ -224,6 +224,10 @@ test("recovers exact graph from root or a known broker identity", async () => {
         order_id: "11",
         order_status: "Submitted",
         conid: 1,
+        orderType: "STP",
+        side: "BUY",
+        totalSize: 1,
+        stopPrice: 2.4,
         parentId: "pcs-42",
       },
       {
@@ -231,6 +235,9 @@ test("recovers exact graph from root or a known broker identity", async () => {
         order_id: "12",
         order_status: "Submitted",
         conid: 2,
+        orderType: "MKT",
+        side: "SELL",
+        totalSize: 1,
         parentId: "pcs-42",
       },
     ],
@@ -264,6 +271,10 @@ test("recovery preserves partial fills reported by live orders", async () => {
               order_id: "11",
               order_status: "Submitted",
               conid: 1,
+              orderType: "STP",
+              side: "BUY",
+              totalSize: 1,
+              stopPrice: 2.4,
               parentId: "pcs-42",
               cum_fill: 1,
               remaining: 2,
@@ -273,6 +284,9 @@ test("recovery preserves partial fills reported by live orders", async () => {
               order_id: "12",
               order_status: "Submitted",
               conid: 2,
+              orderType: "MKT",
+              side: "SELL",
+              totalSize: 1,
               parentId: "pcs-42",
             },
           ],
@@ -299,6 +313,10 @@ test("recovery fails closed when broker parent links are absent or incorrect", a
                 order_id: "11",
                 order_status: "Submitted",
                 conid: 1,
+                orderType: "STP",
+                side: "BUY",
+                totalSize: 1,
+                stopPrice: 2.4,
                 ...(childParentId === undefined ? {} : { parentId: childParentId }),
               },
               {
@@ -306,6 +324,9 @@ test("recovery fails closed when broker parent links are absent or incorrect", a
                 order_id: "12",
                 order_status: "Submitted",
                 conid: 2,
+                orderType: "MKT",
+                side: "SELL",
+                totalSize: 1,
                 parentId: "pcs-42",
               },
             ],
@@ -319,4 +340,69 @@ test("recovery fails closed when broker parent links are absent or incorrect", a
     assert.equal(result.state, "recovery_required");
     assert.equal(result.members[1]?.parentOrderId, null);
   }
+});
+
+test("recovery distinguishes same-contract bracket siblings by their complete tickets", async () => {
+  const request = graph();
+  request.nodes = [
+    request.nodes[0]!,
+    request.nodes[1]!,
+    {
+      memberId: "profit",
+      parentMemberId: "entry",
+      accountId: "U1",
+      contract: contract(1),
+      side: "BUY",
+      quantity: 1,
+      orderType: "LMT",
+      limit: 0.6,
+      tif: "GTC",
+      session: "REGULAR",
+    },
+  ];
+  const client = new Fake((input) =>
+    input.path === "iserver/account/orders"
+      ? {
+          orders: [
+            { account: "U1", order_id: "10", order_status: "Submitted", cOID: "pcs-42" },
+            {
+              account: "U1",
+              order_id: "11",
+              order_status: "Submitted",
+              conid: 1,
+              order_type: "STP",
+              side: "B",
+              total_size: "1",
+              stopPrice: "2.4",
+              parentId: "pcs-42",
+            },
+            {
+              account: "U1",
+              order_id: "12",
+              order_status: "Submitted",
+              conid: 1,
+              order_type: "LMT",
+              side: "BUY",
+              total_size: "1",
+              limit_price: "0.6",
+              parentId: "pcs-42",
+            },
+          ],
+        }
+      : session(input)
+  );
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", orderId: "12" },
+    request
+  );
+  assert.equal(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId }) => [memberId, orderId]),
+    [
+      ["entry", "10"],
+      ["stop", "11"],
+      ["profit", "12"],
+    ]
+  );
 });
