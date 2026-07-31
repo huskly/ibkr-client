@@ -173,6 +173,7 @@ void test("preserves every signed USD combo leg", async () => {
         order_id: "20",
         cOID: "combo",
         conidex: "28812380;;;111/1,222/-2",
+        side: "BUY",
         total_size: 4,
         cum_fill: 0,
         remaining: 4,
@@ -225,6 +226,70 @@ void test("normalizes exchange-qualified sell combo legs to their effective side
   );
   assert.ok(!order?.uncertainty.includes("MALFORMED_CONIDEX"));
   assert.ok(!order?.uncertainty.includes("AGGREGATE_ONLY"));
+});
+
+void test("preserves a terminal canceled status after a partial fill", async () => {
+  const client = new FakeIbkrClient({
+    orders: [
+      {
+        account: "U123",
+        order_id: "22",
+        conid: 101,
+        side: "BUY",
+        total_size: 3,
+        cum_fill: 1,
+        remaining: 2,
+        order_status: "Cancelled",
+      },
+    ],
+  });
+
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.equal(order?.status, "CANCELED");
+});
+
+void test("keeps combo directions unknown when the outer side is absent", async () => {
+  const client = new FakeIbkrClient({
+    orders: [
+      {
+        account: "U123",
+        order_id: "23",
+        conidex: "28812380;;;111/1,222/-2",
+        total_size: 4,
+        cum_fill: 0,
+        remaining: 4,
+        order_status: "Submitted",
+      },
+    ],
+  });
+
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.deepEqual(
+    order?.legs.map(({ conid, ratio, side, quantity, uncertainty }) => ({
+      conid,
+      ratio,
+      side,
+      quantity,
+      uncertainty,
+    })),
+    [
+      {
+        conid: 111,
+        ratio: null,
+        side: "UNKNOWN",
+        quantity: 4,
+        uncertainty: ["UNKNOWN_SIDE"],
+      },
+      {
+        conid: 222,
+        ratio: null,
+        side: "UNKNOWN",
+        quantity: 8,
+        uncertainty: ["UNKNOWN_SIDE"],
+      },
+    ]
+  );
+  assert.ok(order?.uncertainty.includes("UNKNOWN_SIDE"));
 });
 
 void test("treats an echoed parentId as the caller-supplied parent identity", async () => {

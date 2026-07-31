@@ -539,6 +539,7 @@ export interface DerivativeOrderLifecycle {
 /** Why an active order cannot be treated as complete, unambiguous risk evidence. */
 export type ActiveDerivativeOrderUncertainty =
   | "UNKNOWN_STATUS"
+  | "UNKNOWN_SIDE"
   | "MISSING_BROKER_ORDER_ID"
   | "MISSING_LEG_IDENTITY"
   | "MALFORMED_CONIDEX"

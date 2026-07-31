@@ -2048,7 +2048,11 @@ export class IbkrClient
     });
     const side = this.normalizeOrderSide(order.side);
     const signedSide = side === "BUY" ? 1 : side === "SELL" ? -1 : null;
-    let rawLegs: { conid: number | null; ratio: number | null }[] = [];
+    let rawLegs: {
+      conid: number | null;
+      ratio: number | null;
+      quantityRatio: number | null;
+    }[] = [];
     const conidex = typeof order.conidex === "string" ? order.conidex.trim() : null;
     if (conidex?.includes(";;;")) {
       const match = /^(\d+)(?:@[A-Za-z0-9._-]+)?;;;(.+)$/.exec(conidex);
@@ -2066,9 +2070,13 @@ export class IbkrClient
             !Number.isSafeInteger(ratio) ||
             ratio === 0
           ) {
-            return { conid: null, ratio: null };
+            return { conid: null, ratio: null, quantityRatio: null };
           }
-          return { conid, ratio: signedSide === -1 ? -ratio : ratio };
+          return {
+            conid,
+            ratio: signedSide === null ? null : signedSide * ratio,
+            quantityRatio: Math.abs(ratio),
+          };
         });
         if (rawLegs.length === 0 || rawLegs.some((leg) => leg.conid === null)) {
           orderUncertainty.push("MALFORMED_CONIDEX");
@@ -2076,21 +2084,30 @@ export class IbkrClient
       }
       if (rawLegs.length === 0) orderUncertainty.push("AGGREGATE_ONLY");
     } else if (Number.isSafeInteger(order.conid) && Number(order.conid) > 0) {
-      rawLegs = [{ conid: Number(order.conid), ratio: signedSide }];
+      rawLegs = [{ conid: Number(order.conid), ratio: signedSide, quantityRatio: 1 }];
     } else {
       if (conidex) orderUncertainty.push("MALFORMED_CONIDEX");
       orderUncertainty.push("MISSING_LEG_IDENTITY");
     }
-    if (rawLegs.length === 0) rawLegs = [{ conid: null, ratio: null }];
+    if (rawLegs.length === 0) {
+      rawLegs = [{ conid: null, ratio: null, quantityRatio: null }];
+    }
     return rawLegs.map((leg, index) => {
       const legUncertainty: ActiveDerivativeOrderUncertainty[] = [];
       if (leg.conid === null) legUncertainty.push("MISSING_LEG_IDENTITY");
-      if (leg.ratio === null) legUncertainty.push("MALFORMED_CONIDEX");
+      if (leg.ratio === null) {
+        const directionUncertainty =
+          leg.conid !== null && signedSide === null ? "UNKNOWN_SIDE" : "MALFORMED_CONIDEX";
+        legUncertainty.push(directionUncertainty);
+        if (!orderUncertainty.includes(directionUncertainty)) {
+          orderUncertainty.push(directionUncertainty);
+        }
+      }
       return {
         conid: leg.conid,
         ratio: leg.ratio,
         side: leg.ratio === null ? "UNKNOWN" : leg.ratio > 0 ? "BUY" : "SELL",
-        quantity: total === null || leg.ratio === null ? null : total * Math.abs(leg.ratio),
+        quantity: total === null || leg.quantityRatio === null ? null : total * leg.quantityRatio,
         option: options[index] ?? null,
         uncertainty: legUncertainty,
       };
@@ -2361,10 +2378,10 @@ export class IbkrClient
     remainingQuantity: number
   ): DerivativeOrderStatus {
     const status = this.canonicalIbkrOrderStatus(value);
-    if (filledQuantity > 0 && remainingQuantity > 0) return "PARTIALLY_FILLED";
     if (status === "FILLED") return "FILLED";
     if (status === "CANCELLED" || status === "CANCELED") return "CANCELED";
     if (status === "INACTIVE" || status === "REJECTED") return "REJECTED";
+    if (filledQuantity > 0 && remainingQuantity > 0) return "PARTIALLY_FILLED";
     if (status === "API_PENDING" || status === "PENDING_SUBMIT") return "PENDING";
     if (status !== undefined && IBKR_WORKING_STATUSES.has(status)) return "WORKING";
     return "UNKNOWN";
