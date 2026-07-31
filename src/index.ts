@@ -11,6 +11,10 @@ export type {
 export { buildOauthConfig } from "./ibkr/oauthConfig.js";
 export type {
   AccountBalances,
+  ActiveDerivativeOptionIdentity,
+  ActiveDerivativeOrder,
+  ActiveDerivativeOrderLeg,
+  ActiveDerivativeOrderUncertainty,
   AuthStatus,
   BrokerClient,
   BrokerAccountOrders,

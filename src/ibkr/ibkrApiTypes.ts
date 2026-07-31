@@ -170,6 +170,20 @@ export interface IbkrLiveOrder {
   cOID?: string;
   parentId?: string | number;
   order_ref?: string;
+  parentId?: string | number;
+  parent_id?: string | number;
+  parentOrderId?: string | number;
+  parent_order_id?: string | number;
+  parentClientOrderId?: string;
+  parent_order_ref?: string;
+  tif?: string;
+  timeInForce?: string;
+  outsideRTH?: boolean;
+  outside_rth?: boolean;
+  secType?: string;
+  assetClass?: string;
+  childOrders?: IbkrLiveOrder[];
+  children?: IbkrLiveOrder[];
   commissionAndFees?: string | number;
 }
 
