@@ -61,7 +61,9 @@ Optional environment variables:
 
 `IbkrClient` owns IBKR authentication, requests, raw response types, and
 normalization. Consumers such as huskly-cli provide presentation, command
-routing, and caching. Its broker-neutral account API includes:
+routing, and caching. Public request types are the caller contract: this package assumes consumers
+use TypeScript and pass values accepted by those types. Provider responses remain untrusted and are
+validated at runtime. Its broker-neutral account API includes:
 
 - `getAccountBalances()` and `getPositions()` for account state.
 - `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes.

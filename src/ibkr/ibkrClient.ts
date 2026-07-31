@@ -1187,8 +1187,9 @@ export class IbkrClient
       const record = item as Readonly<Record<string, unknown>>;
       let recognized = false;
       if (typeof record["id"] === "string") {
-        const messageIds = Array.isArray(record["messageIds"])
-          ? record["messageIds"].filter((value): value is string => typeof value === "string")
+        const rawMessageIds = record["messageIds"];
+        const messageIds = Array.isArray(rawMessageIds)
+          ? rawMessageIds.filter((value): value is string => typeof value === "string")
           : [];
         decoded.warnings.push({
           replyId: record["id"],
@@ -1196,7 +1197,10 @@ export class IbkrClient
             ? record["message"].filter((value): value is string => typeof value === "string")
             : [],
           messageIds,
-          known: messageIds.length > 0 && messageIds.every((id) => KNOWN_ORDER_WARNING_IDS.has(id)),
+          known:
+            Array.isArray(rawMessageIds) &&
+            rawMessageIds.length > 0 &&
+            rawMessageIds.every((id) => typeof id === "string" && KNOWN_ORDER_WARNING_IDS.has(id)),
         });
         recognized = true;
       }
@@ -1204,11 +1208,18 @@ export class IbkrClient
         decoded.errors.push(this.normalizeBrokerError(record["error"], record));
         recognized = true;
       }
-      const orderId = record["order_id"] ?? record["orderId"];
-      if (typeof orderId === "string" || typeof orderId === "number") {
+      const hasOrderId = "order_id" in record || "orderId" in record;
+      const rawOrderId = record["order_id"] ?? record["orderId"];
+      const orderId =
+        typeof rawOrderId === "string" && rawOrderId.trim()
+          ? rawOrderId.trim()
+          : typeof rawOrderId === "number" && Number.isSafeInteger(rawOrderId) && rawOrderId > 0
+            ? String(rawOrderId)
+            : null;
+      if (orderId !== null) {
         const orderStatus = record["order_status"] ?? record["orderStatus"];
         decoded.orders.push({
-          orderId: String(orderId),
+          orderId,
           status: this.normalizeDerivativeOrderStatus(
             typeof orderStatus === "string" ? orderStatus : undefined,
             0,
@@ -1216,6 +1227,9 @@ export class IbkrClient
           ),
           clientOrderId: null,
         });
+        recognized = true;
+      } else if (hasOrderId) {
+        decoded.unrecognizedResponses.push({ ...record });
         recognized = true;
       }
       if (!recognized) decoded.unrecognizedResponses.push({ ...record });

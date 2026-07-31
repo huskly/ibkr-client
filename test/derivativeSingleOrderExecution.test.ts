@@ -403,6 +403,68 @@ void test("single order accepted, warning, and rejected outcomes", async () => {
   }
 });
 
+void test("blank and invalid broker order IDs require recovery", async () => {
+  for (const orderId of ["", "   ", 0, -1, Number.NaN]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/account/U123/orders") {
+        return [{ order_id: orderId, order_status: "PreSubmitted" }];
+      }
+      return sessionResponse(input);
+    });
+
+    const result = await client.submitDerivativeSingleOrder(singleOrderRequest());
+    assert.equal(result.state, "recovery_required", `for ${String(orderId)}`);
+    if (result.state === "recovery_required") {
+      assert.equal(result.orders.length, 0);
+      assert.deepEqual(result.unrecognizedResponses, [
+        { order_id: orderId, order_status: "PreSubmitted" },
+      ]);
+    }
+  }
+
+  const contingent = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: " ", order_status: "PreSubmitted" },
+      ];
+    }
+    return sessionResponse(input);
+  });
+  const parent = singleOrderRequest({ clientOrderId: "parent-blank-id" });
+  const child = singleOrderRequest({
+    contract: contract(99999, 100, "OPT"),
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "parent-blank-id",
+  });
+  delete (child as Record<string, unknown>)["limit"];
+  delete (child as Record<string, unknown>)["clientOrderId"];
+
+  const contingentResult = await contingent.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent: contingentParent(parent),
+    child: contingentChild(child),
+  });
+  assert.equal(contingentResult.state, "recovery_required");
+});
+
+void test("malformed warning message IDs are never classified as known", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [{ id: "warn-malformed", message: ["Warning"], messageIds: ["o163", 999] }];
+    }
+    return sessionResponse(input);
+  });
+
+  const result = await client.submitDerivativeSingleOrder(singleOrderRequest());
+  assert.equal(result.state, "warning");
+  if (result.state === "warning") {
+    assert.equal(result.warnings[0]?.known, false);
+    assert.deepEqual(result.warnings[0]?.messageIds, ["o163"]);
+  }
+});
+
 void test("placement transport errors are never retried for single orders", async () => {
   const transportError = Object.assign(new Error("broker unavailable"), { status: 503 });
   const client = new FakeIbkrClient((input) => {
