@@ -483,6 +483,12 @@ export interface DerivativeExecutionClient {
     replyId: string;
     confirmed: true;
   }): Promise<DerivativeOrderSubmissionResult>;
+  acknowledgeContingentOrderWarning(input: {
+    replyId: string;
+    confirmed: true;
+    parentClientOrderId: string;
+    childClientOrderId: string;
+  }): Promise<DerivativeMultiOrderResult>;
   getDerivativeOrderStatus(accountId: string, orderId: string): Promise<DerivativeOrderLifecycle>;
   findDerivativeOrder(input: DerivativeOrderLookup): Promise<DerivativeOrderLifecycle>;
   getDerivativeExecutions(input: DerivativeExecutionQuery): Promise<DerivativeExecution[]>;

@@ -434,6 +434,7 @@ export class IbkrClient
           {
             ...this.singleOrderTicket(request),
             cOID: request.clientOrderId,
+            ...(request.parentId !== undefined ? { parentId: request.parentId } : {}),
             ...cmeOperatorMetadata,
           },
         ],
@@ -516,6 +517,29 @@ export class IbkrClient
       data: { confirmed: true },
     });
     return this.normalizeOrderSubmission(response, null);
+  }
+
+  async acknowledgeContingentOrderWarning(input: {
+    replyId: string;
+    confirmed: true;
+    parentClientOrderId: string;
+    childClientOrderId: string;
+  }): Promise<DerivativeMultiOrderResult> {
+    if (!input.replyId.trim()) throw new Error("An exact warning reply ID is required");
+    if (!input.parentClientOrderId.trim() || !input.childClientOrderId.trim()) {
+      throw new Error("Exact parent and child client order IDs are required");
+    }
+    const response = await this.singleAttemptRequest<
+      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+    >({
+      path: `iserver/reply/${encodeURIComponent(input.replyId)}`,
+      method: "POST",
+      data: { confirmed: true },
+    });
+    return this.normalizeMultiOrderSubmission(response, [
+      input.parentClientOrderId,
+      input.childClientOrderId,
+    ]);
   }
 
   async getDerivativeOrderStatus(
@@ -1113,16 +1137,32 @@ export class IbkrClient
       .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
 
     if (clientOrderIds.length > 0) {
-      if (acceptedOrders.length === clientOrderIds.length) {
-        return { state: "accepted", orders: acceptedOrders, warnings: [] };
+      if (acceptedOrders.length !== items.length) {
+        const message = `${String(items.length)} response item(s) but expected ${String(clientOrderIds.length)} order(s)`;
+        return {
+          state: "rejected",
+          reasons: [message],
+          errors: [{ message, code: null, statusCode: null, details: {} }],
+        };
       }
-      const expected = clientOrderIds.length;
-      const message = `${String(expected)} order(s) submitted but only ${String(acceptedOrders.length)} accepted`;
-      return {
-        state: "rejected",
-        reasons: [message],
-        errors: [{ message, code: null, statusCode: null, details: {} }],
-      };
+      if (acceptedOrders.length !== clientOrderIds.length) {
+        const message = `${String(clientOrderIds.length)} order(s) submitted but only ${String(acceptedOrders.length)} accepted`;
+        return {
+          state: "rejected",
+          reasons: [message],
+          errors: [{ message, code: null, statusCode: null, details: {} }],
+        };
+      }
+      const rejected = acceptedOrders.find((entry) => entry.status === "REJECTED");
+      if (rejected !== undefined) {
+        const message = `Order ${rejected.orderId} was rejected`;
+        return {
+          state: "rejected",
+          reasons: [message],
+          errors: [{ message, code: null, statusCode: null, details: {} }],
+        };
+      }
+      return { state: "accepted", orders: acceptedOrders, warnings: [] };
     }
 
     if (acceptedOrders.length === items.length && acceptedOrders.length > 0) {

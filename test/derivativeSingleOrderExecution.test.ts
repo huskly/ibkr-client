@@ -520,3 +520,133 @@ void test("contingent result rejects when only one order is recognized", async (
     assert.ok(result.reasons[0]?.includes("only 1 accepted"));
   }
 });
+
+void test("single order forwards parentId when provided", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [{ order_id: "777", order_status: "PreSubmitted" }];
+    }
+    return sessionResponse(input);
+  });
+
+  const request = singleOrderRequest({
+    clientOrderId: "child-order",
+    side: "SELL",
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "parent-order",
+  });
+  delete (request as Record<string, unknown>)["limit"];
+
+  await client.submitDerivativeSingleOrder(request);
+  const placement = client.calls.find(({ path }) => path === "iserver/account/U123/orders");
+  const ticket = (placement?.data as { orders?: Record<string, unknown>[] } | undefined)
+    ?.orders?.[0];
+  assert.ok(ticket);
+  assert.equal(ticket["parentId"], "parent-order");
+  assert.equal(ticket["cOID"], "child-order");
+});
+
+void test("acknowledgeContingentOrderWarning returns multi-order result", async () => {
+  const responses = [
+    [
+      { order_id: "777", order_status: "PreSubmitted" },
+      { order_id: "888", order_status: "PreSubmitted" },
+    ],
+  ];
+  const client = new FakeIbkrClient((input) => {
+    if (input.path.startsWith("iserver/reply/")) return responses.shift();
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  const result = await client.acknowledgeContingentOrderWarning({
+    replyId: "cont-reply",
+    confirmed: true,
+    parentClientOrderId: "parent-ack",
+    childClientOrderId: "child-ack",
+  });
+  assert.equal(result.state, "accepted");
+  if (result.state === "accepted") {
+    assert.equal(result.orders.length, 2);
+    assert.equal(result.orders[0]?.orderId, "777");
+    assert.equal(result.orders[0]?.clientOrderId, "parent-ack");
+    assert.equal(result.orders[1]?.orderId, "888");
+    assert.equal(result.orders[1]?.clientOrderId, "child-ack");
+  }
+  assert.equal(client.calls.filter(({ path }) => path.startsWith("iserver/reply/")).length, 1);
+});
+
+void test("acknowledgeContingentOrderWarning rejects when only one order recognized", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path.startsWith("iserver/reply/"))
+      return [{ order_id: "777", order_status: "PreSubmitted" }];
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  const result = await client.acknowledgeContingentOrderWarning({
+    replyId: "partial",
+    confirmed: true,
+    parentClientOrderId: "parent-partial",
+    childClientOrderId: "child-partial",
+  });
+  assert.equal(result.state, "rejected");
+});
+
+void test("contingent result rejects when an order status is REJECTED", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: "888", order_status: "Inactive" },
+      ];
+    }
+    return sessionResponse(input);
+  });
+
+  const parent = singleOrderRequest({ clientOrderId: "parent-rej" });
+  const child = singleOrderRequest({
+    clientOrderId: "child-rej",
+    contract: contract(99999, 100, "OPT"),
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "parent-rej",
+  });
+  delete (child as Record<string, unknown>)["limit"];
+
+  const result = await client.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent,
+    child,
+  });
+  assert.equal(result.state, "rejected");
+});
+
+void test("contingent result rejects when response has extra unrecognized items", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: "888", order_status: "PreSubmitted" },
+        { someNewField: "unexpected" },
+      ];
+    }
+    return sessionResponse(input);
+  });
+
+  const parent = singleOrderRequest({ clientOrderId: "parent-extra" });
+  const child = singleOrderRequest({
+    clientOrderId: "child-extra",
+    contract: contract(99999, 100, "OPT"),
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "parent-extra",
+  });
+  delete (child as Record<string, unknown>)["limit"];
+
+  const result = await client.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent,
+    child,
+  });
+  assert.equal(result.state, "rejected");
+});
