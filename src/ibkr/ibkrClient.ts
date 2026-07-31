@@ -744,12 +744,17 @@ export class IbkrClient
       throw new Error("IBKR active-order snapshot is incomplete");
     }
     const flattened = this.flattenActiveOrders(response.orders);
-    const mismatch = flattened.find(({ order }) => {
-      const returnedAccount = order.account ?? order.acct;
-      return returnedAccount !== undefined && returnedAccount !== accountId;
+    const invalidAccountEvidence = flattened.find(({ order }) => {
+      const returnedAccounts = [order.account, order.acct].filter(
+        (value): value is string => typeof value === "string"
+      );
+      return (
+        returnedAccounts.length === 0 ||
+        returnedAccounts.some((returnedAccount) => returnedAccount !== accountId)
+      );
     });
-    if (mismatch !== undefined) {
-      throw new Error("IBKR active-order response contained an order for another account");
+    if (invalidAccountEvidence !== undefined) {
+      throw new Error("IBKR active-order response did not provide unambiguous account identity");
     }
 
     const normalized = flattened.map(({ order, nestedParent }) =>

@@ -439,10 +439,23 @@ void test("fails closed when the scoped response contains another account", asyn
     snapshot: true,
     orders: [{ account: "OTHER", orderId: 50 }],
   });
-  await assert.rejects(
-    client.listActiveDerivativeOrders("U123"),
-    /contained an order for another account/
-  );
+  await assert.rejects(client.listActiveDerivativeOrders("U123"), /unambiguous account identity/);
+});
+
+void test("fails closed when an active order omits its account identity", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [{ orderId: 50 }],
+  });
+  await assert.rejects(client.listActiveDerivativeOrders("U123"), /unambiguous account identity/);
+});
+
+void test("fails closed when active order account aliases conflict", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [{ account: "U123", acct: "OTHER", orderId: 50 }],
+  });
+  await assert.rejects(client.listActiveDerivativeOrders("U123"), /unambiguous account identity/);
 });
 
 void test("fails closed when the active-order snapshot is incomplete", async () => {
