@@ -2049,7 +2049,7 @@ export class IbkrClient
     const side = this.normalizeOrderSide(order.side);
     const signedSide = side === "BUY" ? 1 : side === "SELL" ? -1 : null;
     let rawLegs: { conid: number | null; ratio: number | null }[] = [];
-    if (order.conidex !== undefined) {
+    if (typeof order.conidex === "string") {
       const match = /^(\d+)(?:@[A-Za-z0-9._-]+)?;;;(.+)$/.exec(order.conidex.trim());
       if (match?.[1] !== "28812380") {
         orderUncertainty.push("MALFORMED_CONIDEX");

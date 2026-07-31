@@ -101,6 +101,38 @@ void test("lists a typed active single option and preserves lifecycle evidence",
   assert.deepEqual(client.calls.at(-1)?.params, { force: true, accountId: "U123" });
 });
 
+void test("treats a null conidex as absent for a single-leg order", async () => {
+  const client = new FakeIbkrClient({
+    orders: [
+      {
+        account: "U123",
+        orderId: 11,
+        conid: 102,
+        conidex: null,
+        side: "SELL",
+        totalSize: 2,
+        filled: 0,
+        remaining: 2,
+        status: "Submitted",
+      },
+    ],
+  });
+
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.deepEqual(order?.legs, [
+    {
+      conid: 102,
+      ratio: -1,
+      side: "SELL",
+      quantity: 2,
+      option: null,
+      uncertainty: [],
+    },
+  ]);
+  assert.ok(!order?.uncertainty.includes("MALFORMED_CONIDEX"));
+  assert.ok(!order?.uncertainty.includes("AGGREGATE_ONLY"));
+});
+
 void test("preserves every signed USD combo leg", async () => {
   const client = new FakeIbkrClient({
     orders: [
