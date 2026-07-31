@@ -690,6 +690,43 @@ void test("single order rejects a broker ID with a failed status", async () => {
   }
 });
 
+void test("single order leaves client identity unknown for multiple acknowledgements", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: "888", order_status: "PreSubmitted" },
+      ];
+    }
+    return sessionResponse(input);
+  });
+
+  const result = await client.submitDerivativeSingleOrder(singleOrderRequest());
+  assert.equal(result.state, "recovery_required");
+  if (result.state === "recovery_required") {
+    assert.deepEqual(
+      result.orders.map(({ clientOrderId }) => clientOrderId),
+      [null, null]
+    );
+  }
+});
+
+void test("single order rejects malformed JavaScript identity fields before broker access", async () => {
+  for (const request of [
+    { ...singleOrderRequest(), parentId: 123 },
+    { ...singleOrderRequest(), clientOrderId: 123, parentId: "parent-order" },
+  ]) {
+    const client = new FakeIbkrClient(() => {
+      throw new Error("broker must not be called");
+    });
+    await assert.rejects(
+      () => client.submitDerivativeSingleOrder(request as unknown as DerivativeSingleOrderRequest),
+      /order ID must be a string/
+    );
+    assert.equal(client.calls.length, 0);
+  }
+});
+
 void test("contingent result requires recovery when an order is canceled", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/account/U123/orders") {

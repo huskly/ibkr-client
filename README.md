@@ -172,12 +172,14 @@ whether live execution is allowed.
   `cOID`, as required by IBKR. LIMIT and STOP requests are discriminated: LIMIT orders require only
   a positive `limit`, while STOP orders require only a positive `stopPrice`. Equity-option (`OPT`)
   orders omit CME-only fields; futures-option (`FOP`) orders require the caller's exact `extOperator`
-  and `manualIndicator`.
+  and `manualIndicator`. Mixed, multiple, unknown, or malformed response evidence returns
+  `recovery_required`; callers must reconcile the retained broker order IDs before another write.
 - `submitDerivativeCombo(...)` places one atomic combo with the exact legs, signed ratios,
   quantity, price effect, limit, TIF, and session supplied by the caller. The request requires a
   unique client order ID. Futures-option (`FOP`) writes also require the caller's exact CME
   `extOperator` and manual/automated-origin `manualIndicator`; equity-option (`OPT`) writes omit
-  both CME-only fields.
+  both CME-only fields. As with single orders, ambiguous response evidence returns
+  `recovery_required` and must block blind resubmission.
 - `submitDerivativeContingentOrders(...)` places a general parent/child LIMIT-or-STOP pair in one
   bracket request. The parent carries the caller's unique client order ID; the client derives the
   child's `parentId` from it and deliberately omits a child `cOID`. Parent and child must target the

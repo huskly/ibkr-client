@@ -467,7 +467,11 @@ export class IbkrClient
     }
     this.validateSingleOrderFields(parent);
     this.validateSingleOrderFields(child);
-    if (!parent.clientOrderId.trim() || parent.clientOrderId.length > 64) {
+    if (
+      typeof parent.clientOrderId !== "string" ||
+      !parent.clientOrderId.trim() ||
+      parent.clientOrderId.length > 64
+    ) {
       throw new Error("Parent client order ID must contain 1 to 64 characters");
     }
     if ("clientOrderId" in child || "parentId" in child) {
@@ -932,10 +936,16 @@ export class IbkrClient
       clientOrderId?: unknown;
       parentId?: unknown;
     };
-    const clientOrderId =
-      typeof identityFields.clientOrderId === "string" ? identityFields.clientOrderId : undefined;
-    const parentId =
-      typeof identityFields.parentId === "string" ? identityFields.parentId : undefined;
+    const hasClientOrderId = "clientOrderId" in identityFields;
+    const hasParentId = "parentId" in identityFields;
+    if (hasClientOrderId && typeof identityFields.clientOrderId !== "string") {
+      throw new Error("Client order ID must be a string");
+    }
+    if (hasParentId && typeof identityFields.parentId !== "string") {
+      throw new Error("Parent order ID must be a string");
+    }
+    const clientOrderId = hasClientOrderId ? (identityFields.clientOrderId as string) : undefined;
+    const parentId = hasParentId ? (identityFields.parentId as string) : undefined;
     if (clientOrderId !== undefined && parentId !== undefined) {
       throw new Error("Attached child orders must not include a client order ID");
     }
@@ -1048,7 +1058,11 @@ export class IbkrClient
     clientOrderId: string | null
   ): DerivativeOrderSubmissionResult {
     const decoded = this.decodeOrderSubmission(response);
-    const orders = decoded.orders.map((order) => ({ ...order, clientOrderId }));
+    const correlatedClientOrderId = decoded.orders.length === 1 ? clientOrderId : null;
+    const orders = decoded.orders.map((order) => ({
+      ...order,
+      clientOrderId: correlatedClientOrderId,
+    }));
     const hasWarnings = decoded.warnings.length > 0;
     const hasErrors = decoded.errors.length > 0;
     const hasUnknown = decoded.unrecognizedResponses.length > 0;
