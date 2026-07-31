@@ -1178,6 +1178,7 @@ export class IbkrClient
   ): boolean {
     if (node.parentMemberId === undefined) {
       if ((order.cOID ?? order.order_ref) !== request.rootClientOrderId) return false;
+      if (String(order.parentId ?? "").trim() !== "") return false;
     } else if (String(order.parentId ?? "") !== request.rootClientOrderId) return false;
     if ("legs" in node) {
       const liveLegs = this.parseComboLegs(order.conidex);

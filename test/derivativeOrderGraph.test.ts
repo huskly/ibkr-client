@@ -600,6 +600,44 @@ test("recovery validates root economics instead of trusting its client order ID"
   assert.equal(result.members[0]?.orderId, null);
 });
 
+test("recovery rejects a matching root that is attached to an external parent", async () => {
+  const client = new Fake((input) =>
+    input.path === "iserver/account/orders"
+      ? {
+          orders: [
+            { ...liveRoot(), parentId: "external-parent" },
+            {
+              account: "U1",
+              order_id: "11",
+              conid: 1,
+              orderType: "STP",
+              side: "BUY",
+              totalSize: 1,
+              stopPrice: 2.4,
+              parentId: "pcs-42",
+            },
+            {
+              account: "U1",
+              order_id: "12",
+              conid: 2,
+              orderType: "MKT",
+              side: "SELL",
+              totalSize: 1,
+              parentId: "pcs-42",
+            },
+          ],
+        }
+      : session(input)
+  );
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graph()
+  );
+  assert.equal(result.state, "recovery_required");
+  assert.equal(result.members[0]?.orderId, null);
+});
+
 test("recovery rejects a single child with mismatched TIF or trading session", async () => {
   for (const schedule of [
     { tif: "DAY", outsideRTH: false },
