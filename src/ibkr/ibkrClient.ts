@@ -2049,8 +2049,9 @@ export class IbkrClient
     const side = this.normalizeOrderSide(order.side);
     const signedSide = side === "BUY" ? 1 : side === "SELL" ? -1 : null;
     let rawLegs: { conid: number | null; ratio: number | null }[] = [];
-    if (typeof order.conidex === "string") {
-      const match = /^(\d+)(?:@[A-Za-z0-9._-]+)?;;;(.+)$/.exec(order.conidex.trim());
+    const conidex = typeof order.conidex === "string" ? order.conidex.trim() : null;
+    if (conidex?.includes(";;;")) {
+      const match = /^(\d+)(?:@[A-Za-z0-9._-]+)?;;;(.+)$/.exec(conidex);
       if (match?.[1] !== "28812380") {
         orderUncertainty.push("MALFORMED_CONIDEX");
       } else {
@@ -2077,6 +2078,7 @@ export class IbkrClient
     } else if (Number.isSafeInteger(order.conid) && Number(order.conid) > 0) {
       rawLegs = [{ conid: Number(order.conid), ratio: signedSide }];
     } else {
+      if (conidex) orderUncertainty.push("MALFORMED_CONIDEX");
       orderUncertainty.push("MISSING_LEG_IDENTITY");
     }
     if (rawLegs.length === 0) rawLegs = [{ conid: null, ratio: null }];

@@ -133,6 +133,38 @@ void test("treats a null conidex as absent for a single-leg order", async () => 
   assert.ok(!order?.uncertainty.includes("AGGREGATE_ONLY"));
 });
 
+void test("falls back to conid for a scalar single-leg conidex", async () => {
+  const client = new FakeIbkrClient({
+    orders: [
+      {
+        account: "U123",
+        orderId: 12,
+        conid: 101,
+        conidex: "101",
+        side: "BUY",
+        totalSize: 3,
+        filled: 0,
+        remaining: 3,
+        status: "Submitted",
+      },
+    ],
+  });
+
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.deepEqual(order?.legs, [
+    {
+      conid: 101,
+      ratio: 1,
+      side: "BUY",
+      quantity: 3,
+      option: null,
+      uncertainty: [],
+    },
+  ]);
+  assert.ok(!order?.uncertainty.includes("MALFORMED_CONIDEX"));
+  assert.ok(!order?.uncertainty.includes("AGGREGATE_ONLY"));
+});
+
 void test("preserves every signed USD combo leg", async () => {
   const client = new FakeIbkrClient({
     orders: [
