@@ -536,6 +536,61 @@ export interface DerivativeOrderLifecycle {
   updatedAt: string | null;
 }
 
+/** Why an active order cannot be treated as complete, unambiguous risk evidence. */
+export type ActiveDerivativeOrderUncertainty =
+  | "UNKNOWN_STATUS"
+  | "UNKNOWN_SIDE"
+  | "MISSING_BROKER_ORDER_ID"
+  | "MISSING_LEG_IDENTITY"
+  | "MALFORMED_CONIDEX"
+  | "AGGREGATE_ONLY"
+  | "MISSING_PARENT"
+  | "AMBIGUOUS_PARENT"
+  | "DUPLICATE_MEMBER"
+  | "INCOMPLETE_QUANTITIES"
+  | "PARTIAL_GRAPH";
+
+export interface ActiveDerivativeOptionIdentity {
+  symbol: string;
+  underlying: string;
+  expiry: string;
+  strike: number;
+  right: OptionRight;
+}
+
+export interface ActiveDerivativeOrderLeg {
+  conid: number | null;
+  /** Signed combo ratio: positive buys and negative sells. */
+  ratio: number | null;
+  side: DerivativeOrderSide | "UNKNOWN";
+  quantity: number | null;
+  option: ActiveDerivativeOptionIdentity | null;
+  uncertainty: ActiveDerivativeOrderUncertainty[];
+}
+
+/** One member of the active order graph returned by Client Portal. */
+export interface ActiveDerivativeOrder {
+  accountId: string;
+  orderId: string | null;
+  clientOrderId: string | null;
+  parentOrderId: string | null;
+  parentClientOrderId: string | null;
+  graphRole: "ROOT" | "CHILD" | "UNKNOWN";
+  status: DerivativeOrderStatus;
+  totalQuantity: number | null;
+  filledQuantity: number | null;
+  remainingQuantity: number | null;
+  tif: string | null;
+  session: "REGULAR" | "OVERNIGHT" | "UNKNOWN";
+  orderType: string | null;
+  limitPrice: number | null;
+  stopPrice: number | null;
+  enteredAt: string | null;
+  updatedAt: string | null;
+  legs: ActiveDerivativeOrderLeg[];
+  uncertainty: ActiveDerivativeOrderUncertainty[];
+}
+
 export type DerivativeOrderLookup =
   | { accountId: string; orderId: string; clientOrderId?: never }
   | { accountId: string; orderId?: never; clientOrderId: string };
@@ -622,6 +677,7 @@ export interface DerivativeExecutionClient {
     input: DerivativeOrderGraphLookup,
     request: DerivativeOrderGraphRequest
   ): Promise<DerivativeOrderGraphResult>;
+  listActiveDerivativeOrders(accountId: string): Promise<ActiveDerivativeOrder[]>;
   submitDerivativeCombo(
     request: DerivativeComboExecutionRequest
   ): Promise<DerivativeOrderSubmissionResult>;

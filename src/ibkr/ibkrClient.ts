@@ -3,6 +3,9 @@ import type { IbkrClient as RawIbkrClient } from "ibkr-client";
 import type { IbkrOauth1Config } from "./oauthConfig.js";
 import type {
   AccountBalances,
+  ActiveDerivativeOrder,
+  ActiveDerivativeOrderLeg,
+  ActiveDerivativeOrderUncertainty,
   AuthStatus,
   BrokerAccountOrders,
   BrokerClient,
@@ -728,6 +731,63 @@ export class IbkrClient
       throw new Error(`IBKR order ${identity} did not include a broker order ID`);
     }
     return this.getDerivativeOrderStatus(input.accountId, String(orderId));
+  }
+
+  async listActiveDerivativeOrders(accountId: string): Promise<ActiveDerivativeOrder[]> {
+    if (!accountId.trim()) throw new Error("An exact account ID is required");
+    await this.prepareBrokerageAccount(accountId);
+    const response = await this.req<IbkrLiveOrdersResponse>({
+      path: "iserver/account/orders",
+      params: { force: true, accountId },
+    });
+    if (response.snapshot !== true || !Array.isArray(response.orders)) {
+      throw new Error("IBKR active-order snapshot is incomplete");
+    }
+    const flattened = this.flattenActiveOrders(response.orders);
+    const invalidAccountEvidence = flattened.find(({ order }) => {
+      const returnedAccounts: readonly unknown[] = [order.account, order.acct];
+      const providedAccounts = returnedAccounts.filter((value) => value !== undefined);
+      return (
+        providedAccounts.length === 0 ||
+        providedAccounts.some(
+          (returnedAccount) => typeof returnedAccount !== "string" || returnedAccount !== accountId
+        )
+      );
+    });
+    if (invalidAccountEvidence !== undefined) {
+      throw new Error("IBKR active-order response did not provide unambiguous account identity");
+    }
+
+    const normalized = flattened.map(({ order, nestedParent }) =>
+      this.normalizeActiveDerivativeOrder(accountId, order, nestedParent)
+    );
+    const byOrderId = new Map<string, ActiveDerivativeOrder[]>();
+    const byClientId = new Map<string, ActiveDerivativeOrder[]>();
+    for (const order of normalized) {
+      if (order.orderId !== null) {
+        const members = byOrderId.get(order.orderId) ?? [];
+        members.push(order);
+        byOrderId.set(order.orderId, members);
+      }
+      if (order.clientOrderId !== null) {
+        const members = byClientId.get(order.clientOrderId) ?? [];
+        members.push(order);
+        byClientId.set(order.clientOrderId, members);
+      }
+    }
+    for (const order of normalized) {
+      if (order.orderId !== null && (byOrderId.get(order.orderId)?.length ?? 0) > 1) {
+        this.addOrderUncertainty(order, "DUPLICATE_MEMBER");
+      }
+      const parentIdentity = order.parentOrderId ?? order.parentClientOrderId;
+      if (parentIdentity === null) continue;
+      const brokerMatches = byOrderId.get(parentIdentity) ?? [];
+      const clientMatches = byClientId.get(parentIdentity) ?? [];
+      const matches = new Set([...brokerMatches, ...clientMatches]);
+      if (matches.size === 0) this.addOrderUncertainty(order, "MISSING_PARENT");
+      if (matches.size > 1) this.addOrderUncertainty(order, "AMBIGUOUS_PARENT");
+    }
+    return normalized;
   }
 
   async getDerivativeExecutions(input: DerivativeExecutionQuery): Promise<DerivativeExecution[]> {
@@ -1886,6 +1946,199 @@ export class IbkrClient
     };
   }
 
+  private flattenActiveOrders(
+    orders: readonly IbkrLiveOrder[],
+    nestedParent: IbkrLiveOrder | null = null
+  ): { order: IbkrLiveOrder; nestedParent: IbkrLiveOrder | null }[] {
+    return orders.flatMap((order) => {
+      const children = [...new Set([...(order.childOrders ?? []), ...(order.children ?? [])])];
+      return [{ order, nestedParent }, ...this.flattenActiveOrders(children, order)];
+    });
+  }
+
+  private normalizeActiveDerivativeOrder(
+    accountId: string,
+    order: IbkrLiveOrder,
+    nestedParent: IbkrLiveOrder | null
+  ): ActiveDerivativeOrder {
+    const uncertainty: ActiveDerivativeOrderUncertainty[] = [];
+    const total = this.firstNumber(order.total_size, order.totalSize, order.size) ?? null;
+    const filled =
+      this.firstNumber(order.cum_fill, order.cumFill, order.filledQuantity, order.filled) ?? null;
+    const remaining =
+      this.firstNumber(order.remainingQuantity, order.remaining_size, order.remaining) ??
+      (total !== null && filled !== null ? Math.max(0, total - filled) : null);
+    if (total === null || filled === null || remaining === null)
+      uncertainty.push("INCOMPLETE_QUANTITIES");
+    const rawStatus = order.order_status ?? order.orderStatus ?? order.status;
+    const status = this.normalizeDerivativeOrderStatus(rawStatus, filled ?? 0, remaining ?? 0);
+    if (status === "UNKNOWN") uncertainty.push("UNKNOWN_STATUS");
+    const rawOrderId = order.order_id ?? order.orderId;
+    if (rawOrderId === undefined) uncertainty.push("MISSING_BROKER_ORDER_ID");
+    const explicitParentOrderId = order.parent_order_id ?? order.parentOrderId ?? order.parent_id;
+    const explicitParentClientId =
+      order.parentClientOrderId ?? order.parent_order_ref ?? order.parentId;
+    const nestedBrokerId = nestedParent?.order_id ?? nestedParent?.orderId;
+    const nestedClientId = nestedParent?.cOID ?? nestedParent?.order_ref;
+    if (
+      nestedParent !== null &&
+      explicitParentOrderId === undefined &&
+      explicitParentClientId === undefined
+    ) {
+      uncertainty.push("PARTIAL_GRAPH");
+    }
+    const legs = this.normalizeActiveDerivativeLegs(order, total, uncertainty);
+    const orderTime = this.parseOrderTime(order)?.toISOString() ?? null;
+    return {
+      accountId,
+      orderId: rawOrderId === undefined ? null : String(rawOrderId),
+      clientOrderId: order.cOID ?? order.order_ref ?? null,
+      parentOrderId:
+        explicitParentOrderId === undefined
+          ? nestedBrokerId === undefined
+            ? null
+            : String(nestedBrokerId)
+          : String(explicitParentOrderId),
+      parentClientOrderId:
+        explicitParentClientId === undefined
+          ? (nestedClientId ?? null)
+          : String(explicitParentClientId),
+      graphRole:
+        nestedParent !== null ||
+        explicitParentOrderId !== undefined ||
+        explicitParentClientId !== undefined
+          ? "CHILD"
+          : rawOrderId === undefined
+            ? "UNKNOWN"
+            : "ROOT",
+      status,
+      totalQuantity: total,
+      filledQuantity: filled,
+      remainingQuantity: remaining,
+      tif: order.tif ?? order.timeInForce ?? null,
+      session:
+        order.outsideRTH === true || order.outside_rth === true
+          ? "OVERNIGHT"
+          : order.outsideRTH === false || order.outside_rth === false
+            ? "REGULAR"
+            : "UNKNOWN",
+      orderType: this.normalizeOrderType(order.order_type ?? order.orderType) ?? null,
+      limitPrice: this.firstNumber(order.limitPrice, order.limit_price, order.price) ?? null,
+      stopPrice: this.firstNumber(order.stopPrice) ?? null,
+      enteredAt: orderTime,
+      updatedAt:
+        order.lastExecutionTime_r !== undefined || order.lastExecutionTime !== undefined
+          ? orderTime
+          : null,
+      legs,
+      uncertainty,
+    };
+  }
+
+  private normalizeActiveDerivativeLegs(
+    order: IbkrLiveOrder,
+    total: number | null,
+    orderUncertainty: ActiveDerivativeOrderUncertainty[]
+  ): ActiveDerivativeOrderLeg[] {
+    const description = [
+      order.orderDescriptionWithContract,
+      order.order_description_with_contract,
+      order.contractDescription1,
+      order.contract_description_1,
+      order.description1,
+      order.symbol,
+    ]
+      .filter((value): value is string => typeof value === "string")
+      .join(" ");
+    const describedOptions = [...description.matchAll(/([A-Z ]{1,6}\d{6}[CP]\d{8})/gi)].flatMap(
+      (match) => {
+        const symbol = match[1]?.toUpperCase() ?? "";
+        const parsed = parseOsiOptionSymbol(symbol);
+        return parsed === null ? [] : [{ symbol, ...parsed }];
+      }
+    );
+    const uniqueDescribedOptions = describedOptions.filter(
+      (option, index) =>
+        describedOptions.findIndex((candidate) => candidate.symbol === option.symbol) === index
+    );
+    const side = this.normalizeOrderSide(order.side);
+    const signedSide = side === "BUY" ? 1 : side === "SELL" ? -1 : null;
+    let rawLegs: {
+      conid: number | null;
+      ratio: number | null;
+      quantityRatio: number | null;
+    }[] = [];
+    const conidex = typeof order.conidex === "string" ? order.conidex.trim() : null;
+    if (conidex?.includes(";;;")) {
+      const match = /^(\d+)(?:@[A-Za-z0-9._-]+)?;;;(.+)$/.exec(conidex);
+      if (match?.[1] !== "28812380") {
+        orderUncertainty.push("MALFORMED_CONIDEX");
+      } else {
+        rawLegs = (match[2] ?? "").split(",").map((member) => {
+          const legMatch = /^(\d+)\/([+-]?\d+)$/.exec(member.trim());
+          const conid = Number(legMatch?.[1]);
+          const ratio = Number(legMatch?.[2]);
+          if (
+            !legMatch ||
+            !Number.isSafeInteger(conid) ||
+            conid <= 0 ||
+            !Number.isSafeInteger(ratio) ||
+            ratio === 0
+          ) {
+            return { conid: null, ratio: null, quantityRatio: null };
+          }
+          return {
+            conid,
+            ratio: signedSide === null ? null : signedSide * ratio,
+            quantityRatio: Math.abs(ratio),
+          };
+        });
+        if (rawLegs.length === 0 || rawLegs.some((leg) => leg.conid === null)) {
+          orderUncertainty.push("MALFORMED_CONIDEX");
+        }
+      }
+      if (rawLegs.length === 0) orderUncertainty.push("AGGREGATE_ONLY");
+    } else if (Number.isSafeInteger(order.conid) && Number(order.conid) > 0) {
+      rawLegs = [{ conid: Number(order.conid), ratio: signedSide, quantityRatio: 1 }];
+    } else {
+      if (conidex) orderUncertainty.push("MALFORMED_CONIDEX");
+      orderUncertainty.push("MISSING_LEG_IDENTITY");
+    }
+    if (rawLegs.length === 0) {
+      rawLegs = [{ conid: null, ratio: null, quantityRatio: null }];
+    }
+    return rawLegs.map((leg) => {
+      const legUncertainty: ActiveDerivativeOrderUncertainty[] = [];
+      if (leg.conid === null) legUncertainty.push("MISSING_LEG_IDENTITY");
+      if (leg.ratio === null) {
+        const directionUncertainty =
+          leg.conid !== null && signedSide === null ? "UNKNOWN_SIDE" : "MALFORMED_CONIDEX";
+        legUncertainty.push(directionUncertainty);
+        if (!orderUncertainty.includes(directionUncertainty)) {
+          orderUncertainty.push(directionUncertainty);
+        }
+      }
+      return {
+        conid: leg.conid,
+        ratio: leg.ratio,
+        side: leg.ratio === null ? "UNKNOWN" : leg.ratio > 0 ? "BUY" : "SELL",
+        quantity: total === null || leg.quantityRatio === null ? null : total * leg.quantityRatio,
+        option:
+          rawLegs.length === 1 && uniqueDescribedOptions.length === 1
+            ? (uniqueDescribedOptions[0] ?? null)
+            : null,
+        uncertainty: legUncertainty,
+      };
+    });
+  }
+
+  private addOrderUncertainty(
+    order: ActiveDerivativeOrder,
+    uncertainty: ActiveDerivativeOrderUncertainty
+  ): void {
+    if (!order.uncertainty.includes(uncertainty)) order.uncertainty.push(uncertainty);
+  }
+
   private normalizeDerivativeExecution(
     accountId: string,
     trade: IbkrTrade
@@ -2143,10 +2396,10 @@ export class IbkrClient
     remainingQuantity: number
   ): DerivativeOrderStatus {
     const status = this.canonicalIbkrOrderStatus(value);
-    if (filledQuantity > 0 && remainingQuantity > 0) return "PARTIALLY_FILLED";
     if (status === "FILLED") return "FILLED";
     if (status === "CANCELLED" || status === "CANCELED") return "CANCELED";
     if (status === "INACTIVE" || status === "REJECTED") return "REJECTED";
+    if (filledQuantity > 0 && remainingQuantity > 0) return "PARTIALLY_FILLED";
     if (status === "API_PENDING" || status === "PENDING_SUBMIT") return "PENDING";
     if (status !== undefined && IBKR_WORKING_STATUSES.has(status)) return "WORKING";
     return "UNKNOWN";
@@ -2216,11 +2469,14 @@ export class IbkrClient
     if (brokerageAccounts.accounts && !brokerageAccounts.accounts.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available for trading/order queries.`);
     }
-    await this.req<IbkrSwitchAccountResponse>({
+    const switchedAccount = await this.req<IbkrSwitchAccountResponse>({
       path: "iserver/account",
       method: "POST",
       data: { acctId: accountId },
     });
+    if (switchedAccount.set !== true || switchedAccount.acctId !== accountId) {
+      throw new Error(`IBKR account switch was not confirmed for ${accountId}.`);
+    }
   }
 
   private normalizeStockListing(symbol: string, listing: IbkrStockListing): BrokerInstrument[] {
