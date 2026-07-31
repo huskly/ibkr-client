@@ -300,6 +300,37 @@ export type DerivativeComboExecutionRequest = DerivativeComboPreviewRequest & {
   clientOrderId: string;
 } & CmeOperatorMetadata;
 
+export type DerivativeOrderSide = "BUY" | "SELL";
+
+export type DerivativeSingleOrderType = "LMT" | "STP";
+
+export type DerivativeSingleOrderRequest = {
+  accountId: string;
+  contract: DerivativeContract;
+  side: DerivativeOrderSide;
+  quantity: number;
+  orderType: DerivativeSingleOrderType;
+  limit?: number;
+  stopPrice?: number;
+  tif: "DAY" | "GTC";
+  session: "REGULAR" | "OVERNIGHT";
+  clientOrderId: string;
+  parentId?: string;
+} & CmeOperatorMetadata;
+
+export type DerivativeMultiOrderResult =
+  | {
+      state: "accepted";
+      orders: {
+        orderId: string;
+        status: DerivativeOrderStatus;
+        clientOrderId: string | null;
+      }[];
+      warnings: OrderWarning[];
+    }
+  | { state: "warning"; warnings: OrderWarning[] }
+  | { state: "rejected"; reasons: string[]; errors: BrokerErrorDetail[] };
+
 export type DerivativeOrderCancelRequest = {
   accountId: string;
   orderId: string;
@@ -440,6 +471,14 @@ export interface DerivativeExecutionClient {
   submitDerivativeCombo(
     request: DerivativeComboExecutionRequest
   ): Promise<DerivativeOrderSubmissionResult>;
+  submitDerivativeSingleOrder(
+    request: DerivativeSingleOrderRequest
+  ): Promise<DerivativeOrderSubmissionResult>;
+  submitDerivativeContingentOrders(request: {
+    accountId: string;
+    parent: DerivativeSingleOrderRequest;
+    child: DerivativeSingleOrderRequest;
+  }): Promise<DerivativeMultiOrderResult>;
   acknowledgeOrderWarning(input: {
     replyId: string;
     confirmed: true;

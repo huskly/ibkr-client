@@ -166,11 +166,20 @@ Permission metadata is diagnostic only; the What-If response remains authoritati
 already enforced their own reviewed-preview workflow. It does not persist previews or decide
 whether live execution is allowed.
 
+- `submitDerivativeSingleOrder(...)` places one single-leg LIMIT or STOP option order with exact
+  contract, side, quantity, TIF, session, and a required unique client order ID. LIMIT orders
+  require a positive `limit` price; STOP orders require a positive `stopPrice`. Equity-option
+  (`OPT`) orders omit CME-only fields; futures-option (`FOP`) orders require the caller's exact
+  `extOperator` and `manualIndicator`.
 - `submitDerivativeCombo(...)` places one atomic combo with the exact legs, signed ratios,
   quantity, price effect, limit, TIF, and session supplied by the caller. The request requires a
   unique client order ID. Futures-option (`FOP`) writes also require the caller's exact CME
   `extOperator` and manual/automated-origin `manualIndicator`; equity-option (`OPT`) writes omit
   both CME-only fields.
+- `submitDerivativeContingentOrders(...)` places a parent LIMIT and child STOP order in a single
+  atomic request, linked by the child's `parentId` field matching the parent's client order ID.
+  Both orders target the same account, carry distinct client order IDs, and reference distinct
+  contracts. LIMIT and STOP validation follows the same rules as `submitDerivativeSingleOrder`.
 - `acknowledgeOrderWarning(...)` replies once to an exact broker warning ID. Only documented
   warning message IDs are marked `known`; consumers must stop on unknown warnings.
 - `getDerivativeOrderStatus(...)` uses IBKR's exact order-ID status endpoint so fast terminal

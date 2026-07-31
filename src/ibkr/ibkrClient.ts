@@ -30,12 +30,14 @@ import type {
   DerivativeExecutionQuery,
   DerivativeExecutionSide,
   DerivativeLegExecutionSummary,
+  DerivativeMultiOrderResult,
   DerivativeOrderCancellationResult,
   DerivativeOrderCancelRequest,
   DerivativeOrderLifecycle,
   DerivativeOrderLookup,
   DerivativeOrderStatus,
   DerivativeOrderSubmissionResult,
+  DerivativeSingleOrderRequest,
   DerivativePreviewClient,
   DerivativeExpiry,
   DerivativeExpiryQuery,
@@ -410,6 +412,86 @@ export class IbkrClient
       },
     });
     return this.normalizeOrderSubmission(response, request.clientOrderId);
+  }
+
+  async submitDerivativeSingleOrder(
+    request: DerivativeSingleOrderRequest
+  ): Promise<DerivativeOrderSubmissionResult> {
+    this.validateSingleOrder(request);
+    const cmeOperatorMetadata = this.cmeOperatorMetadata(request.contract.assetClass, request);
+    const diagnostics = await this.getTradingDiagnostics(request.accountId);
+    if (!diagnostics.authenticated || diagnostics.competingSession) {
+      throw new Error("IBKR brokerage session is not safely authenticated for submission");
+    }
+    await this.prepareBrokerageAccount(request.accountId);
+    const response = await this.singleAttemptRequest<
+      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+    >({
+      path: `iserver/account/${request.accountId}/orders`,
+      method: "POST",
+      data: {
+        orders: [
+          {
+            ...this.singleOrderTicket(request),
+            cOID: request.clientOrderId,
+            ...cmeOperatorMetadata,
+          },
+        ],
+      },
+    });
+    return this.normalizeOrderSubmission(response, request.clientOrderId);
+  }
+
+  async submitDerivativeContingentOrders(request: {
+    accountId: string;
+    parent: DerivativeSingleOrderRequest;
+    child: DerivativeSingleOrderRequest;
+  }): Promise<DerivativeMultiOrderResult> {
+    const { accountId, parent, child } = request;
+    if (!accountId.trim()) throw new Error("An explicit IBKR account ID is required");
+    if (parent.accountId !== accountId || child.accountId !== accountId) {
+      throw new Error("Contingent parent and child orders must target the exact same account");
+    }
+    this.validateSingleOrder(parent);
+    this.validateSingleOrder(child);
+    if (parent.clientOrderId === child.clientOrderId) {
+      throw new Error("Contingent parent and child orders require distinct client order IDs");
+    }
+    if (child.parentId !== undefined && child.parentId !== parent.clientOrderId) {
+      throw new Error("Contingent child parentId must match the parent client order ID");
+    }
+    if (parent.contract.conid === child.contract.conid) {
+      throw new Error("Contingent parent and child orders must reference distinct contracts");
+    }
+    const parentMetadata = this.cmeOperatorMetadata(parent.contract.assetClass, parent);
+    const childMetadata = this.cmeOperatorMetadata(child.contract.assetClass, child);
+    const diagnostics = await this.getTradingDiagnostics(accountId);
+    if (!diagnostics.authenticated || diagnostics.competingSession) {
+      throw new Error("IBKR brokerage session is not safely authenticated for submission");
+    }
+    await this.prepareBrokerageAccount(accountId);
+    const response = await this.singleAttemptRequest<
+      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+    >({
+      path: `iserver/account/${accountId}/orders`,
+      method: "POST",
+      data: {
+        orders: [
+          {
+            ...this.singleOrderTicket(parent),
+            cOID: parent.clientOrderId,
+            ...parentMetadata,
+          },
+          {
+            ...this.singleOrderTicket(child),
+            cOID: child.clientOrderId,
+            parentId: parent.clientOrderId,
+            ...childMetadata,
+          },
+        ],
+      },
+    });
+    return this.normalizeMultiOrderSubmission(response);
   }
 
   async acknowledgeOrderWarning(input: {
@@ -815,6 +897,31 @@ export class IbkrClient
     }
   }
 
+  private validateSingleOrder(request: DerivativeSingleOrderRequest): void {
+    if (!request.accountId.trim()) throw new Error("An explicit IBKR account ID is required");
+    if (!Number.isSafeInteger(request.quantity) || request.quantity <= 0) {
+      throw new Error("Order quantity must be a positive integer");
+    }
+    if (!request.clientOrderId.trim() || request.clientOrderId.length > 64) {
+      throw new Error("Client order ID must contain 1 to 64 characters");
+    }
+    if (!Number.isSafeInteger(request.contract.conid) || request.contract.conid <= 0) {
+      throw new Error("Order contract has an invalid IBKR conid");
+    }
+    if (request.orderType === "LMT") {
+      const limit: number | undefined = request.limit;
+      if (limit === undefined || !Number.isFinite(limit) || limit <= 0) {
+        throw new Error("LIMIT order requires a positive limit price");
+      }
+    }
+    if (request.orderType === "STP") {
+      const stopPrice: number | undefined = request.stopPrice;
+      if (stopPrice === undefined || !Number.isFinite(stopPrice) || stopPrice <= 0) {
+        throw new Error("STOP order requires a positive stop price");
+      }
+    }
+  }
+
   private cmeOperatorMetadata(
     assetClass: DerivativeAssetClass,
     input: { extOperator?: string; manualIndicator?: boolean }
@@ -849,6 +956,32 @@ export class IbkrClient
       orderType: "LMT",
       price: request.priceEffect === "CREDIT" ? -request.limit : request.limit,
       side: "BUY",
+      tif: request.tif,
+      quantity: request.quantity,
+      outsideRTH: request.session === "OVERNIGHT",
+    };
+  }
+
+  private singleOrderTicket(request: DerivativeSingleOrderRequest): {
+    acctId: string;
+    conid: number;
+    orderType: "LMT" | "STP";
+    side: "BUY" | "SELL";
+    price?: number;
+    stopPrice?: number;
+    tif: "DAY" | "GTC";
+    quantity: number;
+    outsideRTH: boolean;
+  } {
+    const price = request.limit;
+    const stopPrice = request.stopPrice;
+    return {
+      acctId: request.accountId,
+      conid: request.contract.conid,
+      orderType: request.orderType,
+      side: request.side,
+      ...(price !== undefined ? { price } : {}),
+      ...(stopPrice !== undefined ? { stopPrice } : {}),
       tif: request.tif,
       quantity: request.quantity,
       outsideRTH: request.session === "OVERNIGHT",
@@ -905,6 +1038,66 @@ export class IbkrClient
           warnings: [],
         };
       }
+    }
+    const unknown = "IBKR returned an unknown order response";
+    return {
+      state: "rejected",
+      reasons: [unknown],
+      errors: [{ message: unknown, code: null, statusCode: null, details: {} }],
+    };
+  }
+
+  private normalizeMultiOrderSubmission(
+    response: IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+  ): DerivativeMultiOrderResult {
+    const items = Array.isArray(response) ? response : [response];
+    const warnings = items.flatMap((item) => {
+      if (!("id" in item) || typeof item.id !== "string") return [];
+      const messageIds = Array.isArray(item.messageIds)
+        ? item.messageIds.filter((value): value is string => typeof value === "string")
+        : [];
+      return [
+        {
+          replyId: item.id,
+          messages: Array.isArray(item.message)
+            ? item.message.filter((value): value is string => typeof value === "string")
+            : [],
+          messageIds,
+          known: messageIds.length > 0 && messageIds.every((id) => KNOWN_ORDER_WARNING_IDS.has(id)),
+        },
+      ];
+    });
+    if (warnings.length > 0) return { state: "warning", warnings };
+    const errors = items.flatMap((item) => {
+      if (!("error" in item) || item.error === undefined || item.error === null) return [];
+      return [this.normalizeBrokerError(item.error, item)];
+    });
+    if (errors.length > 0) {
+      return { state: "rejected", reasons: errors.map(({ message }) => message), errors };
+    }
+    const acceptedOrders = items
+      .map((item) => {
+        if (!("order_id" in item) && !("orderId" in item)) return undefined;
+        const orderId =
+          ("order_id" in item ? item.order_id : undefined) ??
+          ("orderId" in item ? item.orderId : undefined);
+        if (typeof orderId !== "string" && typeof orderId !== "number") return undefined;
+        const orderStatus =
+          ("order_status" in item ? item.order_status : undefined) ??
+          ("orderStatus" in item ? item.orderStatus : undefined);
+        return {
+          orderId: String(orderId),
+          status: this.normalizeDerivativeOrderStatus(
+            typeof orderStatus === "string" ? orderStatus : undefined,
+            0,
+            0
+          ),
+          clientOrderId: null,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+    if (acceptedOrders.length > 0) {
+      return { state: "accepted", orders: acceptedOrders, warnings: [] };
     }
     const unknown = "IBKR returned an unknown order response";
     return {
