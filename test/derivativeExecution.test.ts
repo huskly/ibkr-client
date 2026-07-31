@@ -499,6 +499,49 @@ void test("placement transport errors retain their structured details and are ne
   assert.equal(client.calls.filter(({ path }) => path === "iserver/account/U123/orders").length, 1);
 });
 
+void test("combo recovery does not assign one client ID to multiple acknowledgements", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: "888", order_status: "PreSubmitted" },
+      ];
+    }
+    return sessionResponse(input);
+  });
+
+  const result = await client.submitDerivativeCombo(executionRequest());
+  assert.equal(result.state, "recovery_required");
+  if (result.state === "recovery_required") {
+    assert.deepEqual(
+      result.orders.map(({ clientOrderId }) => clientOrderId),
+      [null, null]
+    );
+  }
+});
+
+void test("combo submission requires exactly one warning continuation", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { id: "reply-parent", message: ["Parent warning"], messageIds: ["o163"] },
+        { id: "reply-child", message: ["Child warning"], messageIds: ["o163"] },
+      ];
+    }
+    return sessionResponse(input);
+  });
+
+  const result = await client.submitDerivativeCombo(executionRequest());
+  assert.equal(result.state, "recovery_required");
+  if (result.state === "recovery_required") {
+    assert.deepEqual(
+      result.warnings.map(({ replyId }) => replyId),
+      ["reply-parent", "reply-child"]
+    );
+    assert.match(result.reasons[0] ?? "", /multiple warning continuations/);
+  }
+});
+
 void test("equity-option cancellation omits CME operator metadata", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/accounts") {
