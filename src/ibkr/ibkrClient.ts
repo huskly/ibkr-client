@@ -740,10 +740,10 @@ export class IbkrClient
       path: "iserver/account/orders",
       params: { force: true, accountId },
     });
-    if (response.snapshot === false) {
+    if (response.snapshot !== true || !Array.isArray(response.orders)) {
       throw new Error("IBKR active-order snapshot is incomplete");
     }
-    const flattened = this.flattenActiveOrders(response.orders ?? []);
+    const flattened = this.flattenActiveOrders(response.orders);
     const mismatch = flattened.find(({ order }) => {
       const returnedAccount = order.account ?? order.acct;
       return returnedAccount !== undefined && returnedAccount !== accountId;

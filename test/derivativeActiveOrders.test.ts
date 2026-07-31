@@ -41,6 +41,7 @@ class FakeIbkrClient extends IbkrClient {
 
 void test("lists a typed active single option and preserves lifecycle evidence", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -103,6 +104,7 @@ void test("lists a typed active single option and preserves lifecycle evidence",
 
 void test("treats a null conidex as absent for a single-leg order", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -135,6 +137,7 @@ void test("treats a null conidex as absent for a single-leg order", async () => 
 
 void test("falls back to conid for a scalar single-leg conidex", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -167,6 +170,7 @@ void test("falls back to conid for a scalar single-leg conidex", async () => {
 
 void test("preserves every signed USD combo leg", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -202,6 +206,7 @@ void test("preserves every signed USD combo leg", async () => {
 
 void test("normalizes exchange-qualified sell combo legs to their effective sides", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -230,6 +235,7 @@ void test("normalizes exchange-qualified sell combo legs to their effective side
 
 void test("preserves a terminal canceled status after a partial fill", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -250,6 +256,7 @@ void test("preserves a terminal canceled status after a partial fill", async () 
 
 void test("keeps combo directions unknown when the outer side is absent", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -294,6 +301,7 @@ void test("keeps combo directions unknown when the outer side is absent", async 
 
 void test("does not associate combo option identities by description position", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -323,6 +331,7 @@ void test("does not associate combo option identities by description position", 
 
 void test("treats an echoed parentId as the caller-supplied parent identity", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -346,6 +355,7 @@ void test("treats an echoed parentId as the caller-supplied parent identity", as
 
 void test("retains nested contingent ownership and reports graph uncertainty", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -381,6 +391,7 @@ void test("retains nested contingent ownership and reports graph uncertainty", a
 
 void test("malformed, aggregate-only, missing-parent, and duplicate members stay visible", async () => {
   const client = new FakeIbkrClient({
+    snapshot: true,
     orders: [
       {
         account: "U123",
@@ -424,7 +435,10 @@ void test("malformed, aggregate-only, missing-parent, and duplicate members stay
 });
 
 void test("fails closed when the scoped response contains another account", async () => {
-  const client = new FakeIbkrClient({ orders: [{ account: "OTHER", orderId: 50 }] });
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [{ account: "OTHER", orderId: 50 }],
+  });
   await assert.rejects(
     client.listActiveDerivativeOrders("U123"),
     /contained an order for another account/
@@ -436,5 +450,20 @@ void test("fails closed when the active-order snapshot is incomplete", async () 
     snapshot: false,
     orders: [{ account: "U123", orderId: 51 }],
   });
+  await assert.rejects(client.listActiveDerivativeOrders("U123"), /snapshot is incomplete/);
+});
+
+void test("fails closed when the active-order snapshot marker is absent", async () => {
+  const client = new FakeIbkrClient({ orders: [] });
+  await assert.rejects(client.listActiveDerivativeOrders("U123"), /snapshot is incomplete/);
+});
+
+void test("fails closed when a completed snapshot omits its orders array", async () => {
+  const client = new FakeIbkrClient({ snapshot: true });
+  await assert.rejects(client.listActiveDerivativeOrders("U123"), /snapshot is incomplete/);
+});
+
+void test("fails closed when a completed snapshot has malformed orders", async () => {
+  const client = new FakeIbkrClient({ snapshot: true, orders: {} });
   await assert.rejects(client.listActiveDerivativeOrders("U123"), /snapshot is incomplete/);
 });
