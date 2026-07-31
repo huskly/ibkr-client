@@ -1075,7 +1075,7 @@ export class IbkrClient
     const hasErrors = decoded.errors.length > 0;
     const hasUnknown = decoded.unrecognizedResponses.length > 0;
 
-    if (hasWarnings && !hasErrors && orders.length === 0 && !hasUnknown) {
+    if (decoded.warnings.length === 1 && !hasErrors && orders.length === 0 && !hasUnknown) {
       return { state: "warning", warnings: decoded.warnings };
     }
     if (hasErrors && !hasWarnings && orders.length === 0 && !hasUnknown) {
@@ -1186,13 +1186,14 @@ export class IbkrClient
       }
       const record = item as Readonly<Record<string, unknown>>;
       let recognized = false;
-      if (typeof record["id"] === "string") {
+      const rawWarningId = record["id"];
+      if (typeof rawWarningId === "string" && rawWarningId.trim()) {
         const rawMessageIds = record["messageIds"];
         const messageIds = Array.isArray(rawMessageIds)
           ? rawMessageIds.filter((value): value is string => typeof value === "string")
           : [];
         decoded.warnings.push({
-          replyId: record["id"],
+          replyId: rawWarningId.trim(),
           messages: Array.isArray(record["message"])
             ? record["message"].filter((value): value is string => typeof value === "string")
             : [],
@@ -1202,6 +1203,9 @@ export class IbkrClient
             rawMessageIds.length > 0 &&
             rawMessageIds.every((id) => typeof id === "string" && KNOWN_ORDER_WARNING_IDS.has(id)),
         });
+        recognized = true;
+      } else if ("id" in record) {
+        decoded.unrecognizedResponses.push({ ...record });
         recognized = true;
       }
       if (record["error"] !== undefined && record["error"] !== null) {
@@ -1288,14 +1292,14 @@ export class IbkrClient
     if (decoded.errors.length > 0 && decoded.warnings.length > 0) {
       return "IBKR returned both warnings and rejections for one submission";
     }
+    if (decoded.warnings.length > 1) {
+      return "IBKR returned multiple warning continuations for one submission";
+    }
     if (orderCount !== expectedOrderCount) {
       return `IBKR returned ${String(orderCount)} of ${String(expectedOrderCount)} expected order acknowledgements`;
     }
     if (decoded.unrecognizedResponses.length > 0) {
       return "IBKR returned one or more unrecognized order responses";
-    }
-    if (decoded.warnings.length > 1) {
-      return "IBKR returned multiple warning continuations for one submission";
     }
     return "IBKR returned mixed or incomplete order evidence";
   }

@@ -465,6 +465,26 @@ void test("malformed warning message IDs are never classified as known", async (
   }
 });
 
+void test("blank broker warning IDs require recovery", async () => {
+  for (const replyId of ["", "   "]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/account/U123/orders") {
+        return [{ id: replyId, message: ["Warning"], messageIds: ["o163"] }];
+      }
+      return sessionResponse(input);
+    });
+
+    const result = await client.submitDerivativeSingleOrder(singleOrderRequest());
+    assert.equal(result.state, "recovery_required");
+    if (result.state === "recovery_required") {
+      assert.equal(result.warnings.length, 0);
+      assert.deepEqual(result.unrecognizedResponses, [
+        { id: replyId, message: ["Warning"], messageIds: ["o163"] },
+      ]);
+    }
+  }
+});
+
 void test("placement transport errors are never retried for single orders", async () => {
   const transportError = Object.assign(new Error("broker unavailable"), { status: 503 });
   const client = new FakeIbkrClient((input) => {
