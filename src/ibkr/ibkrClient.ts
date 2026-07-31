@@ -569,14 +569,18 @@ export class IbkrClient
       path: "iserver/account/orders",
       params: { force: true, accountId: input.accountId },
     });
-    const expectedIds = new Set(
-      request.nodes.map((node) => this.graphClientOrderId(request, node))
+    const accountOrders = (response.orders ?? []).filter((order) =>
+      this.orderBelongsToAccount(order, input.accountId)
     );
-    const candidates = (response.orders ?? []).filter(
-      (order) =>
-        this.orderBelongsToAccount(order, input.accountId) &&
-        expectedIds.has(order.cOID ?? order.order_ref ?? "")
-    );
+    const byMemberId = new Map<string, IbkrLiveOrder>();
+    for (const node of request.nodes) {
+      const matches = accountOrders.filter((order) =>
+        this.liveOrderMatchesGraphNode(request, node, order)
+      );
+      const [match] = matches;
+      if (matches.length === 1 && match !== undefined) byMemberId.set(node.memberId, match);
+    }
+    const candidates = [...byMemberId.values()];
     if (
       input.orderId !== undefined &&
       !candidates.some((order) => String(order.order_id ?? order.orderId) === input.orderId)
@@ -589,22 +593,16 @@ export class IbkrClient
     ) {
       throw new Error("Root client order ID does not match the requested graph");
     }
-    const byClientId = new Map(
-      candidates.map((order) => [order.cOID ?? order.order_ref ?? "", order])
-    );
     const members = request.nodes.map((node) => {
-      const order = byClientId.get(this.graphClientOrderId(request, node));
+      const order = byMemberId.get(node.memberId);
       return this.graphMemberEvidence(request, node, order);
     });
     const ids = members.flatMap(({ orderId }) => (orderId === null ? [] : [orderId]));
     const brokerParentsMatch = request.nodes.every((node) => {
       if (node.parentMemberId === undefined) return true;
-      const order = byClientId.get(this.graphClientOrderId(request, node));
-      const parent = request.nodes.find(({ memberId }) => memberId === node.parentMemberId);
       return (
-        order !== undefined &&
-        parent !== undefined &&
-        String(order.parentId ?? "") === this.graphClientOrderId(request, parent)
+        byMemberId.get(node.memberId) !== undefined &&
+        String(byMemberId.get(node.memberId)?.parentId ?? "") === request.rootClientOrderId
       );
     });
     if (
@@ -1083,6 +1081,8 @@ export class IbkrClient
       if (node.parentMemberId === undefined) roots += 1;
       else if (!seen.has(node.parentMemberId))
         throw new Error("Graph parents must precede their children");
+      else if (node.parentMemberId !== request.nodes[0]?.memberId)
+        throw new Error("Derivative order graphs support only root-to-child attachments");
       if ("legs" in node) {
         this.validateComboPreview(node);
       } else {
@@ -1156,6 +1156,28 @@ export class IbkrClient
       ...identity,
       ...this.cmeOperatorMetadata(node.contract.assetClass, node),
     };
+  }
+
+  private liveOrderMatchesGraphNode(
+    request: DerivativeOrderGraphRequest,
+    node: DerivativeOrderGraphNode,
+    order: IbkrLiveOrder
+  ): boolean {
+    if (node.parentMemberId === undefined) {
+      return (order.cOID ?? order.order_ref) === request.rootClientOrderId;
+    }
+    if (String(order.parentId ?? "") !== request.rootClientOrderId) return false;
+    if ("legs" in node) {
+      const liveLegs = this.parseComboLegs(order.conidex);
+      return (
+        liveLegs.length === node.legs.length &&
+        node.legs.every((leg, index) => {
+          const liveLeg = liveLegs[index];
+          return liveLeg?.conid === leg.contract.conid && liveLeg.ratio === leg.ratio;
+        })
+      );
+    }
+    return order.conid === node.contract.conid;
   }
 
   private validateSingleOrder(request: DerivativeSingleOrderRequest): void {
@@ -1350,6 +1372,18 @@ export class IbkrClient
     const rawId = order?.order_id ?? order?.orderId;
     const orderId =
       typeof rawId === "string" || typeof rawId === "number" ? String(rawId).trim() || null : null;
+    const filledQuantity = this.firstNumber(
+      order?.cum_fill,
+      order?.cumFill,
+      order?.filledQuantity,
+      order?.filled
+    );
+    const quantity = this.firstPositiveNumber(order?.total_size, order?.totalSize, order?.size);
+    const remainingQuantity =
+      this.firstNumber(order?.remainingQuantity, order?.remaining_size, order?.remaining) ??
+      (quantity !== undefined && filledQuantity !== undefined
+        ? Math.max(0, quantity - filledQuantity)
+        : undefined);
     return {
       memberId: node.memberId,
       role:
@@ -1370,8 +1404,8 @@ export class IbkrClient
           ? "WARNING_PENDING"
           : this.normalizeDerivativeOrderStatus(
               order.order_status ?? order.orderStatus ?? order.status,
-              0,
-              0
+              filledQuantity ?? 0,
+              remainingQuantity ?? 0
             ),
       clientOrderId: this.graphClientOrderId(request, node),
       request: node,

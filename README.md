@@ -304,8 +304,9 @@ to guard against committed secrets.
 `submitDerivativeOrderGraph(...)` is the bounded (one through eight member) bracket API for
 broker-hosted derivative protection. A graph may combine atomic two-leg LIMIT combos with
 single-option LIMIT, STOP, and MARKET members. Every node has a caller-stable `memberId`; exactly
-one root carries `rootClientOrderId`, and each later node names an already-declared
-`parentMemberId`. This makes root → child → grandchild activation explicit. Accepted and
+one root carries `rootClientOrderId`, and each later node names that root with
+`parentMemberId`. Graphs are deliberately limited to one attachment level because IBKR child
+tickets omit `cOID` and therefore cannot provide a stable identity for attaching grandchildren. Accepted and
 fail-closed results retain each node's immutable request evidence (contracts/conids, signed ratios,
 side, quantity, TIF, session, and prices), stable depth role, parent member/broker IDs, and every
 broker order ID. Conids remain correlation evidence only; callers still own durable semantic option
@@ -319,6 +320,9 @@ duplicated, terminal, malformed, or ambiguous acknowledgements return `recovery_
 IDs from ambiguous acknowledgements are retained as uncorrelated responses rather than assigned to
 nodes by position.
 `recoverDerivativeOrderGraph(...)` reconstructs the exact graph from its root client ID or any known
-member broker ID and fails closed unless every expected member correlates uniquely and each child
-reports its expected broker parent link. This typed API
+member broker ID. It correlates the root by the transmitted client ID and children by their
+transmitted parent ID plus contract identity; synthesized child client IDs are not expected from the
+broker. Recovery preserves live fill quantities when normalizing member status and fails closed
+unless every expected member correlates uniquely and each child reports its expected broker parent
+link. This typed API
 is the safety boundary: consumers should not bypass it with the private raw request client.

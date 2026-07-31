@@ -74,7 +74,7 @@ const graph = (): DerivativeOrderGraphRequest => ({
     },
     {
       memberId: "hedge",
-      parentMemberId: "stop",
+      parentMemberId: "entry",
       accountId: "U1",
       contract: contract(2),
       side: "SELL",
@@ -109,7 +109,7 @@ test("submits combo, STOP, and MARKET graph with exact activation links", async 
     [
       ["root", "10", null],
       ["child", "11", "10"],
-      ["grandchild", "12", "11"],
+      ["child", "12", "10"],
     ]
   );
   assert.equal(result.rootClientOrderId, "pcs-42");
@@ -118,7 +118,7 @@ test("submits combo, STOP, and MARKET graph with exact activation links", async 
   assert.equal(data.orders[0]?.["cOID"], "pcs-42");
   assert.equal(data.orders[1]?.["parentId"], "pcs-42");
   assert.equal("cOID" in data.orders[1]!, false);
-  assert.equal(data.orders[2]?.["parentId"], "pcs-42:stop");
+  assert.equal(data.orders[2]?.["parentId"], "pcs-42");
   assert.equal("cOID" in data.orders[2]!, false);
   assert.equal(data.orders[2]?.["orderType"], "MKT");
   assert.equal("price" in data.orders[2]!, false);
@@ -202,6 +202,19 @@ test("invalid graph fails before broker access and transport placement is attemp
   );
 });
 
+test("rejects descendants that IBKR cannot attach to an unidentified child", async () => {
+  const invalid = graph();
+  invalid.nodes[2]!.parentMemberId = "stop";
+  const client = new Fake(() => {
+    throw new Error("broker access must not occur");
+  });
+  await assert.rejects(
+    () => client.submitDerivativeOrderGraph(invalid),
+    /only root-to-child attachments/
+  );
+  assert.equal(client.calls.length, 0);
+});
+
 test("recovers exact graph from root or a known broker identity", async () => {
   const orders = {
     orders: [
@@ -210,15 +223,15 @@ test("recovers exact graph from root or a known broker identity", async () => {
         account: "U1",
         order_id: "11",
         order_status: "Submitted",
-        cOID: "pcs-42:stop",
+        conid: 1,
         parentId: "pcs-42",
       },
       {
         account: "U1",
         order_id: "12",
         order_status: "Submitted",
-        cOID: "pcs-42:hedge",
-        parentId: "pcs-42:stop",
+        conid: 2,
+        parentId: "pcs-42",
       },
     ],
   };
@@ -240,6 +253,40 @@ test("recovers exact graph from root or a known broker identity", async () => {
   );
 });
 
+test("recovery preserves partial fills reported by live orders", async () => {
+  const client = new Fake((input) =>
+    input.path === "iserver/account/orders"
+      ? {
+          orders: [
+            { account: "U1", order_id: "10", order_status: "Submitted", cOID: "pcs-42" },
+            {
+              account: "U1",
+              order_id: "11",
+              order_status: "Submitted",
+              conid: 1,
+              parentId: "pcs-42",
+              cum_fill: 1,
+              remaining: 2,
+            },
+            {
+              account: "U1",
+              order_id: "12",
+              order_status: "Submitted",
+              conid: 2,
+              parentId: "pcs-42",
+            },
+          ],
+        }
+      : session(input)
+  );
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graph()
+  );
+  assert.equal(result.state, "accepted");
+  assert.equal(result.members[1]?.status, "PARTIALLY_FILLED");
+});
+
 test("recovery fails closed when broker parent links are absent or incorrect", async () => {
   for (const childParentId of [undefined, "different-parent"]) {
     const client = new Fake((input) =>
@@ -251,15 +298,15 @@ test("recovery fails closed when broker parent links are absent or incorrect", a
                 account: "U1",
                 order_id: "11",
                 order_status: "Submitted",
-                cOID: "pcs-42:stop",
+                conid: 1,
                 ...(childParentId === undefined ? {} : { parentId: childParentId }),
               },
               {
                 account: "U1",
                 order_id: "12",
                 order_status: "Submitted",
-                cOID: "pcs-42:hedge",
-                parentId: "pcs-42:stop",
+                conid: 2,
+                parentId: "pcs-42",
               },
             ],
           }
