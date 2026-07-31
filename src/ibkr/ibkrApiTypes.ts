@@ -131,6 +131,9 @@ export interface IbkrLiveOrder {
   side?: string;
   orderType?: string;
   order_type?: string;
+  tif?: string;
+  outsideRTH?: boolean;
+  outside_rth?: boolean;
   orderStatus?: string;
   order_status?: string;
   status?: string;

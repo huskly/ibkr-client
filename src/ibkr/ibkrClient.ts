@@ -581,6 +581,12 @@ export class IbkrClient
       if (matches.length === 1 && match !== undefined) byMemberId.set(node.memberId, match);
     }
     const candidates = [...byMemberId.values()];
+    const linkedOrders = accountOrders.filter(
+      (order) =>
+        (order.cOID ?? order.order_ref) === request.rootClientOrderId ||
+        String(order.parentId ?? "") === request.rootClientOrderId
+    );
+    const candidateSet = new Set(candidates);
     if (
       input.orderId !== undefined &&
       !candidates.some((order) => String(order.order_id ?? order.orderId) === input.orderId)
@@ -607,6 +613,8 @@ export class IbkrClient
     });
     if (
       candidates.length !== request.nodes.length ||
+      linkedOrders.length !== request.nodes.length ||
+      linkedOrders.some((order) => !candidateSet.has(order)) ||
       new Set(ids).size !== request.nodes.length ||
       !brokerParentsMatch
     ) {
@@ -1169,12 +1177,24 @@ export class IbkrClient
     if (String(order.parentId ?? "") !== request.rootClientOrderId) return false;
     if ("legs" in node) {
       const liveLegs = this.parseComboLegs(order.conidex);
+      const orderType = this.normalizeOrderType(order.order_type ?? order.orderType);
+      const side = this.normalizeOrderSide(order.side);
+      const quantity = this.firstPositiveNumber(order.total_size, order.totalSize, order.size);
+      const price = this.firstNumber(order.limitPrice, order.limit_price, order.price);
+      const expectedPrice = node.priceEffect === "CREDIT" ? -node.limit : node.limit;
+      const outsideRth = order.outsideRTH ?? order.outside_rth;
       return (
         liveLegs.length === node.legs.length &&
         node.legs.every((leg, index) => {
           const liveLeg = liveLegs[index];
           return liveLeg?.conid === leg.contract.conid && liveLeg.ratio === leg.ratio;
-        })
+        }) &&
+        orderType === this.normalizeOrderType("LMT") &&
+        side === "BUY" &&
+        quantity === node.quantity &&
+        price === expectedPrice &&
+        (order.tif === undefined || order.tif.toUpperCase() === node.tif) &&
+        (outsideRth === undefined || outsideRth === (node.session === "OVERNIGHT"))
       );
     }
     const orderType = this.normalizeOrderType(order.order_type ?? order.orderType);

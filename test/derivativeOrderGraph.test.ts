@@ -406,3 +406,126 @@ test("recovery distinguishes same-contract bracket siblings by their complete ti
     ]
   );
 });
+
+test("recovery distinguishes combo siblings by quantity and signed limit price", async () => {
+  const request = graph();
+  const root = request.nodes[0]!;
+  if (!("legs" in root)) throw new Error("Expected a combo root fixture");
+  request.nodes = [
+    root,
+    {
+      ...root,
+      memberId: "replacement",
+      parentMemberId: "entry",
+      quantity: 2,
+      limit: 0.8,
+    },
+    {
+      ...root,
+      memberId: "roll",
+      parentMemberId: "entry",
+      quantity: 3,
+      limit: 0.7,
+    },
+  ];
+  const client = new Fake((input) =>
+    input.path === "iserver/account/orders"
+      ? {
+          orders: [
+            {
+              account: "U1",
+              order_id: "10",
+              order_status: "Submitted",
+              cOID: "pcs-42",
+              conidex: "28812380;;;1/-1,2/1",
+            },
+            {
+              account: "U1",
+              order_id: "11",
+              order_status: "Submitted",
+              conidex: "28812380;;;1/-1,2/1",
+              orderType: "LMT",
+              side: "BUY",
+              totalSize: 2,
+              limitPrice: -0.8,
+              parentId: "pcs-42",
+            },
+            {
+              account: "U1",
+              order_id: "12",
+              order_status: "Submitted",
+              conidex: "28812380;;;1/-1,2/1",
+              orderType: "LMT",
+              side: "BUY",
+              totalSize: 3,
+              limitPrice: -0.7,
+              parentId: "pcs-42",
+            },
+          ],
+        }
+      : session(input)
+  );
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    request
+  );
+  assert.equal(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId }) => [memberId, orderId]),
+    [
+      ["entry", "10"],
+      ["replacement", "11"],
+      ["roll", "12"],
+    ]
+  );
+});
+
+test("recovery fails closed for an unexpected order attached to the root", async () => {
+  const client = new Fake((input) =>
+    input.path === "iserver/account/orders"
+      ? {
+          orders: [
+            { account: "U1", order_id: "10", order_status: "Submitted", cOID: "pcs-42" },
+            {
+              account: "U1",
+              order_id: "11",
+              order_status: "Submitted",
+              conid: 1,
+              orderType: "STP",
+              side: "BUY",
+              totalSize: 1,
+              stopPrice: 2.4,
+              parentId: "pcs-42",
+            },
+            {
+              account: "U1",
+              order_id: "12",
+              order_status: "Submitted",
+              conid: 2,
+              orderType: "MKT",
+              side: "SELL",
+              totalSize: 1,
+              parentId: "pcs-42",
+            },
+            {
+              account: "U1",
+              order_id: "13",
+              order_status: "Submitted",
+              conid: 3,
+              orderType: "MKT",
+              side: "SELL",
+              totalSize: 1,
+              parentId: "pcs-42",
+            },
+          ],
+        }
+      : session(input)
+  );
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graph()
+  );
+  assert.equal(result.state, "recovery_required");
+});

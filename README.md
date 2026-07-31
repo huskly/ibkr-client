@@ -321,9 +321,10 @@ IDs from ambiguous acknowledgements are retained as uncorrelated responses rathe
 nodes by position.
 `recoverDerivativeOrderGraph(...)` reconstructs the exact graph from its root client ID or any known
 member broker ID. It correlates the root by the transmitted client ID and children by their
-transmitted parent ID plus contract, order type, side, quantity, and applicable limit or stop price;
+transmitted parent ID plus contract or complete combo legs, order type, side, quantity, and
+applicable signed limit or stop price;
 synthesized child client IDs are not expected from the broker. Recovery preserves live fill
 quantities when normalizing member status and fails closed
-unless every expected member correlates uniquely and each child reports its expected broker parent
-link. This typed API
+unless every expected member correlates uniquely, each child reports its expected broker parent
+link, and no unexpected live order is attached to the root. This typed API
 is the safety boundary: consumers should not bypass it with the private raw request client.
