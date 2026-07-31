@@ -183,6 +183,7 @@ const IBKR_WORKING_STATUSES = new Set([
 const KNOWN_ORDER_WARNING_IDS = new Set(["o163"]);
 
 interface DecodedOrderSubmission {
+  responseIsArray: boolean;
   orders: DerivativeSubmittedOrder[];
   pendingCancelOrderIds: string[];
   warnings: OrderWarning[];
@@ -1080,7 +1081,13 @@ export class IbkrClient
     if (decoded.warnings.length === 1 && !hasErrors && orders.length === 0 && !hasUnknown) {
       return { state: "warning", warnings: decoded.warnings };
     }
-    if (hasErrors && !hasWarnings && orders.length === 0 && !hasUnknown) {
+    if (
+      hasErrors &&
+      !decoded.responseIsArray &&
+      !hasWarnings &&
+      orders.length === 0 &&
+      !hasUnknown
+    ) {
       return {
         state: "rejected",
         reasons: decoded.errors.map(({ message }) => message),
@@ -1143,7 +1150,13 @@ export class IbkrClient
         continuation: { replyId: warning.replyId, parentClientOrderId },
       };
     }
-    if (hasErrors && !hasWarnings && orders.length === 0 && !hasUnknown) {
+    if (
+      hasErrors &&
+      !decoded.responseIsArray &&
+      !hasWarnings &&
+      orders.length === 0 &&
+      !hasUnknown
+    ) {
       return {
         state: "rejected",
         parentClientOrderId,
@@ -1177,6 +1190,7 @@ export class IbkrClient
   private decodeOrderSubmission(response: unknown): DecodedOrderSubmission {
     const items = Array.isArray(response) ? response : [response];
     const decoded: DecodedOrderSubmission = {
+      responseIsArray: Array.isArray(response),
       orders: [],
       pendingCancelOrderIds: [],
       warnings: [],
@@ -1213,7 +1227,11 @@ export class IbkrClient
         recognized = true;
       }
       if (record["error"] !== undefined && record["error"] !== null) {
-        decoded.errors.push(this.normalizeBrokerError(record["error"], record));
+        if (this.isMeaningfulBrokerError(record["error"], record)) {
+          decoded.errors.push(this.normalizeBrokerError(record["error"], record));
+        } else {
+          decoded.unrecognizedResponses.push({ ...record });
+        }
         recognized = true;
       }
       const hasOrderId = "order_id" in record || "orderId" in record;
@@ -1342,6 +1360,28 @@ export class IbkrClient
         typeof statusValue === "number" && Number.isFinite(statusValue) ? statusValue : null,
       details: response,
     };
+  }
+
+  private isMeaningfulBrokerError(
+    error: unknown,
+    response: Readonly<Record<string, unknown>>
+  ): boolean {
+    const nested = typeof error === "object" && error !== null ? error : undefined;
+    const nestedRecord = nested as Readonly<Record<string, unknown>> | undefined;
+    const messages = [error, nestedRecord?.["message"], response["message"]];
+    if (messages.some((value) => typeof value === "string" && value.trim())) return true;
+
+    const code = nestedRecord?.["code"] ?? response["code"];
+    if (
+      (typeof code === "string" && code.trim()) ||
+      (typeof code === "number" && Number.isFinite(code))
+    ) {
+      return true;
+    }
+
+    const status =
+      nestedRecord?.["statusCode"] ?? nestedRecord?.["status"] ?? response["statusCode"];
+    return typeof status === "number" && Number.isFinite(status) && status >= 400;
   }
 
   private normalizeDerivativeOrderLifecycle(

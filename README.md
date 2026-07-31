@@ -168,6 +168,10 @@ Permission metadata is diagnostic only; the What-If response remains authoritati
 already enforced their own reviewed-preview workflow. It does not persist previews or decide
 whether live execution is allowed.
 
+Submission rejection is authoritative only when IBKR returns its documented top-level error object
+with a meaningful message, code, or failure status. Array-contained or non-diagnostic error fields
+return `recovery_required`, because they do not prove that every submitted ticket failed.
+
 - `submitDerivativeSingleOrder(...)` places one single-leg LIMIT or STOP option order with exact
   contract, side, quantity, TIF, and session. Standalone orders require a unique client order ID;
   sequentially attached child orders instead require the parent's exact ID and omit their own

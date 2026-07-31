@@ -560,6 +560,52 @@ void test("contingent order warning and rejection outcomes", async () => {
   }
 });
 
+void test("array-contained contingent rejection evidence requires recovery", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [{ error: "Child rejected", statusCode: 400 }];
+    }
+    return sessionResponse(input);
+  });
+  const parent = singleOrderRequest({ clientOrderId: "parent-partial-rejection" });
+  const child = singleOrderRequest({
+    contract: contract(99999, 100, "OPT"),
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "parent-partial-rejection",
+  });
+  delete (child as Record<string, unknown>)["limit"];
+  delete (child as Record<string, unknown>)["clientOrderId"];
+
+  const result = await client.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent: contingentParent(parent),
+    child: contingentChild(child),
+  });
+
+  assert.equal(result.state, "recovery_required");
+  if (result.state === "recovery_required") {
+    assert.equal(result.errors[0]?.message, "Child rejected");
+    assert.match(result.reasons[0] ?? "", /0 of 2 expected order acknowledgements/);
+  }
+});
+
+void test("non-diagnostic broker error fields require recovery", async () => {
+  for (const error of ["", "   ", false, {}]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/account/U123/orders") return { error };
+      return sessionResponse(input);
+    });
+
+    const result = await client.submitDerivativeSingleOrder(singleOrderRequest());
+    assert.equal(result.state, "recovery_required");
+    if (result.state === "recovery_required") {
+      assert.equal(result.errors.length, 0);
+      assert.deepEqual(result.unrecognizedResponses, [{ error }]);
+    }
+  }
+});
+
 void test("contingent orders support general LIMIT and STOP parent-child roles", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/account/U123/orders") {
