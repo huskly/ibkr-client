@@ -186,7 +186,7 @@ interface DecodedOrderSubmission {
   orders: DerivativeSubmittedOrder[];
   warnings: OrderWarning[];
   errors: BrokerErrorDetail[];
-  unrecognizedResponses: Readonly<Record<string, unknown>>[];
+  unrecognizedResponses: unknown[];
 }
 
 /** Extract the canonical OSI symbol embedded in an IBKR option description. */
@@ -526,6 +526,10 @@ export class IbkrClient
     continuation: { replyId: string; parentClientOrderId: string };
     confirmed: true;
   }): Promise<DerivativeMultiOrderResult> {
+    const confirmed: unknown = input.confirmed;
+    if (confirmed !== true) {
+      throw new Error("Order warning confirmation must be true");
+    }
     if (!input.continuation.replyId.trim()) {
       throw new Error("An exact warning reply ID is required");
     }
@@ -966,6 +970,10 @@ export class IbkrClient
       | DerivativeContingentChildOrderRequest
   ): void {
     if (!request.accountId.trim()) throw new Error("An explicit IBKR account ID is required");
+    const orderType: unknown = request.orderType;
+    if (orderType !== "LMT" && orderType !== "STP") {
+      throw new Error("Order type must be LMT or STP");
+    }
     if (!Number.isSafeInteger(request.quantity) || request.quantity <= 0) {
       throw new Error("Order quantity must be a positive integer");
     }
@@ -1101,8 +1109,12 @@ export class IbkrClient
     parentClientOrderId: string
   ): DerivativeMultiOrderResult {
     const decoded = this.decodeOrderSubmission(response);
+    const hasDistinctBrokerOrderIds =
+      decoded.orders.length === 2 &&
+      new Set(decoded.orders.map(({ orderId }) => orderId)).size === 2;
     const rolesArePositionallyComplete =
       decoded.orders.length === 2 &&
+      hasDistinctBrokerOrderIds &&
       decoded.warnings.length === 0 &&
       decoded.errors.length === 0 &&
       decoded.unrecognizedResponses.length === 0;
@@ -1137,7 +1149,13 @@ export class IbkrClient
         errors: decoded.errors,
       };
     }
-    if (!hasWarnings && !hasErrors && !hasUnknown && orders.length === 2) {
+    if (
+      !hasWarnings &&
+      !hasErrors &&
+      !hasUnknown &&
+      orders.length === 2 &&
+      hasDistinctBrokerOrderIds
+    ) {
       const [parent, child] = orders;
       if (parent !== undefined && child !== undefined) {
         const terminalFailure = orders.find(
@@ -1153,9 +1171,7 @@ export class IbkrClient
     return this.contingentRecoveryResult(decoded, orders, parentClientOrderId);
   }
 
-  private decodeOrderSubmission(
-    response: IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
-  ): DecodedOrderSubmission {
+  private decodeOrderSubmission(response: unknown): DecodedOrderSubmission {
     const items = Array.isArray(response) ? response : [response];
     const decoded: DecodedOrderSubmission = {
       orders: [],
@@ -1164,32 +1180,33 @@ export class IbkrClient
       unrecognizedResponses: [],
     };
     for (const item of items) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        decoded.unrecognizedResponses.push(item);
+        continue;
+      }
+      const record = item as Readonly<Record<string, unknown>>;
       let recognized = false;
-      if ("id" in item && typeof item.id === "string") {
-        const messageIds = Array.isArray(item.messageIds)
-          ? item.messageIds.filter((value): value is string => typeof value === "string")
+      if (typeof record["id"] === "string") {
+        const messageIds = Array.isArray(record["messageIds"])
+          ? record["messageIds"].filter((value): value is string => typeof value === "string")
           : [];
         decoded.warnings.push({
-          replyId: item.id,
-          messages: Array.isArray(item.message)
-            ? item.message.filter((value): value is string => typeof value === "string")
+          replyId: record["id"],
+          messages: Array.isArray(record["message"])
+            ? record["message"].filter((value): value is string => typeof value === "string")
             : [],
           messageIds,
           known: messageIds.length > 0 && messageIds.every((id) => KNOWN_ORDER_WARNING_IDS.has(id)),
         });
         recognized = true;
       }
-      if ("error" in item && item.error !== undefined && item.error !== null) {
-        decoded.errors.push(this.normalizeBrokerError(item.error, item));
+      if (record["error"] !== undefined && record["error"] !== null) {
+        decoded.errors.push(this.normalizeBrokerError(record["error"], record));
         recognized = true;
       }
-      const orderId =
-        ("order_id" in item ? item.order_id : undefined) ??
-        ("orderId" in item ? item.orderId : undefined);
+      const orderId = record["order_id"] ?? record["orderId"];
       if (typeof orderId === "string" || typeof orderId === "number") {
-        const orderStatus =
-          ("order_status" in item ? item.order_status : undefined) ??
-          ("orderStatus" in item ? item.orderStatus : undefined);
+        const orderStatus = record["order_status"] ?? record["orderStatus"];
         decoded.orders.push({
           orderId: String(orderId),
           status: this.normalizeDerivativeOrderStatus(
@@ -1201,7 +1218,7 @@ export class IbkrClient
         });
         recognized = true;
       }
-      if (!recognized) decoded.unrecognizedResponses.push({ ...item });
+      if (!recognized) decoded.unrecognizedResponses.push({ ...record });
     }
     if (items.length === 0) decoded.unrecognizedResponses.push({});
     return decoded;
@@ -1250,6 +1267,9 @@ export class IbkrClient
     }
     if (decoded.orders.some(({ status }) => status === "UNKNOWN")) {
       return "IBKR returned an order ID with an unknown status";
+    }
+    if (new Set(decoded.orders.map(({ orderId }) => orderId)).size < decoded.orders.length) {
+      return "IBKR returned duplicate broker order IDs";
     }
     if (decoded.errors.length > 0 && decoded.warnings.length > 0) {
       return "IBKR returned both warnings and rejections for one submission";

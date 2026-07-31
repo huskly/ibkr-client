@@ -371,7 +371,7 @@ export type DerivativeMultiOrderResult =
       orders: DerivativeContingentOrderEvidence[];
       warnings: OrderWarning[];
       errors: BrokerErrorDetail[];
-      unrecognizedResponses: Readonly<Record<string, unknown>>[];
+      unrecognizedResponses: unknown[];
     };
 
 export type DerivativeOrderCancelRequest = {
@@ -416,7 +416,7 @@ export type DerivativeOrderSubmissionResult =
       orders: DerivativeSubmittedOrder[];
       warnings: OrderWarning[];
       errors: BrokerErrorDetail[];
-      unrecognizedResponses: Readonly<Record<string, unknown>>[];
+      unrecognizedResponses: unknown[];
     };
 
 export type DerivativeOrderStatus =

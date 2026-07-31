@@ -727,6 +727,102 @@ void test("single order rejects malformed JavaScript identity fields before brok
   }
 });
 
+void test("single order rejects unsupported JavaScript order types before broker access", async () => {
+  const client = new FakeIbkrClient(() => {
+    throw new Error("broker must not be called");
+  });
+
+  await assert.rejects(
+    () =>
+      client.submitDerivativeSingleOrder({
+        ...singleOrderRequest(),
+        orderType: "MKT",
+      } as unknown as DerivativeSingleOrderRequest),
+    /Order type must be LMT or STP/
+  );
+  assert.equal(client.calls.length, 0);
+});
+
+void test("contingent acknowledgement rejects false confirmation before broker access", async () => {
+  const client = new FakeIbkrClient(() => {
+    throw new Error("broker must not be called");
+  });
+
+  await assert.rejects(
+    () =>
+      client.acknowledgeContingentOrderWarning({
+        continuation: { replyId: "declined", parentClientOrderId: "parent-declined" },
+        confirmed: false,
+      } as unknown as Parameters<IbkrClient["acknowledgeContingentOrderWarning"]>[0]),
+    /Order warning confirmation must be true/
+  );
+  assert.equal(client.calls.length, 0);
+});
+
+void test("contingent result requires recovery for duplicate broker order IDs", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [
+        { order_id: "777", order_status: "PreSubmitted" },
+        { order_id: "777", order_status: "PreSubmitted" },
+      ];
+    }
+    return sessionResponse(input);
+  });
+  const parent = singleOrderRequest({ clientOrderId: "parent-duplicate" });
+  const child = singleOrderRequest({
+    contract: contract(99999, 100, "OPT"),
+    orderType: "STP",
+    stopPrice: 1.5,
+    parentId: "parent-duplicate",
+  });
+  delete (child as Record<string, unknown>)["limit"];
+  delete (child as Record<string, unknown>)["clientOrderId"];
+
+  const result = await client.submitDerivativeContingentOrders({
+    accountId: "U123",
+    parent: contingentParent(parent),
+    child: contingentChild(child),
+  });
+
+  assert.equal(result.state, "recovery_required");
+  if (result.state === "recovery_required") {
+    assert.match(result.reasons[0] ?? "", /duplicate broker order IDs/);
+    assert.deepEqual(
+      result.orders.map(({ clientOrderId, role }) => ({ clientOrderId, role })),
+      [
+        { clientOrderId: null, role: "unknown" },
+        { clientOrderId: null, role: "unknown" },
+      ]
+    );
+  }
+});
+
+void test("malformed primitive broker replies retain recovery evidence", async () => {
+  const single = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") return null;
+    return sessionResponse(input);
+  });
+  const singleResult = await single.submitDerivativeSingleOrder(singleOrderRequest());
+  assert.equal(singleResult.state, "recovery_required");
+  if (singleResult.state === "recovery_required") {
+    assert.deepEqual(singleResult.unrecognizedResponses, [null]);
+  }
+
+  const contingent = new FakeIbkrClient((input) => {
+    if (input.path.startsWith("iserver/reply/")) return "malformed-reply";
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+  const contingentResult = await contingent.acknowledgeContingentOrderWarning({
+    continuation: { replyId: "malformed", parentClientOrderId: "parent-malformed" },
+    confirmed: true,
+  });
+  assert.equal(contingentResult.state, "recovery_required");
+  if (contingentResult.state === "recovery_required") {
+    assert.deepEqual(contingentResult.unrecognizedResponses, ["malformed-reply"]);
+  }
+});
+
 void test("contingent result requires recovery when an order is canceled", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/account/U123/orders") {
