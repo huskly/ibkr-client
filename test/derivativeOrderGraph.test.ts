@@ -1783,3 +1783,100 @@ test("fails closed for an unexpected child nested under an active root", async (
   );
   assert.equal(result.state, "recovery_required");
 });
+
+test("preserves terminal children linked through every parent-client alias", async () => {
+  for (const parentAlias of ["parent_order_ref", "parentClientOrderId"] as const) {
+    const unexpectedChild = {
+      account: "U1",
+      order_id: "13",
+      order_status: "Cancelled",
+      conid: 3,
+      orderType: "MKT",
+      side: "SELL",
+      totalSize: 1,
+      tif: "DAY",
+      outsideRTH: false,
+      [parentAlias]: "pcs-42",
+    };
+    const client = new Fake((input) => {
+      if (input.path === "iserver/account/orders") {
+        if (input.params?.["filters"] === "cancelled") {
+          return { snapshot: true, orders: [unexpectedChild] };
+        }
+        if (input.params?.["filters"] !== undefined) return { snapshot: true, orders: [] };
+        return {
+          snapshot: true,
+          orders: [
+            liveRoot(),
+            {
+              account: "U1",
+              order_id: "11",
+              order_status: "Submitted",
+              conid: 1,
+              orderType: "STP",
+              side: "BUY",
+              totalSize: 1,
+              stopPrice: 2.4,
+              tif: "GTC",
+              outsideRTH: false,
+              parentId: "pcs-42",
+            },
+          ],
+        };
+      }
+      if (input.path === "iserver/account/trades") return [];
+      if (input.path === "iserver/account/order/status/13") return unexpectedChild;
+      return session(input);
+    });
+
+    const result = await client.recoverDerivativeOrderGraph(
+      { accountId: "U1", rootClientOrderId: "pcs-42" },
+      graphTwoNodes()
+    );
+    assert.equal(result.state, "recovery_required", parentAlias);
+    assert.equal(
+      client.calls.some((call) => call.path === "iserver/account/order/status/13"),
+      true,
+      parentAlias
+    );
+  }
+});
+
+test("recovers expected terminal children through every parent-client alias", async () => {
+  for (const parentAlias of ["parent_order_ref", "parentClientOrderId"] as const) {
+    const terminalStop = {
+      account: "U1",
+      order_id: "11",
+      order_status: "Cancelled",
+      conid: 1,
+      orderType: "STP",
+      side: "BUY",
+      totalSize: 1,
+      stopPrice: 2.4,
+      tif: "GTC",
+      outsideRTH: false,
+      [parentAlias]: "pcs-42",
+    };
+    const client = new Fake((input) => {
+      if (input.path === "iserver/account/orders") {
+        if (input.params?.["filters"] === "cancelled") {
+          return { snapshot: true, orders: [terminalStop] };
+        }
+        if (input.params?.["filters"] !== undefined) return { snapshot: true, orders: [] };
+        return { snapshot: true, orders: [liveRoot()] };
+      }
+      if (input.path === "iserver/account/trades") return [];
+      if (input.path === "iserver/account/order/status/11") return terminalStop;
+      return session(input);
+    });
+
+    const result = await client.recoverDerivativeOrderGraph(
+      { accountId: "U1", rootClientOrderId: "pcs-42" },
+      graphTwoNodes()
+    );
+    assert.equal(result.state, "accepted", parentAlias);
+    if (result.state !== "accepted") continue;
+    assert.equal(result.members[1]?.orderId, "11", parentAlias);
+    assert.equal(result.members[1]?.status, "CANCELED", parentAlias);
+  }
+});

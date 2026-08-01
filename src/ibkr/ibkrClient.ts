@@ -1032,7 +1032,14 @@ export class IbkrClient
     request: DerivativeOrderGraphRequest,
     order: IbkrLiveOrder
   ): boolean {
-    return [order.cOID, order.order_ref, order.parentId, order.parent_id].some(
+    return [
+      order.cOID,
+      order.order_ref,
+      order.parentId,
+      order.parent_id,
+      order.parentClientOrderId,
+      order.parent_order_ref,
+    ].some(
       (value) =>
         (typeof value === "string" || typeof value === "number") &&
         String(value).trim() === request.rootClientOrderId
@@ -1043,7 +1050,12 @@ export class IbkrClient
     request: DerivativeOrderGraphRequest,
     order: IbkrLiveOrder
   ): "root" | "child" | null {
-    const parentIdentity = this.consistentStringAliases(order.parentId, order.parent_id);
+    const parentIdentity = this.consistentStringAliases(
+      order.parentId,
+      order.parent_id,
+      order.parentClientOrderId,
+      order.parent_order_ref
+    );
     const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
     if (!parentIdentity.valid || !clientIdentity.valid) return null;
     const parentId = parentIdentity.value ?? "";
@@ -1767,7 +1779,12 @@ export class IbkrClient
     node: DerivativeOrderGraphNode,
     order: IbkrLiveOrder
   ): boolean {
-    const parentIdentity = this.consistentStringAliases(order.parentId, order.parent_id);
+    const parentIdentity = this.consistentStringAliases(
+      order.parentId,
+      order.parent_id,
+      order.parentClientOrderId,
+      order.parent_order_ref
+    );
     if (!parentIdentity.valid) return false;
     if (node.parentMemberId === undefined) {
       const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
