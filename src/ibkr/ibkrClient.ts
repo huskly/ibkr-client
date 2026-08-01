@@ -864,6 +864,14 @@ export class IbkrClient
         }
         if (
           terminalOrder !== undefined &&
+          this.terminalOrderTicketConflicts(terminalOrder, order)
+        ) {
+          invalidAttachedEvidence = true;
+          terminalOrdersById.delete(orderId);
+          continue;
+        }
+        if (
+          terminalOrder !== undefined &&
           this.recoveryGraphAttachmentKey(request, terminalOrder) !==
             this.recoveryGraphAttachmentKey(request, order)
         ) {
@@ -932,6 +940,67 @@ export class IbkrClient
     const clientOrderId = this.trimmedString(order.cOID ?? order.order_ref);
     if (clientOrderId === request.rootClientOrderId && parentId === "") return "root";
     return null;
+  }
+
+  private terminalOrderTicketConflicts(first: IbkrLiveOrder, second: IbkrLiveOrder): boolean {
+    const firstTicket = this.terminalOrderTicketFingerprint(first);
+    const secondTicket = this.terminalOrderTicketFingerprint(second);
+    return Object.keys(firstTicket).some(
+      (field) => field in secondTicket && firstTicket[field] !== secondTicket[field]
+    );
+  }
+
+  private terminalOrderTicketFingerprint(order: IbkrLiveOrder): Record<string, string | boolean> {
+    const ticket: Record<string, string | boolean> = {};
+    const addString = (field: string, value: unknown, normalize?: (value: string) => string) => {
+      if (value === undefined) return;
+      ticket[field] =
+        typeof value === "string"
+          ? (normalize?.(value) ?? value)
+          : "__MALFORMED_TERMINAL_TICKET_FIELD__";
+    };
+    const addNumber = (field: string, value: unknown) => {
+      if (value === undefined) return;
+      if (typeof value === "number" && Number.isFinite(value)) {
+        ticket[field] = String(value);
+        return;
+      }
+      if (typeof value === "string" && value.trim() !== "") {
+        const numeric = Number(value);
+        ticket[field] = Number.isFinite(numeric)
+          ? String(numeric)
+          : "__MALFORMED_TERMINAL_TICKET_FIELD__";
+        return;
+      }
+      ticket[field] = "__MALFORMED_TERMINAL_TICKET_FIELD__";
+    };
+
+    addNumber("conid", order.conid);
+    if (order.conidex !== undefined) {
+      ticket["conidex"] =
+        typeof order.conidex === "string"
+          ? JSON.stringify(this.parseComboLegs(order.conidex))
+          : "__MALFORMED_TERMINAL_TICKET_FIELD__";
+    }
+    addString(
+      "orderType",
+      order.order_type ?? order.orderType,
+      (value) => this.normalizeOrderType(value) ?? "__MALFORMED_TERMINAL_TICKET_FIELD__"
+    );
+    addString(
+      "side",
+      order.side,
+      (value) => this.normalizeOrderSide(value) ?? "__MALFORMED_TERMINAL_TICKET_FIELD__"
+    );
+    addNumber("quantity", order.total_size ?? order.totalSize ?? order.size);
+    addNumber("price", order.limitPrice ?? order.limit_price ?? order.stopPrice ?? order.price);
+    addString("tif", order.tif ?? order.timeInForce, (value) => value.toUpperCase());
+    if (order.outsideRTH !== undefined || order.outside_rth !== undefined) {
+      const outsideRth = order.outsideRTH ?? order.outside_rth;
+      ticket["outsideRTH"] =
+        typeof outsideRth === "boolean" ? outsideRth : "__MALFORMED_TERMINAL_TICKET_FIELD__";
+    }
+    return ticket;
   }
 
   private orderHasExactAccount(order: IbkrLiveOrder, accountId: string): boolean {
@@ -1627,10 +1696,14 @@ export class IbkrClient
     node: DerivativeOrderGraphNode,
     order: IbkrLiveOrder
   ): boolean {
-    const tif = order.tif ?? order.timeInForce;
-    const outsideRth = order.outsideRTH ?? order.outside_rth;
-    if (typeof tif !== "string" || typeof outsideRth !== "boolean") return false;
-    return this.liveOrderMatchesGraphNode(request, node, order);
+    try {
+      const tif = order.tif ?? order.timeInForce;
+      const outsideRth = order.outsideRTH ?? order.outside_rth;
+      if (typeof tif !== "string" || typeof outsideRth !== "boolean") return false;
+      return this.liveOrderMatchesGraphNode(request, node, order);
+    } catch {
+      return false;
+    }
   }
 
   private validateSingleOrder(request: DerivativeSingleOrderRequest): void {

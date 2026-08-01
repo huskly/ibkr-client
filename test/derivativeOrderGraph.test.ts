@@ -1053,6 +1053,81 @@ test("fails closed when terminal snapshot and status linkage conflict", async ()
   assert.equal(result.state, "recovery_required");
 });
 
+test("fails closed when terminal ticket economics conflict across sources", async () => {
+  const terminalRoot = recoveredTerminalRootStatus("10");
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      if (input.params?.["filters"] === "filled") return { orders: [terminalRoot] };
+      if (input.params?.["filters"] !== undefined) return { orders: [] };
+      return {
+        orders: [
+          {
+            account: "U1",
+            order_id: "11",
+            order_status: "Submitted",
+            conid: 1,
+            orderType: "STP",
+            side: "BUY",
+            totalSize: 1,
+            stopPrice: 2.4,
+            parentId: "pcs-42",
+          },
+        ],
+      };
+    }
+    if (input.path === "iserver/account/trades") return [];
+    if (input.path === "iserver/account/order/status/10") {
+      return { ...terminalRoot, limitPrice: -9.99 };
+    }
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graphTwoNodes()
+  );
+  assert.equal(result.state, "recovery_required");
+});
+
+test("preserves malformed terminal ticket evidence as recovery_required", async () => {
+  const malformedTerminalRoot = {
+    ...recoveredTerminalRootStatus("10"),
+    orderType: 123,
+  };
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      if (input.params?.["filters"] === "filled") return { orders: [malformedTerminalRoot] };
+      if (input.params?.["filters"] !== undefined) return { orders: [] };
+      return {
+        orders: [
+          {
+            account: "U1",
+            order_id: "11",
+            order_status: "Submitted",
+            conid: 1,
+            orderType: "STP",
+            side: "BUY",
+            totalSize: 1,
+            stopPrice: 2.4,
+            parentId: "pcs-42",
+          },
+        ],
+      };
+    }
+    if (input.path === "iserver/account/trades") return [];
+    if (input.path === "iserver/account/order/status/10") return malformedTerminalRoot;
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graphTwoNodes()
+  );
+  assert.equal(result.state, "recovery_required");
+  if (result.state !== "recovery_required") return;
+  assert.equal(result.unrecognizedResponses.length > 0, true);
+});
+
 test("requires complete TIF and session fields for terminal matching", async () => {
   const terminalRoot = {
     ...recoveredTerminalRootStatus("10"),
