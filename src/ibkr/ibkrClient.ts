@@ -206,6 +206,7 @@ interface RecoveryGraphTerminalCandidates {
   linkedOrders: IbkrLiveOrder[];
   observedResponses: unknown[];
   invalidAttachedEvidence: boolean;
+  terminalSnapshotLookupFailed: boolean;
 }
 
 /** Extract the canonical OSI symbol embedded in an IBKR option description. */
@@ -634,15 +635,13 @@ export class IbkrClient
         terminalEvidence.byNode,
         usedOrderIds
       );
-      if (assignments !== null) {
-        for (const node of unresolved) {
-          const order = assignments.get(node.memberId);
-          if (order === undefined) continue;
-          selected.set(node.memberId, order);
-          const orderId = this.toOrderId(order);
-          if (orderId !== undefined) usedOrderIds.add(orderId);
-          observedCandidates.push(order);
-        }
+      for (const node of unresolved) {
+        const order = assignments.get(node.memberId);
+        if (order === undefined) continue;
+        selected.set(node.memberId, order);
+        const orderId = this.toOrderId(order);
+        if (orderId !== undefined) usedOrderIds.add(orderId);
+        observedCandidates.push(order);
       }
     }
     observedCandidates.push(...terminalEvidence.observedResponses);
@@ -702,6 +701,7 @@ export class IbkrClient
       [...linkedOrderIds].some((orderId) => !selectedOrderIds.has(orderId)) ||
       requestedOrderIdMissing ||
       terminalEvidence.invalidAttachedEvidence ||
+      terminalEvidence.terminalSnapshotLookupFailed ||
       members.some(({ status }) => status === "UNKNOWN" || status === "WARNING_PENDING")
     ) {
       return {
@@ -734,6 +734,7 @@ export class IbkrClient
     const linkedOrders: IbkrLiveOrder[] = [];
     const observedResponses: unknown[] = [];
     let invalidAttachedEvidence = false;
+    let terminalSnapshotLookupFailed = false;
 
     const candidateOrderIds = new Set<string>();
     if (knownOrderId !== undefined) candidateOrderIds.add(knownOrderId);
@@ -762,12 +763,18 @@ export class IbkrClient
           linkedOrders.push(order);
           candidateOrderIds.add(orderId);
         }
-      } catch {
-        continue;
+      } catch (error) {
+        terminalSnapshotLookupFailed = true;
+        observedResponses.push({
+          source: "terminal_order_snapshot",
+          filter,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 
     let trades: IbkrTrade[] = [];
+    const tradeEvidenceById = new Map<string, IbkrLiveOrder>();
     try {
       const response = await this.req<unknown>({
         path: "iserver/account/trades",
@@ -790,6 +797,11 @@ export class IbkrClient
       if (orderId === undefined) continue;
       if (orderRef === request.rootClientOrderId || parentRef === request.rootClientOrderId) {
         candidateOrderIds.add(orderId);
+        tradeEvidenceById.set(orderId, {
+          ...trade,
+          account: accountId,
+          order_id: orderId,
+        });
       }
     }
 
@@ -804,13 +816,37 @@ export class IbkrClient
           invalidAttachedEvidence = true;
           continue;
         }
-        const resolvedOrder = terminalOrder === undefined ? order : { ...terminalOrder, ...order };
-        if (this.recoveryGraphOrderIsAttached(request, resolvedOrder)) {
-          terminalOrdersById.set(orderId, resolvedOrder);
-          if (terminalOrder === undefined) linkedOrders.push(resolvedOrder);
+        if (
+          terminalOrder !== undefined &&
+          this.recoveryGraphAttachmentKey(request, terminalOrder) !==
+            this.recoveryGraphAttachmentKey(request, order)
+        ) {
+          invalidAttachedEvidence = true;
+          terminalOrdersById.delete(orderId);
+          continue;
         }
-      } catch {
-        if (terminalOrder === undefined) continue;
+        if (!this.recoveryGraphOrderIsAttached(request, order)) {
+          invalidAttachedEvidence = true;
+          terminalOrdersById.delete(orderId);
+          continue;
+        }
+        const resolvedOrder = terminalOrder === undefined ? order : { ...terminalOrder, ...order };
+        terminalOrdersById.set(orderId, resolvedOrder);
+        if (terminalOrder === undefined) linkedOrders.push(resolvedOrder);
+      } catch (error) {
+        observedResponses.push({
+          source: "terminal_order_status",
+          orderId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (terminalOrder === undefined) {
+          const tradeEvidence = tradeEvidenceById.get(orderId);
+          if (tradeEvidence !== undefined) {
+            linkedOrders.push(tradeEvidence);
+            observedResponses.push(tradeEvidence);
+          }
+          continue;
+        }
       }
       const resolvedOrder = terminalOrdersById.get(orderId) ?? terminalOrder;
       if (resolvedOrder === undefined) continue;
@@ -819,7 +855,7 @@ export class IbkrClient
         continue;
       }
       for (const node of request.nodes) {
-        if (this.liveOrderMatchesGraphNode(request, node, resolvedOrder)) {
+        if (this.terminalOrderMatchesGraphNode(request, node, resolvedOrder)) {
           const existing = byNode.get(node.memberId);
           if (existing !== undefined) existing.push(resolvedOrder);
         }
@@ -830,6 +866,7 @@ export class IbkrClient
       linkedOrders,
       observedResponses,
       invalidAttachedEvidence,
+      terminalSnapshotLookupFailed,
     };
   }
 
@@ -837,10 +874,18 @@ export class IbkrClient
     request: DerivativeOrderGraphRequest,
     order: IbkrLiveOrder
   ): boolean {
-    return (
-      (order.cOID ?? order.order_ref) === request.rootClientOrderId ||
-      String(order.parentId ?? "").trim() === request.rootClientOrderId
-    );
+    return this.recoveryGraphAttachmentKey(request, order) !== null;
+  }
+
+  private recoveryGraphAttachmentKey(
+    request: DerivativeOrderGraphRequest,
+    order: IbkrLiveOrder
+  ): "root" | "child" | null {
+    const parentId = String(order.parentId ?? order.parent_id ?? "").trim();
+    if (parentId === request.rootClientOrderId) return "child";
+    const clientOrderId = this.trimmedString(order.cOID ?? order.order_ref);
+    if (clientOrderId === request.rootClientOrderId && parentId === "") return "root";
+    return null;
   }
 
   private orderHasExactAccount(order: IbkrLiveOrder, accountId: string): boolean {
@@ -864,16 +909,27 @@ export class IbkrClient
     unresolvedNodes: readonly DerivativeOrderGraphNode[],
     terminalCandidates: Map<string, IbkrLiveOrder[]>,
     usedOrderIds: Set<string>
-  ): Map<string, IbkrLiveOrder> | null {
+  ): Map<string, IbkrLiveOrder> {
     const assignments = new Map<string, IbkrLiveOrder>();
+    const uniqueCandidates = new Map<
+      string,
+      { node: DerivativeOrderGraphNode; order: IbkrLiveOrder }[]
+    >();
     for (const node of unresolvedNodes) {
       const candidates = terminalCandidates.get(node.memberId) ?? [];
-      if (candidates.length !== 1) return null;
+      if (candidates.length !== 1) continue;
       const order = candidates[0];
-      if (order === undefined) return null;
+      if (order === undefined) continue;
       const orderId = this.toOrderId(order);
-      if (orderId === undefined || usedOrderIds.has(orderId)) return null;
-      assignments.set(node.memberId, order);
+      if (orderId === undefined || usedOrderIds.has(orderId)) continue;
+      const owners = uniqueCandidates.get(orderId) ?? [];
+      owners.push({ node, order });
+      uniqueCandidates.set(orderId, owners);
+    }
+    for (const owners of uniqueCandidates.values()) {
+      const owner = owners[0];
+      if (owners.length !== 1 || owner === undefined) continue;
+      assignments.set(owner.node.memberId, owner.order);
     }
     return assignments;
   }
@@ -1480,6 +1536,7 @@ export class IbkrClient
       const price = this.firstNumber(order.limitPrice, order.limit_price, order.price);
       const expectedPrice = node.priceEffect === "CREDIT" ? -node.limit : node.limit;
       const outsideRth = order.outsideRTH ?? order.outside_rth;
+      const tif = order.tif ?? order.timeInForce;
       return (
         liveLegs.length === node.legs.length &&
         node.legs.every((leg, index) => {
@@ -1490,7 +1547,7 @@ export class IbkrClient
         side === "BUY" &&
         quantity === node.quantity &&
         price === expectedPrice &&
-        (order.tif === undefined || order.tif.toUpperCase() === node.tif) &&
+        (tif === undefined || tif.toUpperCase() === node.tif) &&
         (outsideRth === undefined || outsideRth === (node.session === "OVERNIGHT"))
       );
     }
@@ -1507,15 +1564,27 @@ export class IbkrClient
     const expectedPrice =
       node.orderType === "LMT" ? node.limit : node.orderType === "STP" ? node.stopPrice : undefined;
     const outsideRth = order.outsideRTH ?? order.outside_rth;
+    const tif = order.tif ?? order.timeInForce;
     return (
       order.conid === node.contract.conid &&
       orderType === expectedOrderType &&
       side === node.side &&
       quantity === node.quantity &&
       price === expectedPrice &&
-      (order.tif === undefined || order.tif.toUpperCase() === node.tif) &&
+      (tif === undefined || tif.toUpperCase() === node.tif) &&
       (outsideRth === undefined || outsideRth === (node.session === "OVERNIGHT"))
     );
+  }
+
+  private terminalOrderMatchesGraphNode(
+    request: DerivativeOrderGraphRequest,
+    node: DerivativeOrderGraphNode,
+    order: IbkrLiveOrder
+  ): boolean {
+    const tif = order.tif ?? order.timeInForce;
+    const outsideRth = order.outsideRTH ?? order.outside_rth;
+    if (typeof tif !== "string" || typeof outsideRth !== "boolean") return false;
+    return this.liveOrderMatchesGraphNode(request, node, order);
   }
 
   private validateSingleOrder(request: DerivativeSingleOrderRequest): void {

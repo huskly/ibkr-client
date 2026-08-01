@@ -871,6 +871,210 @@ test("uses an exact broker ID even when trade history fails", async () => {
   );
 });
 
+test("fails closed when a terminal snapshot lookup fails", async () => {
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      if (input.params?.["filters"] === "filled") throw new Error("filled snapshot unavailable");
+      if (input.params?.["filters"] !== undefined) return { orders: [] };
+      return {
+        orders: [
+          liveRoot(),
+          {
+            account: "U1",
+            order_id: "11",
+            order_status: "Submitted",
+            conid: 1,
+            orderType: "STP",
+            side: "BUY",
+            totalSize: 1,
+            stopPrice: 2.4,
+            parentId: "pcs-42",
+          },
+        ],
+      };
+    }
+    if (input.path === "iserver/account/trades") return [];
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graphTwoNodes()
+  );
+  assert.equal(result.state, "recovery_required");
+  if (result.state !== "recovery_required") return;
+  assert.equal(
+    result.unrecognizedResponses.some(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        (item as { source?: string }).source === "terminal_order_snapshot"
+    ),
+    true
+  );
+});
+
+test("preserves trade-linked terminal attachments when status lookup fails", async () => {
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      if (input.params?.["filters"] !== undefined) return { orders: [] };
+      return {
+        orders: [
+          liveRoot(),
+          {
+            account: "U1",
+            order_id: "11",
+            order_status: "Submitted",
+            conid: 1,
+            orderType: "STP",
+            side: "BUY",
+            totalSize: 1,
+            stopPrice: 2.4,
+            parentId: "pcs-42",
+          },
+          {
+            account: "U1",
+            order_id: "12",
+            order_status: "Submitted",
+            conid: 2,
+            orderType: "MKT",
+            side: "SELL",
+            totalSize: 1,
+            parentId: "pcs-42",
+          },
+        ],
+      };
+    }
+    if (input.path === "iserver/account/trades") {
+      return [{ account: "U1", order_ref: "pcs-42", order_id: "13" }];
+    }
+    if (input.path === "iserver/account/order/status/13") {
+      throw new Error("terminal status unavailable");
+    }
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graph()
+  );
+  assert.equal(result.state, "recovery_required");
+  if (result.state !== "recovery_required") return;
+  assert.equal(
+    result.unrecognizedResponses.some(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        (item as { order_id?: string }).order_id === "13"
+    ),
+    true
+  );
+});
+
+test("fails closed when terminal snapshot and status linkage conflict", async () => {
+  const terminalRoot = {
+    ...recoveredTerminalRootStatus("10"),
+    order_status: "Cancelled",
+  };
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      if (input.params?.["filters"] === "cancelled") return { orders: [terminalRoot] };
+      if (input.params?.["filters"] !== undefined) return { orders: [] };
+      return {
+        orders: [
+          {
+            account: "U1",
+            order_id: "11",
+            order_status: "Submitted",
+            conid: 1,
+            orderType: "STP",
+            side: "BUY",
+            totalSize: 1,
+            stopPrice: 2.4,
+            parentId: "pcs-42",
+          },
+        ],
+      };
+    }
+    if (input.path === "iserver/account/trades") return [];
+    if (input.path === "iserver/account/order/status/10") {
+      return { ...terminalRoot, cOID: "different-root" };
+    }
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graphTwoNodes()
+  );
+  assert.equal(result.state, "recovery_required");
+});
+
+test("requires complete TIF and session fields for terminal matching", async () => {
+  const terminalRoot = {
+    ...recoveredTerminalRootStatus("10"),
+    order_status: "Cancelled",
+  } as Record<string, unknown>;
+  delete terminalRoot["tif"];
+  delete terminalRoot["outsideRTH"];
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      if (input.params?.["filters"] === "cancelled") return { orders: [terminalRoot] };
+      if (input.params?.["filters"] !== undefined) return { orders: [] };
+      return {
+        orders: [
+          {
+            account: "U1",
+            order_id: "11",
+            order_status: "Submitted",
+            conid: 1,
+            orderType: "STP",
+            side: "BUY",
+            totalSize: 1,
+            stopPrice: 2.4,
+            parentId: "pcs-42",
+          },
+        ],
+      };
+    }
+    if (input.path === "iserver/account/trades") return [];
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graphTwoNodes()
+  );
+  assert.equal(result.state, "recovery_required");
+  assert.equal(result.members[0]?.orderId, null);
+});
+
+test("retains uniquely matched terminal members in partial recovery evidence", async () => {
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") return { orders: [] };
+    if (input.path === "iserver/account/trades") {
+      return [{ account: "U1", order_ref: "pcs-42", order_id: "10" }];
+    }
+    if (input.path === "iserver/account/order/status/10") {
+      return recoveredTerminalRootStatus("10");
+    }
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graphTwoNodes()
+  );
+  assert.equal(result.state, "recovery_required");
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId, status }) => [memberId, orderId, status]),
+    [
+      ["entry", "10", "FILLED"],
+      ["stop", null, "WARNING_PENDING"],
+    ]
+  );
+});
+
 test("returns recovery_required when terminal evidence is ambiguous and preserves evidence", async () => {
   const client = new Fake((input) => {
     if (input.path === "iserver/account/orders") return { orders: [] };

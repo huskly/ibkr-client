@@ -344,4 +344,6 @@ non-ambiguous and complete, preserves broker terminal states for each member, an
 evidence is partial, duplicated, ambiguous, unknown, includes an unexpected attached order, or cannot
 prove required account, broker ID, or parent identity links.
 No recoveries involve writes.
+Failed terminal snapshot lookups force `recovery_required`; trade-linked members whose exact status
+lookup fails remain preserved as uncorrelated evidence instead of being discarded.
 is the safety boundary: consumers should not bypass it with the private raw request client.
