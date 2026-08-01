@@ -629,6 +629,7 @@ export class IbkrClient
       request,
       input.orderId
     );
+    this.reconcileSelectedGraphMembers(request, selected, terminalEvidence);
     if (unresolved.length > 0) {
       const assignments = this.assignRecoveryGraphCandidates(
         unresolved,
@@ -722,6 +723,51 @@ export class IbkrClient
       members: this.attachGraphParentOrderIds(members),
       warnings: [],
     };
+  }
+
+  private reconcileSelectedGraphMembers(
+    request: DerivativeOrderGraphRequest,
+    selected: Map<string, IbkrLiveOrder>,
+    terminalEvidence: RecoveryGraphTerminalCandidates
+  ): void {
+    for (const node of request.nodes) {
+      const selectedOrder = selected.get(node.memberId);
+      const selectedOrderId =
+        selectedOrder === undefined ? undefined : this.toOrderId(selectedOrder);
+      if (selectedOrderId === undefined) continue;
+
+      const terminalMatches = new Map<string, IbkrLiveOrder>();
+      for (const order of terminalEvidence.byNode.get(node.memberId) ?? []) {
+        const orderId = this.toOrderId(order);
+        if (orderId === selectedOrderId) terminalMatches.set(orderId, order);
+      }
+      const terminalLinked =
+        terminalMatches.size > 0 ||
+        terminalEvidence.linkedOrders.some(
+          (order) =>
+            this.toOrderId(order) === selectedOrderId && this.isTerminalRecoveryOrder(order)
+        );
+      if (!terminalLinked) continue;
+
+      if (terminalMatches.size !== 1) {
+        terminalEvidence.invalidAttachedEvidence = true;
+        continue;
+      }
+      const [terminalOrder] = terminalMatches.values();
+      if (terminalOrder !== undefined) selected.set(node.memberId, terminalOrder);
+    }
+  }
+
+  private isTerminalRecoveryOrder(order: IbkrLiveOrder): boolean {
+    const status = this.canonicalIbkrOrderStatus(
+      order.order_status ?? order.orderStatus ?? order.status
+    );
+    return (
+      status === "FILLED" ||
+      status === "CANCELLED" ||
+      status === "INACTIVE" ||
+      status === "REJECTED"
+    );
   }
 
   private async findRecoveryGraphTerminalCandidates(

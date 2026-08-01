@@ -654,6 +654,49 @@ test("recovers mixed active and terminal descendants in one graph", async () => 
   );
 });
 
+test("reconciles terminal evidence for members selected from the active snapshot", async () => {
+  const terminalRoot = recoveredTerminalRootStatus("10");
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      if (input.params?.["filters"] === "filled") return { orders: [terminalRoot] };
+      if (input.params?.["filters"] !== undefined) return { orders: [] };
+      return {
+        orders: [
+          liveRoot(),
+          {
+            account: "U1",
+            order_id: "11",
+            order_status: "Submitted",
+            conid: 1,
+            orderType: "STP",
+            side: "BUY",
+            totalSize: 1,
+            stopPrice: 2.4,
+            parentId: "pcs-42",
+          },
+        ],
+      };
+    }
+    if (input.path === "iserver/account/trades") return [];
+    if (input.path === "iserver/account/order/status/10") return terminalRoot;
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graphTwoNodes()
+  );
+  assert.equal(result.state, "accepted");
+  if (result.state !== "accepted") return;
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId, status }) => [memberId, orderId, status]),
+    [
+      ["entry", "10", "FILLED"],
+      ["stop", "11", "WORKING"],
+    ]
+  );
+});
+
 test("discovers terminal members from filtered order snapshots without executions", async () => {
   const terminalRoot = {
     ...recoveredTerminalRootStatus("10"),
