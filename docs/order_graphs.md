@@ -81,4 +81,4 @@ The simplest way to remember it:
 > A combo describes what one order contains.
 > A graph describes how multiple orders depend on one another.
 
-The relevant public contract is in [`src/types.ts`](../src/types.ts#L307), and the lifecycle behavior is documented in [`README.md`](../README.md#guarded-derivative-order-execution).
+The relevant public contract is in [`src/types.ts`](../src/types.ts), and the lifecycle behavior is documented in [`README.md`](../README.md#guarded-derivative-order-execution).

@@ -336,14 +336,17 @@ nodes by position.
 known member broker ID, and terminal evidence keyed by the durable root client ID. It searches
 filtered filled, canceled, and inactive order snapshots before using recent execution evidence;
 an exact broker ID is still queried even if execution history is unavailable.
+It requires complete active and filtered terminal snapshot markers, traverses both nested child
+collection aliases, and rejects contradictory aliases within a broker response before correlation.
 It correlates the root by the transmitted client ID and its complete ticket, and children by their
 transmitted parent ID plus contract or complete combo legs, order type, side, quantity, applicable
 signed limit or stop price, TIF, and regular/overnight session; synthesized child client IDs are not
-expected from the broker. Recovery accepts terminal descendants and terminal roots when the evidence is
+expected from the broker. Recovery accepts terminal members when the evidence is
 non-ambiguous and complete, preserves broker terminal states for each member, and fails closed when
 evidence is partial, duplicated, ambiguous, unknown, includes an unexpected attached order, or cannot
 prove required account, broker ID, or parent identity links.
 No recoveries involve writes.
 Failed terminal snapshot lookups force `recovery_required`; trade-linked members whose exact status
 lookup fails remain preserved as uncorrelated evidence instead of being discarded.
-is the safety boundary: consumers should not bypass it with the private raw request client.
+This recovery API is the safety boundary: consumers should not bypass it with the private raw request
+client.

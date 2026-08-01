@@ -594,22 +594,52 @@ export class IbkrClient
     this.validateOrderGraph(request);
     if (input.accountId !== request.accountId)
       throw new Error("Graph recovery account does not match request");
+    if (
+      input.rootClientOrderId !== undefined &&
+      input.rootClientOrderId !== request.rootClientOrderId
+    ) {
+      throw new Error("Root client order ID does not match the requested graph");
+    }
+    if (input.orderId !== undefined && !input.orderId.trim()) {
+      throw new Error("An exact broker order ID is required for graph recovery");
+    }
     await this.prepareBrokerageAccount(input.accountId);
     const response = await this.req<IbkrLiveOrdersResponse>({
       path: "iserver/account/orders",
       params: { force: true, accountId: input.accountId },
     });
-    const accountOrders = (response.orders ?? []).filter((order) =>
-      this.orderBelongsToAccount(order, input.accountId)
-    );
+    const flattenedActiveSnapshot = this.flattenCompleteOrderSnapshot(response);
+    const activeSnapshotIncomplete = flattenedActiveSnapshot === null;
+    const invalidActiveAccountEvidence =
+      flattenedActiveSnapshot?.some(
+        ({ order }) => !this.orderHasExactAccount(order, input.accountId)
+      ) ?? false;
+    const invalidNestedActiveEvidence =
+      flattenedActiveSnapshot?.some(
+        ({ order, nestedParent }) =>
+          nestedParent !== null &&
+          !this.recoveryGraphOrderMayBeAttached(request, order) &&
+          this.recoveryGraphOrderIsAttached(request, nestedParent)
+      ) ?? false;
+    const accountOrders = (flattenedActiveSnapshot ?? [])
+      .map(({ order }) => order)
+      .filter((order) => this.orderHasExactAccount(order, input.accountId));
     const activeMatchesByMember = new Map<string, IbkrLiveOrder[]>();
-    const observedCandidates: unknown[] = [];
+    const observedCandidates: unknown[] =
+      activeSnapshotIncomplete || invalidActiveAccountEvidence || invalidNestedActiveEvidence
+        ? [response]
+        : [];
+    observedCandidates.push(
+      ...accountOrders.filter((order) => this.recoveryGraphOrderMayBeAttached(request, order))
+    );
     for (const node of request.nodes) {
-      const matches = accountOrders.filter((order) =>
-        this.liveOrderMatchesGraphNode(request, node, order)
+      const matches = accountOrders.filter(
+        (order) =>
+          this.terminalOrderTicketIsValid(order) &&
+          this.orderHasValidRecoveryStatus(order) &&
+          this.recoveryOrderMatchesGraphNode(request, node, order)
       );
       activeMatchesByMember.set(node.memberId, matches);
-      observedCandidates.push(...matches);
     }
     const selected = new Map<string, IbkrLiveOrder>();
     const usedOrderIds = new Set<string>();
@@ -617,7 +647,7 @@ export class IbkrClient
       const matches = activeMatchesByMember.get(node.memberId) ?? [];
       const [match] = matches;
       if (matches.length !== 1 || match === undefined) continue;
-      const orderId = this.toOrderId(match);
+      const orderId = this.recoveryOrderId(match);
       if (orderId === undefined) continue;
       if (usedOrderIds.has(orderId)) continue;
       usedOrderIds.add(orderId);
@@ -640,25 +670,19 @@ export class IbkrClient
         const order = assignments.get(node.memberId);
         if (order === undefined) continue;
         selected.set(node.memberId, order);
-        const orderId = this.toOrderId(order);
+        const orderId = this.recoveryOrderId(order);
         if (orderId !== undefined) usedOrderIds.add(orderId);
         observedCandidates.push(order);
       }
     }
     observedCandidates.push(...terminalEvidence.observedResponses);
     if (terminalEvidence.invalidAttachedEvidence) {
-      observedCandidates.push({ reason: "Invalid terminal account identity" });
+      observedCandidates.push({ reason: "Invalid or conflicting terminal broker evidence" });
     }
     const selectedCandidates = [...selected.values()];
     const requestedOrderIdMissing =
       input.orderId !== undefined &&
-      !selectedCandidates.some((order) => this.toOrderId(order) === input.orderId);
-    if (
-      input.rootClientOrderId !== undefined &&
-      input.rootClientOrderId !== request.rootClientOrderId
-    ) {
-      throw new Error("Root client order ID does not match the requested graph");
-    }
+      !selectedCandidates.some((order) => this.recoveryOrderId(order) === input.orderId);
     const members = request.nodes.map((node) => {
       const order = selected.get(node.memberId);
       return this.graphMemberEvidence(request, node, order);
@@ -668,13 +692,12 @@ export class IbkrClient
     const linkedOrderIds = new Set<string>();
     let linkedOrderMissingBrokerId = false;
     for (const order of accountOrders) {
-      if (
-        String(order.cOID ?? order.order_ref) !== request.rootClientOrderId &&
-        String(order.parentId ?? "") !== request.rootClientOrderId
-      ) {
+      if (!this.recoveryGraphOrderMayBeAttached(request, order)) continue;
+      if (!this.recoveryGraphOrderIsAttached(request, order)) {
+        linkedOrderMissingBrokerId = true;
         continue;
       }
-      const orderId = this.toOrderId(order);
+      const orderId = this.recoveryOrderId(order);
       if (orderId === undefined) {
         linkedOrderMissingBrokerId = true;
         continue;
@@ -682,7 +705,7 @@ export class IbkrClient
       linkedOrderIds.add(orderId);
     }
     for (const order of terminalEvidence.linkedOrders) {
-      const orderId = this.toOrderId(order);
+      const orderId = this.recoveryOrderId(order);
       if (orderId === undefined) {
         linkedOrderMissingBrokerId = true;
         continue;
@@ -691,7 +714,7 @@ export class IbkrClient
     }
     const selectedOrderIds = new Set(
       selectedCandidates.flatMap((order) => {
-        const orderId = this.toOrderId(order);
+        const orderId = this.recoveryOrderId(order);
         return orderId === undefined ? [] : [orderId];
       })
     );
@@ -701,6 +724,9 @@ export class IbkrClient
       linkedOrderMissingBrokerId ||
       [...linkedOrderIds].some((orderId) => !selectedOrderIds.has(orderId)) ||
       requestedOrderIdMissing ||
+      activeSnapshotIncomplete ||
+      invalidActiveAccountEvidence ||
+      invalidNestedActiveEvidence ||
       terminalEvidence.invalidAttachedEvidence ||
       terminalEvidence.terminalSnapshotLookupFailed ||
       members.some(({ status }) => status === "UNKNOWN" || status === "WARNING_PENDING")
@@ -733,19 +759,19 @@ export class IbkrClient
     for (const node of request.nodes) {
       const selectedOrder = selected.get(node.memberId);
       const selectedOrderId =
-        selectedOrder === undefined ? undefined : this.toOrderId(selectedOrder);
+        selectedOrder === undefined ? undefined : this.recoveryOrderId(selectedOrder);
       if (selectedOrderId === undefined) continue;
 
       const terminalMatches = new Map<string, IbkrLiveOrder>();
       for (const order of terminalEvidence.byNode.get(node.memberId) ?? []) {
-        const orderId = this.toOrderId(order);
+        const orderId = this.recoveryOrderId(order);
         if (orderId === selectedOrderId) terminalMatches.set(orderId, order);
       }
       const terminalLinked =
         terminalMatches.size > 0 ||
         terminalEvidence.linkedOrders.some(
           (order) =>
-            this.toOrderId(order) === selectedOrderId && this.isTerminalRecoveryOrder(order)
+            this.recoveryOrderId(order) === selectedOrderId && this.isTerminalRecoveryOrder(order)
         );
       if (!terminalLinked) continue;
 
@@ -792,16 +818,54 @@ export class IbkrClient
           path: "iserver/account/orders",
           params: { force: true, accountId, filters: filter },
         });
-        for (const order of response.orders ?? []) {
-          const attached = this.recoveryGraphOrderIsAttached(request, order);
-          if (!attached) continue;
+        const flattenedSnapshot = this.flattenCompleteOrderSnapshot(response);
+        if (flattenedSnapshot === null) {
+          terminalSnapshotLookupFailed = true;
+          observedResponses.push({ source: "terminal_order_snapshot", filter, response });
+          continue;
+        }
+        for (const { order, nestedParent } of flattenedSnapshot) {
+          if (!this.recoveryGraphOrderMayBeAttached(request, order)) {
+            if (
+              nestedParent === null ||
+              !this.recoveryGraphOrderIsAttached(request, nestedParent)
+            ) {
+              continue;
+            }
+            observedResponses.push(order);
+            linkedOrders.push(order);
+            invalidAttachedEvidence = true;
+            continue;
+          }
           observedResponses.push(order);
+          if (!this.recoveryGraphOrderIsAttached(request, order)) {
+            linkedOrders.push(order);
+            invalidAttachedEvidence = true;
+            continue;
+          }
           if (!this.orderHasExactAccount(order, accountId)) {
             invalidAttachedEvidence = true;
             continue;
           }
-          const orderId = this.toOrderId(order);
+          if (!this.terminalOrderTicketIsValid(order) || !this.orderHasValidRecoveryStatus(order)) {
+            linkedOrders.push(order);
+            invalidAttachedEvidence = true;
+            continue;
+          }
+          const orderId = this.recoveryOrderId(order);
           if (orderId === undefined) {
+            linkedOrders.push(order);
+            invalidAttachedEvidence = true;
+            continue;
+          }
+          const previousOrder = terminalOrdersById.get(orderId);
+          if (
+            previousOrder !== undefined &&
+            (this.terminalOrderTicketConflicts(previousOrder, order) ||
+              this.recoveryGraphAttachmentKey(request, previousOrder) !==
+                this.recoveryGraphAttachmentKey(request, order))
+          ) {
+            invalidAttachedEvidence = true;
             linkedOrders.push(order);
             continue;
           }
@@ -819,36 +883,59 @@ export class IbkrClient
       }
     }
 
-    let trades: IbkrTrade[] = [];
     const tradeEvidenceById = new Map<string, IbkrLiveOrder>();
     try {
       const response = await this.req<unknown>({
         path: "iserver/account/trades",
         params: { days: 7 },
       });
-      if (Array.isArray(response)) trades = response.filter(isIbkrTrade);
+      if (Array.isArray(response)) {
+        for (const rawTrade of response) {
+          if (typeof rawTrade !== "object" || rawTrade === null || Array.isArray(rawTrade))
+            continue;
+          const tradeRecord = rawTrade as Record<string, unknown>;
+          const orderRef = this.trimmedString(tradeRecord["order_ref"]);
+          const parentRef = this.recoveryOrderId({
+            order_id: tradeRecord["parent_order_ref"],
+            orderId: tradeRecord["parentOrderRef"],
+          });
+          if (orderRef !== request.rootClientOrderId && parentRef !== request.rootClientOrderId) {
+            continue;
+          }
+          const accounts = [tradeRecord["account"], tradeRecord["accountCode"]].filter(
+            (value) => value !== undefined
+          );
+          if (
+            accounts.length > 0 &&
+            accounts.every((value) => typeof value === "string" && value !== accountId)
+          ) {
+            continue;
+          }
+          if (
+            accounts.length === 0 ||
+            accounts.some((value) => typeof value !== "string" || value !== accountId) ||
+            !isIbkrTrade(rawTrade)
+          ) {
+            observedResponses.push(rawTrade);
+            invalidAttachedEvidence = true;
+            continue;
+          }
+          const orderId = this.recoveryOrderId(rawTrade);
+          if (orderId === undefined) {
+            observedResponses.push(rawTrade);
+            invalidAttachedEvidence = true;
+            continue;
+          }
+          candidateOrderIds.add(orderId);
+          tradeEvidenceById.set(orderId, {
+            ...rawTrade,
+            account: accountId,
+            order_id: orderId,
+          });
+        }
+      }
     } catch {
       // Exact broker IDs and terminal order snapshots remain usable when trade history is unavailable.
-    }
-    for (const trade of trades) {
-      const account = trade.account ?? trade.accountCode;
-      if (account !== accountId) continue;
-      const orderRef = this.trimmedString(trade.order_ref);
-      const parentRef = this.toOrderId({
-        order_id: (trade as { parent_order_ref?: unknown; parentOrderRef?: unknown })
-          .parent_order_ref,
-        orderId: (trade as { parent_order_ref?: unknown; parentOrderRef?: unknown }).parentOrderRef,
-      });
-      const orderId = this.toOrderId(trade);
-      if (orderId === undefined) continue;
-      if (orderRef === request.rootClientOrderId || parentRef === request.rootClientOrderId) {
-        candidateOrderIds.add(orderId);
-        tradeEvidenceById.set(orderId, {
-          ...trade,
-          account: accountId,
-          order_id: orderId,
-        });
-      }
     }
 
     for (const orderId of candidateOrderIds) {
@@ -860,6 +947,16 @@ export class IbkrClient
         observedResponses.push(order);
         if (!this.orderMatchesExactRecoveryIdentity(order, accountId, orderId)) {
           invalidAttachedEvidence = true;
+          continue;
+        }
+        if (!this.orderHasValidRecoveryStatus(order)) {
+          invalidAttachedEvidence = true;
+          terminalOrdersById.delete(orderId);
+          continue;
+        }
+        if (!this.terminalOrderTicketIsValid(order)) {
+          invalidAttachedEvidence = true;
+          terminalOrdersById.delete(orderId);
           continue;
         }
         if (
@@ -931,13 +1028,27 @@ export class IbkrClient
     return this.recoveryGraphAttachmentKey(request, order) !== null;
   }
 
+  private recoveryGraphOrderMayBeAttached(
+    request: DerivativeOrderGraphRequest,
+    order: IbkrLiveOrder
+  ): boolean {
+    return [order.cOID, order.order_ref, order.parentId, order.parent_id].some(
+      (value) =>
+        (typeof value === "string" || typeof value === "number") &&
+        String(value).trim() === request.rootClientOrderId
+    );
+  }
+
   private recoveryGraphAttachmentKey(
     request: DerivativeOrderGraphRequest,
     order: IbkrLiveOrder
   ): "root" | "child" | null {
-    const parentId = String(order.parentId ?? order.parent_id ?? "").trim();
+    const parentIdentity = this.consistentStringAliases(order.parentId, order.parent_id);
+    const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
+    if (!parentIdentity.valid || !clientIdentity.valid) return null;
+    const parentId = parentIdentity.value ?? "";
     if (parentId === request.rootClientOrderId) return "child";
-    const clientOrderId = this.trimmedString(order.cOID ?? order.order_ref);
+    const clientOrderId = clientIdentity.value;
     if (clientOrderId === request.rootClientOrderId && parentId === "") return "root";
     return null;
   }
@@ -950,56 +1061,63 @@ export class IbkrClient
     );
   }
 
+  private terminalOrderTicketIsValid(order: IbkrLiveOrder): boolean {
+    return !Object.values(this.terminalOrderTicketFingerprint(order)).includes(
+      "__MALFORMED_TERMINAL_TICKET_FIELD__"
+    );
+  }
+
   private terminalOrderTicketFingerprint(order: IbkrLiveOrder): Record<string, string | boolean> {
     const ticket: Record<string, string | boolean> = {};
-    const addString = (field: string, value: unknown, normalize?: (value: string) => string) => {
-      if (value === undefined) return;
+    const malformed = "__MALFORMED_TERMINAL_TICKET_FIELD__";
+    const addAliases = (
+      field: string,
+      values: readonly unknown[],
+      normalize: (value: unknown) => string | boolean | undefined
+    ) => {
+      const provided = values.filter((value) => value !== undefined);
+      if (provided.length === 0) return;
+      const normalized = provided.map(normalize);
+      const [first] = normalized;
       ticket[field] =
-        typeof value === "string"
-          ? (normalize?.(value) ?? value)
-          : "__MALFORMED_TERMINAL_TICKET_FIELD__";
+        first !== undefined && normalized.every((value) => value === first) ? first : malformed;
     };
-    const addNumber = (field: string, value: unknown) => {
-      if (value === undefined) return;
+    const normalizeNumber = (value: unknown): string | undefined => {
       if (typeof value === "number" && Number.isFinite(value)) {
-        ticket[field] = String(value);
-        return;
+        return String(value);
       }
       if (typeof value === "string" && value.trim() !== "") {
         const numeric = Number(value);
-        ticket[field] = Number.isFinite(numeric)
-          ? String(numeric)
-          : "__MALFORMED_TERMINAL_TICKET_FIELD__";
-        return;
+        return Number.isFinite(numeric) ? String(numeric) : undefined;
       }
-      ticket[field] = "__MALFORMED_TERMINAL_TICKET_FIELD__";
+      return undefined;
     };
 
-    addNumber("conid", order.conid);
+    addAliases("conid", [order.conid], normalizeNumber);
     if (order.conidex !== undefined) {
       ticket["conidex"] =
         typeof order.conidex === "string"
           ? JSON.stringify(this.parseComboLegs(order.conidex))
-          : "__MALFORMED_TERMINAL_TICKET_FIELD__";
+          : malformed;
     }
-    addString(
-      "orderType",
-      order.order_type ?? order.orderType,
-      (value) => this.normalizeOrderType(value) ?? "__MALFORMED_TERMINAL_TICKET_FIELD__"
+    addAliases("orderType", [order.order_type, order.orderType], (value) =>
+      typeof value === "string" ? this.normalizeOrderType(value) : undefined
     );
-    addString(
-      "side",
-      order.side,
-      (value) => this.normalizeOrderSide(value) ?? "__MALFORMED_TERMINAL_TICKET_FIELD__"
+    addAliases("side", [order.side], (value) =>
+      typeof value === "string" ? this.normalizeOrderSide(value) : undefined
     );
-    addNumber("quantity", order.total_size ?? order.totalSize ?? order.size);
-    addNumber("price", order.limitPrice ?? order.limit_price ?? order.stopPrice ?? order.price);
-    addString("tif", order.tif ?? order.timeInForce, (value) => value.toUpperCase());
-    if (order.outsideRTH !== undefined || order.outside_rth !== undefined) {
-      const outsideRth = order.outsideRTH ?? order.outside_rth;
-      ticket["outsideRTH"] =
-        typeof outsideRth === "boolean" ? outsideRth : "__MALFORMED_TERMINAL_TICKET_FIELD__";
-    }
+    addAliases("quantity", [order.total_size, order.totalSize, order.size], normalizeNumber);
+    addAliases(
+      "price",
+      [order.limitPrice, order.limit_price, order.stopPrice, order.price],
+      normalizeNumber
+    );
+    addAliases("tif", [order.tif, order.timeInForce], (value) =>
+      typeof value === "string" ? value.toUpperCase() : undefined
+    );
+    addAliases("outsideRTH", [order.outsideRTH, order.outside_rth], (value) =>
+      typeof value === "boolean" ? value : undefined
+    );
     return ticket;
   }
 
@@ -1017,7 +1135,17 @@ export class IbkrClient
     accountId: string,
     orderId: string
   ): boolean {
-    return this.orderHasExactAccount(order, accountId) && this.toOrderId(order) === orderId;
+    return this.orderHasExactAccount(order, accountId) && this.recoveryOrderId(order) === orderId;
+  }
+
+  private orderHasValidRecoveryStatus(order: IbkrLiveOrder): boolean {
+    const provided = [order.order_status, order.orderStatus, order.status].filter(
+      (status) => status !== undefined
+    );
+    if (provided.length === 0) return true;
+    const normalized = provided.map((status) => this.canonicalIbkrOrderStatus(status));
+    const [first] = normalized;
+    return first !== undefined && normalized.every((status) => status === first);
   }
 
   private assignRecoveryGraphCandidates(
@@ -1035,7 +1163,7 @@ export class IbkrClient
       if (candidates.length !== 1) continue;
       const order = candidates[0];
       if (order === undefined) continue;
-      const orderId = this.toOrderId(order);
+      const orderId = this.recoveryOrderId(order);
       if (orderId === undefined || usedOrderIds.has(orderId)) continue;
       const owners = uniqueCandidates.get(orderId) ?? [];
       owners.push({ node, order });
@@ -1099,11 +1227,11 @@ export class IbkrClient
     const order = await this.req<IbkrLiveOrder>({
       path: `iserver/account/order/status/${encodeURIComponent(orderId)}`,
     });
-    if (String(order.order_id ?? order.orderId ?? "") !== orderId) {
-      throw new Error(`IBKR response does not match the requested order ${orderId}`);
-    }
-    if ((order.account ?? order.acct) !== accountId) {
+    if (!this.orderHasExactAccount(order, accountId)) {
       throw new Error(`IBKR order ${orderId} does not belong to the requested account`);
+    }
+    if (this.recoveryOrderId(order) !== orderId) {
+      throw new Error(`IBKR response does not match the requested order ${orderId}`);
     }
     const lifecycle = this.normalizeDerivativeOrderLifecycle(accountId, orderId, order);
     if (lifecycle.status === "UNKNOWN") {
@@ -1143,10 +1271,10 @@ export class IbkrClient
       path: "iserver/account/orders",
       params: { force: true, accountId },
     });
-    if (response.snapshot !== true || !Array.isArray(response.orders)) {
+    const flattened = this.flattenCompleteOrderSnapshot(response);
+    if (flattened === null) {
       throw new Error("IBKR active-order snapshot is incomplete");
     }
-    const flattened = this.flattenActiveOrders(response.orders);
     const invalidAccountEvidence = flattened.find(({ order }) => {
       const returnedAccounts: readonly unknown[] = [order.account, order.acct];
       const providedAccounts = returnedAccounts.filter((value) => value !== undefined);
@@ -1639,10 +1767,13 @@ export class IbkrClient
     node: DerivativeOrderGraphNode,
     order: IbkrLiveOrder
   ): boolean {
+    const parentIdentity = this.consistentStringAliases(order.parentId, order.parent_id);
+    if (!parentIdentity.valid) return false;
     if (node.parentMemberId === undefined) {
-      if ((order.cOID ?? order.order_ref) !== request.rootClientOrderId) return false;
-      if (String(order.parentId ?? "").trim() !== "") return false;
-    } else if (String(order.parentId ?? "") !== request.rootClientOrderId) return false;
+      const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
+      if (!clientIdentity.valid || clientIdentity.value !== request.rootClientOrderId) return false;
+      if (parentIdentity.value !== undefined) return false;
+    } else if (parentIdentity.value !== request.rootClientOrderId) return false;
     if ("legs" in node) {
       const liveLegs = this.parseComboLegs(order.conidex);
       const orderType = this.normalizeOrderType(order.order_type ?? order.orderType);
@@ -1691,6 +1822,18 @@ export class IbkrClient
     );
   }
 
+  private recoveryOrderMatchesGraphNode(
+    request: DerivativeOrderGraphRequest,
+    node: DerivativeOrderGraphNode,
+    order: IbkrLiveOrder
+  ): boolean {
+    try {
+      return this.liveOrderMatchesGraphNode(request, node, order);
+    } catch {
+      return false;
+    }
+  }
+
   private terminalOrderMatchesGraphNode(
     request: DerivativeOrderGraphRequest,
     node: DerivativeOrderGraphNode,
@@ -1699,8 +1842,15 @@ export class IbkrClient
     try {
       const tif = order.tif ?? order.timeInForce;
       const outsideRth = order.outsideRTH ?? order.outside_rth;
-      if (typeof tif !== "string" || typeof outsideRth !== "boolean") return false;
-      return this.liveOrderMatchesGraphNode(request, node, order);
+      const status = order.order_status ?? order.orderStatus ?? order.status;
+      if (
+        typeof tif !== "string" ||
+        typeof outsideRth !== "boolean" ||
+        typeof status !== "string"
+      ) {
+        return false;
+      }
+      return this.recoveryOrderMatchesGraphNode(request, node, order);
     } catch {
       return false;
     }
@@ -2366,14 +2516,43 @@ export class IbkrClient
     };
   }
 
-  private flattenActiveOrders(
-    orders: readonly IbkrLiveOrder[],
-    nestedParent: IbkrLiveOrder | null = null
-  ): { order: IbkrLiveOrder; nestedParent: IbkrLiveOrder | null }[] {
-    return orders.flatMap((order) => {
-      const children = [...new Set([...(order.childOrders ?? []), ...(order.children ?? [])])];
-      return [{ order, nestedParent }, ...this.flattenActiveOrders(children, order)];
-    });
+  private flattenCompleteOrderSnapshot(
+    response: unknown
+  ): { order: IbkrLiveOrder; nestedParent: IbkrLiveOrder | null }[] | null {
+    if (typeof response !== "object" || response === null || Array.isArray(response)) return null;
+    const record = response as Record<string, unknown>;
+    if (record["snapshot"] !== true || !Array.isArray(record["orders"])) return null;
+
+    const flattened: { order: IbkrLiveOrder; nestedParent: IbkrLiveOrder | null }[] = [];
+    const visiting = new Set<object>();
+    const visit = (orders: readonly unknown[], nestedParent: IbkrLiveOrder | null): boolean => {
+      for (const rawOrder of orders) {
+        if (typeof rawOrder !== "object" || rawOrder === null || Array.isArray(rawOrder))
+          return false;
+        if (visiting.has(rawOrder)) return false;
+        visiting.add(rawOrder);
+        const orderRecord = rawOrder as Record<string, unknown>;
+        const childCollections = [orderRecord["childOrders"], orderRecord["children"]];
+        if (
+          childCollections.some((children) => children !== undefined && !Array.isArray(children))
+        ) {
+          return false;
+        }
+        const order = rawOrder as IbkrLiveOrder;
+        flattened.push({ order, nestedParent });
+        const children = new Set<unknown>();
+        for (const collection of childCollections) {
+          if (Array.isArray(collection)) {
+            for (const child of collection as unknown[]) children.add(child);
+          }
+        }
+        if (!visit([...children], order)) return false;
+        visiting.delete(rawOrder);
+      }
+      return true;
+    };
+
+    return visit(record["orders"], null) ? flattened : null;
   }
 
   private normalizeActiveDerivativeOrder(
@@ -2611,15 +2790,47 @@ export class IbkrClient
     return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
   }
 
-  private toOrderId(order: { order_id?: unknown; orderId?: unknown }): string | undefined {
-    const raw = order.order_id ?? order.orderId;
-    if (typeof raw !== "string" && typeof raw !== "number") return undefined;
-    const value = String(raw).trim();
-    return value.length === 0 ? undefined : value;
+  private recoveryOrderId(order: { order_id?: unknown; orderId?: unknown }): string | undefined {
+    const identity = this.consistentScalarAliases(order.order_id, order.orderId);
+    return identity.valid ? identity.value : undefined;
   }
 
-  private trimmedString(value: string | undefined): string | null {
-    if (value === undefined) return null;
+  private consistentScalarAliases(...aliases: readonly unknown[]): {
+    valid: boolean;
+    value: string | undefined;
+  } {
+    const provided = aliases.filter((alias) => alias !== undefined);
+    if (provided.length === 0) return { valid: true, value: undefined };
+    const normalized = provided.map((alias) => {
+      if (typeof alias !== "string" && typeof alias !== "number") return undefined;
+      const value = String(alias).trim();
+      return value.length === 0 ? undefined : value;
+    });
+    const [first] = normalized;
+    if (first === undefined || normalized.some((value) => value !== first)) {
+      return { valid: false, value: undefined };
+    }
+    return { valid: true, value: first };
+  }
+
+  private consistentStringAliases(...aliases: readonly unknown[]): {
+    valid: boolean;
+    value: string | undefined;
+  } {
+    const provided = aliases.filter((alias) => alias !== undefined);
+    if (provided.length === 0) return { valid: true, value: undefined };
+    const normalized = provided.map((alias) =>
+      typeof alias === "string" && alias.trim() !== "" ? alias.trim() : undefined
+    );
+    const [first] = normalized;
+    if (first === undefined || normalized.some((value) => value !== first)) {
+      return { valid: false, value: undefined };
+    }
+    return { valid: true, value: first };
+  }
+
+  private trimmedString(value: unknown): string | null {
+    if (typeof value !== "string") return null;
     const trimmed = value.trim();
     return trimmed.length === 0 ? null : trimmed;
   }
@@ -2818,7 +3029,7 @@ export class IbkrClient
   }
 
   private normalizeDerivativeOrderStatus(
-    value: string | undefined,
+    value: unknown,
     filledQuantity: number,
     remainingQuantity: number
   ): DerivativeOrderStatus {
@@ -2832,9 +3043,10 @@ export class IbkrClient
     return "UNKNOWN";
   }
 
-  private canonicalIbkrOrderStatus(value: string | undefined): string | undefined {
+  private canonicalIbkrOrderStatus(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
     return value
-      ?.replace(/([a-z])([A-Z])/g, "$1_$2")
+      .replace(/([a-z])([A-Z])/g, "$1_$2")
       .replace(/\s+/g, "_")
       .toUpperCase();
   }
