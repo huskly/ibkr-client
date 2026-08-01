@@ -189,6 +189,7 @@ const IBKR_WORKING_STATUSES = new Set([
   "SUBMITTED",
   "PENDING_CANCEL",
 ]);
+const RECOVERY_TERMINAL_ORDER_FILTERS = ["filled", "cancelled", "inactive"] as const;
 const KNOWN_ORDER_WARNING_IDS = new Set(["o163"]);
 
 interface DecodedOrderSubmission {
@@ -198,6 +199,13 @@ interface DecodedOrderSubmission {
   warnings: OrderWarning[];
   errors: BrokerErrorDetail[];
   unrecognizedResponses: unknown[];
+}
+
+interface RecoveryGraphTerminalCandidates {
+  byNode: Map<string, IbkrLiveOrder[]>;
+  linkedOrders: IbkrLiveOrder[];
+  observedResponses: unknown[];
+  invalidAttachedEvidence: boolean;
 }
 
 /** Extract the canonical OSI symbol embedded in an IBKR option description. */
@@ -594,7 +602,7 @@ export class IbkrClient
       this.orderBelongsToAccount(order, input.accountId)
     );
     const activeMatchesByMember = new Map<string, IbkrLiveOrder[]>();
-    const observedCandidates: IbkrLiveOrder[] = [];
+    const observedCandidates: unknown[] = [];
     for (const node of request.nodes) {
       const matches = accountOrders.filter((order) =>
         this.liveOrderMatchesGraphNode(request, node, order)
@@ -615,16 +623,15 @@ export class IbkrClient
       selected.set(node.memberId, match);
     }
     const unresolved = request.nodes.filter((node) => !selected.has(node.memberId));
+    const terminalEvidence = await this.findRecoveryGraphTerminalCandidates(
+      input.accountId,
+      request,
+      input.orderId
+    );
     if (unresolved.length > 0) {
-      const terminalCandidates = await this.findRecoveryGraphTerminalCandidates(
-        input.accountId,
-        request,
-        unresolved,
-        input.orderId
-      );
       const assignments = this.assignRecoveryGraphCandidates(
         unresolved,
-        terminalCandidates,
+        terminalEvidence.byNode,
         usedOrderIds
       );
       if (assignments !== null) {
@@ -636,19 +643,16 @@ export class IbkrClient
           if (orderId !== undefined) usedOrderIds.add(orderId);
           observedCandidates.push(order);
         }
-      } else {
-        for (const candidates of terminalCandidates.values()) {
-          observedCandidates.push(...candidates);
-        }
       }
     }
-    const selectedCandidates = [...selected.values()];
-    if (
-      input.orderId !== undefined &&
-      !selectedCandidates.some((order) => this.toOrderId(order) === input.orderId)
-    ) {
-      throw new Error(`Broker order ${input.orderId} is not a member of the requested graph`);
+    observedCandidates.push(...terminalEvidence.observedResponses);
+    if (terminalEvidence.invalidAttachedEvidence) {
+      observedCandidates.push({ reason: "Invalid terminal account identity" });
     }
+    const selectedCandidates = [...selected.values()];
+    const requestedOrderIdMissing =
+      input.orderId !== undefined &&
+      !selectedCandidates.some((order) => this.toOrderId(order) === input.orderId);
     if (
       input.rootClientOrderId !== undefined &&
       input.rootClientOrderId !== request.rootClientOrderId
@@ -677,6 +681,14 @@ export class IbkrClient
       }
       linkedOrderIds.add(orderId);
     }
+    for (const order of terminalEvidence.linkedOrders) {
+      const orderId = this.toOrderId(order);
+      if (orderId === undefined) {
+        linkedOrderMissingBrokerId = true;
+        continue;
+      }
+      linkedOrderIds.add(orderId);
+    }
     const selectedOrderIds = new Set(
       selectedCandidates.flatMap((order) => {
         const orderId = this.toOrderId(order);
@@ -687,7 +699,10 @@ export class IbkrClient
       selected.size !== request.nodes.length ||
       !hasDistinctOrderIds ||
       linkedOrderMissingBrokerId ||
-      [...linkedOrderIds].some((orderId) => !selectedOrderIds.has(orderId))
+      [...linkedOrderIds].some((orderId) => !selectedOrderIds.has(orderId)) ||
+      requestedOrderIdMissing ||
+      terminalEvidence.invalidAttachedEvidence ||
+      members.some(({ status }) => status === "UNKNOWN" || status === "WARNING_PENDING")
     ) {
       return {
         state: "recovery_required",
@@ -712,15 +727,45 @@ export class IbkrClient
   private async findRecoveryGraphTerminalCandidates(
     accountId: string,
     request: DerivativeOrderGraphRequest,
-    unresolvedNodes: readonly DerivativeOrderGraphNode[],
     knownOrderId?: string
-  ): Promise<Map<string, IbkrLiveOrder[]>> {
+  ): Promise<RecoveryGraphTerminalCandidates> {
     const byNode = new Map<string, IbkrLiveOrder[]>();
-    for (const node of unresolvedNodes) byNode.set(node.memberId, []);
-    if (unresolvedNodes.length === 0) return byNode;
+    for (const node of request.nodes) byNode.set(node.memberId, []);
+    const linkedOrders: IbkrLiveOrder[] = [];
+    const observedResponses: unknown[] = [];
+    let invalidAttachedEvidence = false;
 
     const candidateOrderIds = new Set<string>();
     if (knownOrderId !== undefined) candidateOrderIds.add(knownOrderId);
+    const terminalOrdersById = new Map<string, IbkrLiveOrder>();
+
+    for (const filter of RECOVERY_TERMINAL_ORDER_FILTERS) {
+      try {
+        const response = await this.req<IbkrLiveOrdersResponse>({
+          path: "iserver/account/orders",
+          params: { force: true, accountId, filters: filter },
+        });
+        for (const order of response.orders ?? []) {
+          const attached = this.recoveryGraphOrderIsAttached(request, order);
+          if (!attached) continue;
+          observedResponses.push(order);
+          if (!this.orderHasExactAccount(order, accountId)) {
+            invalidAttachedEvidence = true;
+            continue;
+          }
+          const orderId = this.toOrderId(order);
+          if (orderId === undefined) {
+            linkedOrders.push(order);
+            continue;
+          }
+          terminalOrdersById.set(orderId, order);
+          linkedOrders.push(order);
+          candidateOrderIds.add(orderId);
+        }
+      } catch {
+        continue;
+      }
+    }
 
     let trades: IbkrTrade[] = [];
     try {
@@ -730,7 +775,7 @@ export class IbkrClient
       });
       if (Array.isArray(response)) trades = response.filter(isIbkrTrade);
     } catch {
-      return byNode;
+      // Exact broker IDs and terminal order snapshots remain usable when trade history is unavailable.
     }
     for (const trade of trades) {
       const account = trade.account ?? trade.accountCode;
@@ -749,22 +794,70 @@ export class IbkrClient
     }
 
     for (const orderId of candidateOrderIds) {
+      const terminalOrder = terminalOrdersById.get(orderId);
       try {
         const order = await this.req<IbkrLiveOrder>({
           path: `iserver/account/order/status/${encodeURIComponent(orderId)}`,
         });
-        if (!this.orderBelongsToAccount(order, accountId)) continue;
-        for (const node of unresolvedNodes) {
-          if (this.liveOrderMatchesGraphNode(request, node, order)) {
-            const existing = byNode.get(node.memberId);
-            if (existing !== undefined) existing.push(order);
-          }
+        observedResponses.push(order);
+        if (!this.orderMatchesExactRecoveryIdentity(order, accountId, orderId)) {
+          invalidAttachedEvidence = true;
+          continue;
+        }
+        const resolvedOrder = terminalOrder === undefined ? order : { ...terminalOrder, ...order };
+        if (this.recoveryGraphOrderIsAttached(request, resolvedOrder)) {
+          terminalOrdersById.set(orderId, resolvedOrder);
+          if (terminalOrder === undefined) linkedOrders.push(resolvedOrder);
         }
       } catch {
+        if (terminalOrder === undefined) continue;
+      }
+      const resolvedOrder = terminalOrdersById.get(orderId) ?? terminalOrder;
+      if (resolvedOrder === undefined) continue;
+      if (!this.orderHasExactAccount(resolvedOrder, accountId)) {
+        invalidAttachedEvidence = true;
         continue;
       }
+      for (const node of request.nodes) {
+        if (this.liveOrderMatchesGraphNode(request, node, resolvedOrder)) {
+          const existing = byNode.get(node.memberId);
+          if (existing !== undefined) existing.push(resolvedOrder);
+        }
+      }
     }
-    return byNode;
+    return {
+      byNode,
+      linkedOrders,
+      observedResponses,
+      invalidAttachedEvidence,
+    };
+  }
+
+  private recoveryGraphOrderIsAttached(
+    request: DerivativeOrderGraphRequest,
+    order: IbkrLiveOrder
+  ): boolean {
+    return (
+      (order.cOID ?? order.order_ref) === request.rootClientOrderId ||
+      String(order.parentId ?? "").trim() === request.rootClientOrderId
+    );
+  }
+
+  private orderHasExactAccount(order: IbkrLiveOrder, accountId: string): boolean {
+    const accounts: readonly unknown[] = [order.account, order.acct];
+    const provided = accounts.filter((account) => account !== undefined);
+    return (
+      provided.length > 0 &&
+      provided.every((account) => typeof account === "string" && account === accountId)
+    );
+  }
+
+  private orderMatchesExactRecoveryIdentity(
+    order: IbkrLiveOrder,
+    accountId: string,
+    orderId: string
+  ): boolean {
+    return this.orderHasExactAccount(order, accountId) && this.toOrderId(order) === orderId;
   }
 
   private assignRecoveryGraphCandidates(
