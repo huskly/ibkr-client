@@ -580,24 +580,59 @@ export class IbkrClient
     const accountOrders = (response.orders ?? []).filter((order) =>
       this.orderBelongsToAccount(order, input.accountId)
     );
-    const byMemberId = new Map<string, IbkrLiveOrder>();
+    const activeMatchesByMember = new Map<string, IbkrLiveOrder[]>();
+    const observedCandidates: IbkrLiveOrder[] = [];
     for (const node of request.nodes) {
       const matches = accountOrders.filter((order) =>
         this.liveOrderMatchesGraphNode(request, node, order)
       );
-      const [match] = matches;
-      if (matches.length === 1 && match !== undefined) byMemberId.set(node.memberId, match);
+      activeMatchesByMember.set(node.memberId, matches);
+      observedCandidates.push(...matches);
     }
-    const candidates = [...byMemberId.values()];
-    const linkedOrders = accountOrders.filter(
-      (order) =>
-        (order.cOID ?? order.order_ref) === request.rootClientOrderId ||
-        String(order.parentId ?? "") === request.rootClientOrderId
-    );
-    const candidateSet = new Set(candidates);
+    const selected = new Map<string, IbkrLiveOrder>();
+    const usedOrderIds = new Set<string>();
+    for (const node of request.nodes) {
+      const matches = activeMatchesByMember.get(node.memberId) ?? [];
+      const [match] = matches;
+      if (matches.length !== 1 || match === undefined) continue;
+      const orderId = this.toOrderId(match);
+      if (orderId === undefined) continue;
+      if (usedOrderIds.has(orderId)) continue;
+      usedOrderIds.add(orderId);
+      selected.set(node.memberId, match);
+    }
+    const unresolved = request.nodes.filter((node) => !selected.has(node.memberId));
+    if (unresolved.length > 0) {
+      const terminalCandidates = await this.findRecoveryGraphTerminalCandidates(
+        input.accountId,
+        request,
+        unresolved,
+        input.orderId
+      );
+      const assignments = this.assignRecoveryGraphCandidates(
+        unresolved,
+        terminalCandidates,
+        usedOrderIds
+      );
+      if (assignments !== null) {
+        for (const node of unresolved) {
+          const order = assignments.get(node.memberId);
+          if (order === undefined) continue;
+          selected.set(node.memberId, order);
+          const orderId = this.toOrderId(order);
+          if (orderId !== undefined) usedOrderIds.add(orderId);
+          observedCandidates.push(order);
+        }
+      } else {
+        for (const candidates of terminalCandidates.values()) {
+          observedCandidates.push(...candidates);
+        }
+      }
+    }
+    const selectedCandidates = [...selected.values()];
     if (
       input.orderId !== undefined &&
-      !candidates.some((order) => String(order.order_id ?? order.orderId) === input.orderId)
+      !selectedCandidates.some((order) => this.toOrderId(order) === input.orderId)
     ) {
       throw new Error(`Broker order ${input.orderId} is not a member of the requested graph`);
     }
@@ -608,23 +643,38 @@ export class IbkrClient
       throw new Error("Root client order ID does not match the requested graph");
     }
     const members = request.nodes.map((node) => {
-      const order = byMemberId.get(node.memberId);
+      const order = selected.get(node.memberId);
       return this.graphMemberEvidence(request, node, order);
     });
     const ids = members.flatMap(({ orderId }) => (orderId === null ? [] : [orderId]));
-    const brokerParentsMatch = request.nodes.every((node) => {
-      if (node.parentMemberId === undefined) return true;
-      return (
-        byMemberId.get(node.memberId) !== undefined &&
-        String(byMemberId.get(node.memberId)?.parentId ?? "") === request.rootClientOrderId
-      );
-    });
+    const hasDistinctOrderIds = new Set(ids).size === request.nodes.length;
+    const linkedOrderIds = new Set<string>();
+    let linkedOrderMissingBrokerId = false;
+    for (const order of accountOrders) {
+      if (
+        String(order.cOID ?? order.order_ref) !== request.rootClientOrderId &&
+        String(order.parentId ?? "") !== request.rootClientOrderId
+      ) {
+        continue;
+      }
+      const orderId = this.toOrderId(order);
+      if (orderId === undefined) {
+        linkedOrderMissingBrokerId = true;
+        continue;
+      }
+      linkedOrderIds.add(orderId);
+    }
+    const selectedOrderIds = new Set(
+      selectedCandidates.flatMap((order) => {
+        const orderId = this.toOrderId(order);
+        return orderId === undefined ? [] : [orderId];
+      })
+    );
     if (
-      candidates.length !== request.nodes.length ||
-      linkedOrders.length !== request.nodes.length ||
-      linkedOrders.some((order) => !candidateSet.has(order)) ||
-      new Set(ids).size !== request.nodes.length ||
-      !brokerParentsMatch
+      selected.size !== request.nodes.length ||
+      !hasDistinctOrderIds ||
+      linkedOrderMissingBrokerId ||
+      [...linkedOrderIds].some((orderId) => !selectedOrderIds.has(orderId))
     ) {
       return {
         state: "recovery_required",
@@ -635,7 +685,7 @@ export class IbkrClient
         ],
         warnings: [],
         errors: [],
-        unrecognizedResponses: [],
+        unrecognizedResponses: observedCandidates,
       };
     }
     return {
@@ -644,6 +694,82 @@ export class IbkrClient
       members: this.attachGraphParentOrderIds(members),
       warnings: [],
     };
+  }
+
+  private async findRecoveryGraphTerminalCandidates(
+    accountId: string,
+    request: DerivativeOrderGraphRequest,
+    unresolvedNodes: readonly DerivativeOrderGraphNode[],
+    knownOrderId?: string
+  ): Promise<Map<string, IbkrLiveOrder[]>> {
+    const byNode = new Map<string, IbkrLiveOrder[]>();
+    for (const node of unresolvedNodes) byNode.set(node.memberId, []);
+    if (unresolvedNodes.length === 0) return byNode;
+
+    const candidateOrderIds = new Set<string>();
+    if (knownOrderId !== undefined) candidateOrderIds.add(knownOrderId);
+
+    let trades: IbkrTrade[] = [];
+    try {
+      const response = await this.req<unknown>({
+        path: "iserver/account/trades",
+        params: { days: 7 },
+      });
+      if (Array.isArray(response)) trades = response;
+    } catch {
+      return byNode;
+    }
+    for (const trade of trades) {
+      const account = trade.account ?? trade.accountCode;
+      if (account !== accountId) continue;
+      const orderRef = this.trimmedString(trade.order_ref);
+      const parentRef = this.toOrderId({
+        order_id: (trade as { parent_order_ref?: unknown; parentOrderRef?: unknown })
+          .parent_order_ref,
+        orderId: (trade as { parent_order_ref?: unknown; parentOrderRef?: unknown }).parentOrderRef,
+      });
+      const orderId = this.toOrderId(trade);
+      if (orderId === undefined) continue;
+      if (orderRef === request.rootClientOrderId || parentRef === request.rootClientOrderId) {
+        candidateOrderIds.add(orderId);
+      }
+    }
+
+    for (const orderId of candidateOrderIds) {
+      try {
+        const order = await this.req<IbkrLiveOrder>({
+          path: `iserver/account/order/status/${encodeURIComponent(orderId)}`,
+        });
+        if (!this.orderBelongsToAccount(order, accountId)) continue;
+        for (const node of unresolvedNodes) {
+          if (this.liveOrderMatchesGraphNode(request, node, order)) {
+            const existing = byNode.get(node.memberId);
+            if (existing !== undefined) existing.push(order);
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+    return byNode;
+  }
+
+  private assignRecoveryGraphCandidates(
+    unresolvedNodes: readonly DerivativeOrderGraphNode[],
+    terminalCandidates: Map<string, IbkrLiveOrder[]>,
+    usedOrderIds: Set<string>
+  ): Map<string, IbkrLiveOrder> | null {
+    const assignments = new Map<string, IbkrLiveOrder>();
+    for (const node of unresolvedNodes) {
+      const candidates = terminalCandidates.get(node.memberId) ?? [];
+      if (candidates.length !== 1) return null;
+      const order = candidates[0];
+      if (order === undefined) return null;
+      const orderId = this.toOrderId(order);
+      if (orderId === undefined || usedOrderIds.has(orderId)) return null;
+      assignments.set(node.memberId, order);
+    }
+    return assignments;
   }
 
   async acknowledgeOrderWarning(input: {
@@ -2189,6 +2315,13 @@ export class IbkrClient
     if (!year || !month || !day || !hour || !minute || !second) return null;
     const parsed = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}Z`);
     return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+
+  private toOrderId(order: { order_id?: unknown; orderId?: unknown }): string | undefined {
+    const raw = order.order_id ?? order.orderId;
+    if (typeof raw !== "string" && typeof raw !== "number") return undefined;
+    const value = String(raw).trim();
+    return value.length === 0 ? undefined : value;
   }
 
   private trimmedString(value: string | undefined): string | null {

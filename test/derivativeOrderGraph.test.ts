@@ -85,6 +85,44 @@ const graph = (): DerivativeOrderGraphRequest => ({
     },
   ],
 });
+const graphTwoNodes = (): DerivativeOrderGraphRequest => {
+  const full = graph();
+  return {
+    ...full,
+    nodes: [full.nodes[0]!, full.nodes[1]!] as const,
+  };
+};
+const recoveredTerminalRootStatus = (orderId: string): Record<string, unknown> => ({
+  account: "U1",
+  order_id: orderId,
+  orderId,
+  cOID: "pcs-42",
+  order_status: "Filled",
+  conidex: "28812380;;;1/-1,2/1",
+  orderType: "LMT",
+  side: "BUY",
+  totalSize: 1,
+  limitPrice: -1.2,
+  filled: 1,
+  remaining: 0,
+  tif: "DAY",
+  outsideRTH: false,
+});
+const recoveredTerminalOrderStatus = (): Record<string, unknown> => ({
+  account: "U1",
+  orderId: "12",
+  order_id: "12",
+  parentId: "pcs-42",
+  order_status: "Filled",
+  conid: 2,
+  orderType: "MKT",
+  side: "SELL",
+  totalSize: 1,
+  filled: 1,
+  remaining: 0,
+  tif: "DAY",
+  outsideRTH: false,
+});
 const liveRoot = (): Record<string, unknown> => ({
   account: "U1",
   order_id: "10",
@@ -510,6 +548,138 @@ test("recovery distinguishes combo siblings by quantity and signed limit price",
       ["replacement", "11"],
       ["roll", "12"],
     ]
+  );
+});
+
+test("recovers a filled root from terminal evidence after it leaves the active list", async () => {
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders")
+      return {
+        orders: [
+          {
+            account: "U1",
+            order_id: "11",
+            order_status: "Submitted",
+            conid: 1,
+            orderType: "STP",
+            side: "BUY",
+            totalSize: 1,
+            stopPrice: 2.4,
+            parentId: "pcs-42",
+          },
+        ],
+      };
+    if (input.path === "iserver/account/trades")
+      return [
+        {
+          execution_id: "exec-root",
+          account: "U1",
+          order_ref: "pcs-42",
+          order_id: "10",
+          conid: 1,
+          conidex: "28812380;;;1/-1,2/1",
+          size: 1,
+        },
+      ];
+    if (input.path === "iserver/account/order/status/10") return recoveredTerminalRootStatus("10");
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graphTwoNodes()
+  );
+  assert.equal(result.state, "accepted");
+  if (result.state !== "accepted") return;
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId, status }) => [memberId, orderId, status]),
+    [
+      ["entry", "10", "FILLED"],
+      ["stop", "11", "WORKING"],
+    ]
+  );
+  assert.equal(
+    client.calls.some((call) => call.path === "iserver/account/order/status/10"),
+    true
+  );
+});
+
+test("recovers mixed active and terminal descendants in one graph", async () => {
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders")
+      return {
+        orders: [
+          liveRoot(),
+          {
+            account: "U1",
+            order_id: "11",
+            order_status: "Submitted",
+            conid: 1,
+            orderType: "STP",
+            side: "BUY",
+            totalSize: 1,
+            stopPrice: 2.4,
+            parentId: "pcs-42",
+          },
+        ],
+      };
+    if (input.path === "iserver/account/trades")
+      return [
+        {
+          execution_id: "exec-hedge",
+          account: "U1",
+          order_ref: "pcs-42",
+          order_id: "12",
+          conid: 2,
+          size: 1,
+        },
+      ];
+    if (input.path === "iserver/account/order/status/12") return recoveredTerminalOrderStatus();
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graph()
+  );
+  assert.equal(result.state, "accepted");
+  if (result.state !== "accepted") return;
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId, status }) => [memberId, orderId, status]),
+    [
+      ["entry", "10", "WORKING"],
+      ["stop", "11", "WORKING"],
+      ["hedge", "12", "FILLED"],
+    ]
+  );
+});
+
+test("returns recovery_required when terminal evidence is ambiguous and preserves evidence", async () => {
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") return { orders: [] };
+    if (input.path === "iserver/account/trades")
+      return [
+        { execution_id: "exec-a", account: "U1", order_ref: "pcs-42", order_id: "10", conid: 1 },
+        { execution_id: "exec-b", account: "U1", order_ref: "pcs-42", order_id: "11", conid: 1 },
+      ];
+    if (input.path === "iserver/account/order/status/10") return recoveredTerminalRootStatus("10");
+    if (input.path === "iserver/account/order/status/11") return recoveredTerminalRootStatus("11");
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    graphTwoNodes()
+  );
+  assert.equal(result.state, "recovery_required");
+  if (result.state !== "recovery_required") return;
+  assert.deepEqual(
+    result.members.map(({ orderId }) => orderId),
+    [null, null]
+  );
+  assert.deepEqual(
+    result.unrecognizedResponses.map((item) => (item as { order_id: string }).order_id),
+    ["10", "11"]
   );
 });
 
