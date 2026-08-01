@@ -231,6 +231,19 @@ function isHeadersLike(input: unknown): input is { get(name: string): string | n
   );
 }
 
+function isIbkrTrade(input: unknown): input is IbkrTrade {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return false;
+  const record = input as Record<string, unknown>;
+  return (
+    (record["account"] === undefined || typeof record["account"] === "string") &&
+    (record["accountCode"] === undefined || typeof record["accountCode"] === "string") &&
+    (record["order_ref"] === undefined || typeof record["order_ref"] === "string") &&
+    (record["order_id"] === undefined ||
+      typeof record["order_id"] === "string" ||
+      typeof record["order_id"] === "number")
+  );
+}
+
 function headerToString(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (Array.isArray(value)) return headerToString(value[0]);
@@ -715,7 +728,7 @@ export class IbkrClient
         path: "iserver/account/trades",
         params: { days: 7 },
       });
-      if (Array.isArray(response)) trades = response;
+      if (Array.isArray(response)) trades = response.filter(isIbkrTrade);
     } catch {
       return byNode;
     }
