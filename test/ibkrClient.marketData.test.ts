@@ -516,3 +516,57 @@ void test("OSI getQuotes resolves the option conid before requesting a snapshot"
     true
   );
 });
+
+void test("index symbol getQuotes falls back to secdef/search when trsrv/stocks is empty", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") return {};
+    if (input.path === "iserver/secdef/search") {
+      assert.equal(input.params?.["symbol"], "VIX");
+      return [
+        {
+          conid: "13455763",
+          symbol: "VIX",
+          sections: [
+            { secType: "IND", exchange: "CBOE;" },
+            { secType: "FUT", exchange: "CFE" },
+          ],
+        },
+      ];
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return snapshots === 1
+        ? []
+        : [{ conid: 13455763, "31": "13.50", "84": "13.40", "86": "13.60" }];
+    }
+    if (input.path === "iserver/marketdata/history") return { data: [] };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+  const quotes = await client.getQuotes(["VIX"]);
+  assert.equal(quotes["VIX"]?.quote.lastPrice, 13.5);
+  assert.equal(
+    client.calls.some(
+      (call) =>
+        call.path === "iserver/marketdata/snapshot" && call.params?.["conids"] === "13455763"
+    ),
+    true
+  );
+});
+
+void test("unresolvable non-stock symbol fails closed without a snapshot", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") return {};
+    if (input.path === "iserver/secdef/search") return [{ conid: "9", symbol: "NOPE" }];
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return [];
+    }
+    if (input.path === "iserver/marketdata/history") return { data: [] };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+  const quotes = await client.getQuotes(["NOPE"]);
+  assert.deepEqual(quotes, {});
+  assert.equal(snapshots, 0);
+});
