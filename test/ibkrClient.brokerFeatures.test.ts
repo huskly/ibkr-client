@@ -63,6 +63,109 @@ void test("searchInstruments exposes normalized stock contracts", async () => {
   await assert.rejects(() => client.searchInstruments("MSTR", "fundamental"), /supports only/);
 });
 
+void test("getAccountBalances exposes typed total and segment margin snapshots", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "portfolio/accounts") return [{ accountId: "U123" }];
+    if (input.path === "portfolio/U123/summary") {
+      return {
+        netliquidation: { amount: 12_000 },
+        availablefunds: { amount: 8_000 },
+        buyingpower: { amount: 32_000 },
+        totalcashvalue: { amount: 4_000 },
+        equitywithloanvalue: { amount: 11_500 },
+        "equitywithloanvalue-s": { amount: 10_000 },
+        regtequity: { amount: 9_500 },
+        "regtmargin-s": { amount: 5_000 },
+        initmarginreq: { amount: 2_000 },
+        "maintmarginreq-s": { amount: 1_500 },
+        excessliquidity: { amount: 0 },
+        "availablefunds-c": { amount: "bad-value" },
+        sma: { amount: Number.POSITIVE_INFINITY },
+        fullavailablefunds: { amount: 7_000 },
+        lookaheadnextchange: { amount: 1_754_000_000 },
+        "leverage-s": { amount: 1.25 },
+      };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  assert.deepEqual(await client.getAccountBalances(), {
+    netLiquidation: 12_000,
+    availableFunds: 8_000,
+    buyingPower: 32_000,
+    cashBalance: 4_000,
+    margin: {
+      total: {
+        equityWithLoanValue: 11_500,
+        regTEquity: 9_500,
+        regTMargin: null,
+        initialMarginRequirement: 2_000,
+        maintenanceMarginRequirement: null,
+        availableFunds: 8_000,
+        excessLiquidity: 0,
+        cushion: null,
+        sma: null,
+        buyingPower: 32_000,
+        fullInitialMarginRequirement: null,
+        fullMaintenanceMarginRequirement: null,
+        fullAvailableFunds: 7_000,
+        fullExcessLiquidity: null,
+        lookAheadInitialMarginRequirement: null,
+        lookAheadMaintenanceMarginRequirement: null,
+        lookAheadAvailableFunds: null,
+        lookAheadExcessLiquidity: null,
+        lookAheadNextChange: 1_754_000_000,
+        leverage: null,
+      },
+      securities: {
+        equityWithLoanValue: 10_000,
+        regTEquity: null,
+        regTMargin: 5_000,
+        initialMarginRequirement: null,
+        maintenanceMarginRequirement: 1_500,
+        availableFunds: null,
+        excessLiquidity: null,
+        cushion: null,
+        sma: null,
+        buyingPower: null,
+        fullInitialMarginRequirement: null,
+        fullMaintenanceMarginRequirement: null,
+        fullAvailableFunds: null,
+        fullExcessLiquidity: null,
+        lookAheadInitialMarginRequirement: null,
+        lookAheadMaintenanceMarginRequirement: null,
+        lookAheadAvailableFunds: null,
+        lookAheadExcessLiquidity: null,
+        lookAheadNextChange: null,
+        leverage: 1.25,
+      },
+      commodities: {
+        equityWithLoanValue: null,
+        regTEquity: null,
+        regTMargin: null,
+        initialMarginRequirement: null,
+        maintenanceMarginRequirement: null,
+        availableFunds: null,
+        excessLiquidity: null,
+        cushion: null,
+        sma: null,
+        buyingPower: null,
+        fullInitialMarginRequirement: null,
+        fullMaintenanceMarginRequirement: null,
+        fullAvailableFunds: null,
+        fullExcessLiquidity: null,
+        lookAheadInitialMarginRequirement: null,
+        lookAheadMaintenanceMarginRequirement: null,
+        lookAheadAvailableFunds: null,
+        lookAheadExcessLiquidity: null,
+        lookAheadNextChange: null,
+        leverage: null,
+      },
+    },
+  });
+  assert.equal(client.calls.filter(({ path }) => path === "portfolio/U123/summary").length, 1);
+});
+
 void test("fetchTransactionHistory normalizes and date-filters IBKR transactions", async () => {
   let positionPage = 0;
   const client = new FakeIbkrClient((input) => {

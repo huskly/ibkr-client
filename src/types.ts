@@ -14,11 +14,41 @@ export interface AuthStatus {
   competing: boolean;
 }
 
+export interface AccountMarginSnapshot {
+  equityWithLoanValue: number | null;
+  regTEquity: number | null;
+  regTMargin: number | null;
+  initialMarginRequirement: number | null;
+  maintenanceMarginRequirement: number | null;
+  availableFunds: number | null;
+  excessLiquidity: number | null;
+  cushion: number | null;
+  sma: number | null;
+  buyingPower: number | null;
+  fullInitialMarginRequirement: number | null;
+  fullMaintenanceMarginRequirement: number | null;
+  fullAvailableFunds: number | null;
+  fullExcessLiquidity: number | null;
+  lookAheadInitialMarginRequirement: number | null;
+  lookAheadMaintenanceMarginRequirement: number | null;
+  lookAheadAvailableFunds: number | null;
+  lookAheadExcessLiquidity: number | null;
+  lookAheadNextChange: number | null;
+  leverage: number | null;
+}
+
+export interface AccountMargin {
+  total: AccountMarginSnapshot;
+  securities: AccountMarginSnapshot;
+  commodities: AccountMarginSnapshot;
+}
+
 export interface AccountBalances {
   netLiquidation: number;
   availableFunds: number;
   buyingPower: number;
   cashBalance: number;
+  margin: AccountMargin;
 }
 
 export interface BrokerPosition {

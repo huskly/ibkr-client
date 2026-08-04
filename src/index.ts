@@ -10,6 +10,8 @@ export type {
 } from "./ibkr/requestScheduler.js";
 export { buildOauthConfig } from "./ibkr/oauthConfig.js";
 export type {
+  AccountMargin,
+  AccountMarginSnapshot,
   AccountBalances,
   ActiveDerivativeOptionIdentity,
   ActiveDerivativeOrder,
