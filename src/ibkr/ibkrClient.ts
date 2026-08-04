@@ -3222,40 +3222,16 @@ export class IbkrClient
     }
     const instruments = await this.searchInstruments(symbol);
     const instrument = instruments.find((item) => item.brokerId !== undefined);
-    if (instrument?.brokerId !== undefined) {
-      const conid = parseInt(instrument.brokerId, 10);
-      if (!Number.isNaN(conid)) {
-        return {
-          requestedSymbol: symbol,
-          symbol: instrument.symbol ?? symbol.toUpperCase(),
-          conid,
-          ...(instrument.description !== undefined ? { description: instrument.description } : {}),
-          ...(instrument.exchange !== undefined ? { exchange: instrument.exchange } : {}),
-        };
-      }
-    }
-    // `trsrv/stocks` is equity/ETF-only. Fall back to security-definition search so
-    // non-stock roots (indexes like VIX, futures, etc.) still resolve to a conid.
-    const search = await this.req<IbkrSecdefSearchResult[]>({
-      path: "iserver/secdef/search",
-      params: { symbol: symbol.trim().toUpperCase() },
-    });
-    const candidate = search.find(
-      (item) =>
-        item.conid !== undefined &&
-        item.sections?.some((section) => {
-          const secType = section.secType?.trim().toUpperCase();
-          return secType !== undefined && secType !== "" && secType !== "STK";
-        })
-    );
-    if (candidate?.conid === undefined) return undefined;
-    const fallbackConid = Number(candidate.conid);
-    if (!Number.isSafeInteger(fallbackConid) || fallbackConid <= 0) return undefined;
+    if (instrument?.brokerId === undefined) return undefined;
+    const conid = parseInt(instrument.brokerId, 10);
+    if (Number.isNaN(conid)) return undefined;
 
     return {
       requestedSymbol: symbol,
-      symbol: candidate.symbol ?? symbol.trim().toUpperCase(),
-      conid: fallbackConid,
+      symbol: instrument.symbol ?? symbol.toUpperCase(),
+      conid,
+      ...(instrument.description !== undefined ? { description: instrument.description } : {}),
+      ...(instrument.exchange !== undefined ? { exchange: instrument.exchange } : {}),
     };
   }
 
