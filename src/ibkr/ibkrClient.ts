@@ -65,7 +65,7 @@ import type {
   PriceHistoryRequest,
   TradingDiagnostics,
 } from "../types.js";
-import { ASSET_CLASS_LABELS, toNumber } from "../helpers.js";
+import { ASSET_CLASS_LABELS, toNullableNumber, toNumber } from "../helpers.js";
 import type {
   IbkrAuthStatus,
   IbkrBrokerageAccountsResponse,
@@ -1431,11 +1431,48 @@ export class IbkrClient
       path: `portfolio/${accountId}/summary`,
     });
     const amount = (key: string): number => toNumber(summary[key]?.amount);
+    const marginSnapshot = (suffix: "" | "-s" | "-c") => ({
+      equityWithLoanValue: toNullableNumber(summary[`equitywithloanvalue${suffix}`]?.amount),
+      regTEquity: toNullableNumber(summary[`regtequity${suffix}`]?.amount),
+      regTMargin: toNullableNumber(summary[`regtmargin${suffix}`]?.amount),
+      initialMarginRequirement: toNullableNumber(summary[`initmarginreq${suffix}`]?.amount),
+      maintenanceMarginRequirement: toNullableNumber(summary[`maintmarginreq${suffix}`]?.amount),
+      availableFunds: toNullableNumber(summary[`availablefunds${suffix}`]?.amount),
+      excessLiquidity: toNullableNumber(summary[`excessliquidity${suffix}`]?.amount),
+      cushion: toNullableNumber(summary[`cushion${suffix}`]?.amount),
+      sma: toNullableNumber(summary[`sma${suffix}`]?.amount),
+      buyingPower: toNullableNumber(summary[`buyingpower${suffix}`]?.amount),
+      fullInitialMarginRequirement: toNullableNumber(summary[`fullinitmarginreq${suffix}`]?.amount),
+      fullMaintenanceMarginRequirement: toNullableNumber(
+        summary[`fullmaintmarginreq${suffix}`]?.amount
+      ),
+      fullAvailableFunds: toNullableNumber(summary[`fullavailablefunds${suffix}`]?.amount),
+      fullExcessLiquidity: toNullableNumber(summary[`fullexcessliquidity${suffix}`]?.amount),
+      lookAheadInitialMarginRequirement: toNullableNumber(
+        summary[`lookaheadinitmarginreq${suffix}`]?.amount
+      ),
+      lookAheadMaintenanceMarginRequirement: toNullableNumber(
+        summary[`lookaheadmaintmarginreq${suffix}`]?.amount
+      ),
+      lookAheadAvailableFunds: toNullableNumber(
+        summary[`lookaheadavailablefunds${suffix}`]?.amount
+      ),
+      lookAheadExcessLiquidity: toNullableNumber(
+        summary[`lookaheadexcessliquidity${suffix}`]?.amount
+      ),
+      lookAheadNextChange: toNullableNumber(summary[`lookaheadnextchange${suffix}`]?.amount),
+      leverage: toNullableNumber(summary[`leverage${suffix}`]?.amount),
+    });
     return {
       netLiquidation: amount("netliquidation"),
       availableFunds: amount("availablefunds"),
       buyingPower: amount("buyingpower"),
       cashBalance: amount("totalcashvalue"),
+      margin: {
+        total: marginSnapshot(""),
+        securities: marginSnapshot("-s"),
+        commodities: marginSnapshot("-c"),
+      },
     };
   }
 

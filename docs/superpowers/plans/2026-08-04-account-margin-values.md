@@ -157,7 +157,7 @@ Expected: FAIL because `getAccountBalances()` currently returns no `margin` prop
 
 - [ ] **Step 1: Add a nullable finite-number helper**
 
-Add `toNullableNumber(value: unknown): number | null` to `src/helpers.ts`. Return the number unchanged only when it is finite; parse numeric strings with `Number.parseFloat`; return `null` for all other values.
+Add `toNullableNumber(value: unknown): number | null` to `src/helpers.ts`. Return a number unchanged only when it is finite; trim and parse non-empty numeric strings with `Number`, rejecting trailing junk; return `null` for all other values.
 
 - [ ] **Step 2: Add public margin interfaces**
 

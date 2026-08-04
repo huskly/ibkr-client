@@ -33,3 +33,11 @@ export function toNumber(value: unknown): number {
   }
   return 0;
 }
+
+/** Coerce an unknown provider amount into a finite number or unavailable null. */
+export function toNullableNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const result = Number(value);
+  return Number.isFinite(result) ? result : null;
+}

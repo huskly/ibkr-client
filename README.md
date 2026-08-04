@@ -65,7 +65,11 @@ routing, and caching. Public request types are the caller contract: this package
 use TypeScript and pass values accepted by those types. Provider responses remain untrusted and are
 validated at runtime. Its broker-neutral account API includes:
 
-- `getAccountBalances()` and `getPositions()` for account state.
+- `getAccountBalances()` and `getPositions()` for account state. Account balances include typed
+  `margin.total`, `margin.securities`, and `margin.commodities` snapshots with IBKR's available
+  funds, buying power, excess liquidity, cushion, SMA, equity-with-loan, Reg-T, initial- and
+  maintenance-margin, full, look-ahead, and leverage values. Margin values are `null` when IBKR
+  omits or returns an invalid value; numeric zero remains `0`.
 - `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes.
 - `fetchTransactionHistory()` for normalized portfolio transactions.
 - `fetchOrders()` for normalized live orders, including aggregate `WORKING`
