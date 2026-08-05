@@ -801,6 +801,7 @@ export class IbkrClient
     request: DerivativeOrderGraphRequest,
     knownOrderId?: string
   ): Promise<RecoveryGraphTerminalCandidates> {
+    const graphClientOrderIds = this.graphClientOrderIds(request);
     const byNode = new Map<string, IbkrLiveOrder[]>();
     for (const node of request.nodes) byNode.set(node.memberId, []);
     const linkedOrders: IbkrLiveOrder[] = [];
@@ -899,7 +900,10 @@ export class IbkrClient
             order_id: tradeRecord["parent_order_ref"],
             orderId: tradeRecord["parentOrderRef"],
           });
-          if (orderRef !== request.rootClientOrderId && parentRef !== request.rootClientOrderId) {
+          if (
+            (orderRef === null || !graphClientOrderIds.has(orderRef)) &&
+            (parentRef === undefined || !graphClientOrderIds.has(parentRef))
+          ) {
             continue;
           }
           const accounts = [tradeRecord["account"], tradeRecord["accountCode"]].filter(
@@ -1032,6 +1036,7 @@ export class IbkrClient
     request: DerivativeOrderGraphRequest,
     order: IbkrLiveOrder
   ): boolean {
+    const graphClientOrderIds = this.graphClientOrderIds(request);
     return [
       order.cOID,
       order.order_ref,
@@ -1042,14 +1047,14 @@ export class IbkrClient
     ].some(
       (value) =>
         (typeof value === "string" || typeof value === "number") &&
-        String(value).trim() === request.rootClientOrderId
+        graphClientOrderIds.has(String(value).trim())
     );
   }
 
   private recoveryGraphAttachmentKey(
     request: DerivativeOrderGraphRequest,
     order: IbkrLiveOrder
-  ): "root" | "child" | null {
+  ): string | null {
     const parentIdentity = this.consistentStringAliases(
       order.parentId,
       order.parent_id,
@@ -1058,10 +1063,16 @@ export class IbkrClient
     );
     const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
     if (!parentIdentity.valid || !clientIdentity.valid) return null;
-    const parentId = parentIdentity.value ?? "";
-    if (parentId === request.rootClientOrderId) return "child";
     const clientOrderId = clientIdentity.value;
-    if (clientOrderId === request.rootClientOrderId && parentId === "") return "root";
+    if (clientOrderId === request.rootClientOrderId && parentIdentity.value === undefined) {
+      return "root";
+    }
+    if (
+      parentIdentity.value !== undefined &&
+      this.graphClientOrderIds(request).has(parentIdentity.value)
+    ) {
+      return `parent:${parentIdentity.value}`;
+    }
     return null;
   }
 
@@ -1734,8 +1745,6 @@ export class IbkrClient
       if (node.parentMemberId === undefined) roots += 1;
       else if (!seen.has(node.parentMemberId))
         throw new Error("Graph parents must precede their children");
-      else if (node.parentMemberId !== request.nodes[0]?.memberId)
-        throw new Error("Derivative order graphs support only root-to-child attachments");
       if ("legs" in node) {
         this.validateComboPreview(node);
       } else {
@@ -1775,18 +1784,29 @@ export class IbkrClient
       : `${request.rootClientOrderId}:${node.memberId}`;
   }
 
+  private graphClientOrderIds(request: DerivativeOrderGraphRequest): Set<string> {
+    return new Set(request.nodes.map((node) => this.graphClientOrderId(request, node)));
+  }
+
+  private graphParentClientOrderId(
+    request: DerivativeOrderGraphRequest,
+    node: DerivativeOrderGraphNode
+  ): string | undefined {
+    if (node.parentMemberId === undefined) return undefined;
+    const parent = request.nodes.find(({ memberId }) => memberId === node.parentMemberId);
+    if (parent === undefined) throw new Error("Graph parent evidence was lost after validation");
+    return this.graphClientOrderId(request, parent);
+  }
+
   private graphOrderTicket(
     request: DerivativeOrderGraphRequest,
     node: DerivativeOrderGraphNode
   ): Record<string, unknown> {
-    const parent = request.nodes.find(({ memberId }) => memberId === node.parentMemberId);
-    if (node.parentMemberId !== undefined && parent === undefined) {
-      throw new Error("Graph parent evidence was lost after validation");
-    }
+    const parentClientOrderId = this.graphParentClientOrderId(request, node);
     const identity: Record<string, string> =
-      parent === undefined
+      parentClientOrderId === undefined
         ? { cOID: this.graphClientOrderId(request, node) }
-        : { parentId: this.graphClientOrderId(request, parent) };
+        : { parentId: parentClientOrderId };
     if ("legs" in node)
       return {
         ...this.comboOrderTicket(node),
@@ -1823,11 +1843,12 @@ export class IbkrClient
       order.parent_order_ref
     );
     if (!parentIdentity.valid) return false;
-    if (node.parentMemberId === undefined) {
+    const expectedParentClientOrderId = this.graphParentClientOrderId(request, node);
+    if (expectedParentClientOrderId === undefined) {
       const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
       if (!clientIdentity.valid || clientIdentity.value !== request.rootClientOrderId) return false;
       if (parentIdentity.value !== undefined) return false;
-    } else if (parentIdentity.value !== request.rootClientOrderId) return false;
+    } else if (parentIdentity.value !== expectedParentClientOrderId) return false;
     if ("legs" in node) {
       const liveLegs = this.parseComboLegs(order.conidex);
       const orderType = this.normalizeOrderType(order.order_type ?? order.orderType);

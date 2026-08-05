@@ -5,7 +5,7 @@ Think of a derivative order graph as a small order tree submitted to IBKR as one
 ### The pieces
 
 - **Root**: the primary order, such as entering a put credit spread.
-- **Children**: contingent orders attached to the root, such as a stop-loss or hedge.
+- **Descendants**: contingent orders attached to the root or to an earlier descendant.
 - **Node**: one graph member. It can be a single option order or an atomic multi-leg combo.
 - **`parentMemberId`**: says which order activates/owns this node.
 - **`rootClientOrderId`**: your durable correlation ID for the whole graph.
@@ -14,8 +14,8 @@ Example:
 
 ```text
 pcs-42: entry combo
-├── pcs-42:stop   stop-loss order
-└── pcs-42:hedge  hedge/close order
+└── pcs-42:stop   stop-loss order
+    └── pcs-42:hedge  hedge/close order
 ```
 
 In the request, that might look conceptually like:
@@ -26,12 +26,13 @@ In the request, that might look conceptually like:
   nodes: [
     { memberId: "entry", /* combo spread */ },
     { memberId: "stop", parentMemberId: "entry", /* STOP */ },
-    { memberId: "hedge", parentMemberId: "entry", /* MARKET */ }
+    { memberId: "hedge", parentMemberId: "stop", /* MARKET */ }
   ]
 }
 ```
 
-The current implementation allows one root and direct root-to-child attachments, with up to eight members.
+The implementation allows one root and up to eight members. Each non-root member can name any
+member that comes before it.
 
 ### What IBKR receives
 
@@ -41,13 +42,16 @@ The root gets the caller’s client ID:
 root:  cOID = "pcs-42"
 ```
 
-Children reference the root:
+Each descendant references its exact parent:
 
 ```text
-child: parentId = "pcs-42"
+child:      parentId = "pcs-42"
+grandchild: parentId = "pcs-42:stop"
 ```
 
-Children deliberately do not send their own `cOID`. The client still gives them a derived identity internally, such as `pcs-42:stop`, so it can correlate evidence afterward.
+Descendants do not send their own `cOID`. The client gives each descendant a deterministic identity,
+such as `pcs-42:stop`. A later descendant can use this identity as its `parentId`. The client also
+uses the identity to correlate recovery evidence.
 
 ### Graph versus combo
 
