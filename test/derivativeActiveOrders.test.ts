@@ -21,7 +21,7 @@ const config: IbkrOauth1Config = {
 class FakeIbkrClient extends IbkrClient {
   readonly calls: RequestInput[] = [];
   constructor(
-    private readonly orders: unknown,
+    private readonly orders: unknown | ((input: RequestInput) => unknown),
     private readonly selectedAccount = "U123",
     private readonly switchResponse: unknown = { set: true, acctId: "U123" }
   ) {
@@ -36,7 +36,10 @@ class FakeIbkrClient extends IbkrClient {
       return Promise.resolve({ accounts: ["U123"], selectedAccount: this.selectedAccount } as T);
     }
     if (input.path === "iserver/account") return Promise.resolve(this.switchResponse as T);
-    if (input.path === "iserver/account/orders") return Promise.resolve(this.orders as T);
+    if (input.path === "iserver/account/orders") {
+      const response = typeof this.orders === "function" ? this.orders(input) : this.orders;
+      return Promise.resolve(response as T);
+    }
     throw new Error(`Unexpected request: ${input.path}`);
   }
   protected override wait(_ms: number): Promise<void> {
@@ -104,7 +107,33 @@ void test("lists a typed active single option and preserves lifecycle evidence",
     ],
     uncertainty: [],
   });
-  assert.deepEqual(client.calls.at(-1)?.params, { force: true, accountId: "U123" });
+  assert.deepEqual(client.calls.at(-1)?.params, { accountId: "U123" });
+});
+
+void test("does not miss a live order hidden by a forced empty snapshot", async () => {
+  const liveOrder = {
+    account: "U123",
+    orderId: 99,
+    conid: 101,
+    side: "BUY",
+    totalSize: 1,
+    filled: 0,
+    remaining: 1,
+    status: "Submitted",
+  };
+  const client = new FakeIbkrClient((input: RequestInput) =>
+    input.params?.["force"] === true
+      ? { snapshot: true, orders: [] }
+      : { snapshot: true, orders: [liveOrder] }
+  );
+
+  const orders = await client.listActiveDerivativeOrders("U123");
+
+  assert.deepEqual(
+    orders.map(({ orderId }) => orderId),
+    ["99"]
+  );
+  assert.deepEqual(client.calls.at(-1)?.params, { accountId: "U123" });
 });
 
 void test("treats a null conidex as absent for a single-leg order", async () => {

@@ -434,6 +434,21 @@ test("recovers exact graph from root or a known broker identity", async () => {
     (await client.recoverDerivativeOrderGraph({ accountId: "U1", orderId: "11" }, graph())).state,
     "accepted"
   );
+  assert.deepEqual(
+    client.calls
+      .filter(({ path }) => path === "iserver/account/orders")
+      .map(({ params }) => params),
+    [
+      { accountId: "U1" },
+      { accountId: "U1", filters: "filled" },
+      { accountId: "U1", filters: "cancelled" },
+      { accountId: "U1", filters: "inactive" },
+      { accountId: "U1" },
+      { accountId: "U1", filters: "filled" },
+      { accountId: "U1", filters: "cancelled" },
+      { accountId: "U1", filters: "inactive" },
+    ]
+  );
 });
 
 test("recovers an active grandchild through its exact parent identity", async () => {
