@@ -284,6 +284,12 @@ void test("customer order IDs resolve the same typed lifecycle", async () => {
   assert.equal(result.orderId, "777");
   assert.equal(result.clientOrderId, "huskly-20260729-abc");
   assert.equal(result.status, "WORKING");
+  assert.deepEqual(
+    client.calls
+      .filter(({ path }) => path === "iserver/account/orders")
+      .map(({ params }) => params),
+    [{ accountId: "U123" }]
+  );
 });
 
 void test("trade reads expose per-leg executions and commissions", async () => {
