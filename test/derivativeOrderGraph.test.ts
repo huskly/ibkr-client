@@ -184,9 +184,9 @@ test("submits combo, STOP, and MARKET graph with exact activation links", async 
     ?.data as { orders: Record<string, unknown>[] };
   assert.equal(data.orders[0]?.["cOID"], "pcs-42");
   assert.equal(data.orders[1]?.["parentId"], "pcs-42");
-  assert.equal("cOID" in data.orders[1]!, false);
+  assert.equal(data.orders[1]?.["cOID"], "pcs-42:stop");
   assert.equal(data.orders[2]?.["parentId"], "pcs-42");
-  assert.equal("cOID" in data.orders[2]!, false);
+  assert.equal(data.orders[2]?.["cOID"], "pcs-42:hedge");
   assert.equal(data.orders[2]?.["orderType"], "MKT");
   assert.equal("price" in data.orders[2]!, false);
 });
@@ -320,9 +320,43 @@ test("submits a root, child, and grandchild with exact activation links", async 
   );
   const data = client.calls.find((call) => call.method === "POST" && call.path.endsWith("/orders"))
     ?.data as { orders: Record<string, unknown>[] };
-  assert.equal(data.orders[0]?.["cOID"], "pcs-42");
-  assert.equal(data.orders[1]?.["parentId"], "pcs-42");
-  assert.equal(data.orders[2]?.["parentId"], "pcs-42:stop");
+  assert.deepEqual(
+    data.orders.map((order) => [order["cOID"], order["parentId"]]),
+    [
+      ["pcs-42", undefined],
+      ["pcs-42:stop", "pcs-42"],
+      ["pcs-42:hedge", "pcs-42:stop"],
+    ]
+  );
+});
+
+test("retains the readable paper rejection for an unregistered grandchild parent ID", async () => {
+  const text = "Order couldn't be submitted: Parent order ID=raw-probe-1:root_1 isn't recognized.";
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          { order_id: "-1", order_status: "Failed", warning_message: "-1", text },
+          {
+            order_id: "2088581830",
+            order_status: "Inactive",
+            local_order_id: "raw-probe-1",
+          },
+        ]
+      : session(input)
+  );
+
+  const result = await client.submitDerivativeOrderGraph(nestedGraph());
+
+  assert.equal(result.state, "recovery_required");
+  if (result.state !== "recovery_required") return;
+  assert.equal(result.errors[0]?.message, text);
+  assert.deepEqual(result.errors[0]?.details, {
+    order_id: "-1",
+    order_status: "Failed",
+    warning_message: "-1",
+    text,
+  });
+  assert.match(result.reasons[0] ?? "", /Parent order ID=raw-probe-1:root_1 isn't recognized/);
 });
 
 test("recovers exact graph from root or a known broker identity", async () => {

@@ -321,8 +321,9 @@ to guard against committed secrets.
 broker-hosted derivative protection. A graph may combine atomic two-leg LIMIT combos with
 single-option LIMIT, STOP, and MARKET members. Every node has a caller-stable `memberId`; exactly
 one root carries `rootClientOrderId`. Each later node uses `parentMemberId` to name a member that
-comes before it. IBKR receives the root client order ID and the deterministic client order ID of
-each exact parent. This means that a graph can contain children, grandchildren, and deeper descendants.
+comes before it. IBKR receives a deterministic `cOID` for every node. A non-root node also receives
+the deterministic `parentId` of its exact parent. This means that a graph can contain children,
+grandchildren, and deeper descendants.
 Accepted and fail-closed results retain each node's immutable request evidence (contracts/conids,
 signed ratios, side, quantity, TIF, session, and prices), stable depth role, parent member/broker
 IDs, and every broker order ID. Conids remain correlation evidence only; callers still own durable
@@ -335,7 +336,8 @@ attempted once after revalidating the account's authentication and competing-ses
 chained and unknown warnings remain pending for the caller, and mixed, partial,
 duplicated, terminal, malformed, or ambiguous acknowledgements return `recovery_required`. Broker
 IDs from ambiguous acknowledgements are retained as uncorrelated responses rather than assigned to
-nodes by position.
+nodes by position. A failed synchronous response retains a readable `text` or `warning_message` in
+`errors` and recovery reasons when IBKR supplies one.
 `recoverDerivativeOrderGraph(...)` reconstructs the exact graph from its root client ID, any
 known member broker ID, and terminal evidence keyed by the durable root client ID. It searches
 filtered filled, canceled, and inactive order snapshots before using recent execution evidence;

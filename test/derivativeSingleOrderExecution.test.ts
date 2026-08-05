@@ -586,7 +586,7 @@ void test("array-contained contingent rejection evidence requires recovery", asy
   assert.equal(result.state, "recovery_required");
   if (result.state === "recovery_required") {
     assert.equal(result.errors[0]?.message, "Child rejected");
-    assert.match(result.reasons[0] ?? "", /0 of 2 expected order acknowledgements/);
+    assert.equal(result.reasons[0], "Child rejected");
   }
 });
 
