@@ -201,6 +201,8 @@ export interface IbkrOrderRejectedResponse {
   statusCode?: number;
   code?: string | number;
   message?: string;
+  text?: string;
+  warning_message?: string;
   [key: string]: unknown;
 }
 

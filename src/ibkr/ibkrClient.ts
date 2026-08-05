@@ -1803,10 +1803,10 @@ export class IbkrClient
     node: DerivativeOrderGraphNode
   ): Record<string, unknown> {
     const parentClientOrderId = this.graphParentClientOrderId(request, node);
-    const identity: Record<string, string> =
-      parentClientOrderId === undefined
-        ? { cOID: this.graphClientOrderId(request, node) }
-        : { parentId: parentClientOrderId };
+    const identity: Record<string, string> = {
+      cOID: this.graphClientOrderId(request, node),
+      ...(parentClientOrderId === undefined ? {} : { parentId: parentClientOrderId }),
+    };
     if ("legs" in node)
       return {
         ...this.comboOrderTicket(node),
@@ -1836,6 +1836,12 @@ export class IbkrClient
     node: DerivativeOrderGraphNode,
     order: IbkrLiveOrder
   ): boolean {
+    const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
+    if (!clientIdentity.valid) return false;
+    const expectedClientOrderId = this.graphClientOrderId(request, node);
+    if (clientIdentity.value !== undefined && clientIdentity.value !== expectedClientOrderId) {
+      return false;
+    }
     const parentIdentity = this.consistentStringAliases(
       order.parentId,
       order.parent_id,
@@ -1845,8 +1851,7 @@ export class IbkrClient
     if (!parentIdentity.valid) return false;
     const expectedParentClientOrderId = this.graphParentClientOrderId(request, node);
     if (expectedParentClientOrderId === undefined) {
-      const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
-      if (!clientIdentity.valid || clientIdentity.value !== request.rootClientOrderId) return false;
+      if (clientIdentity.value !== expectedClientOrderId) return false;
       if (parentIdentity.value !== undefined) return false;
     } else if (parentIdentity.value !== expectedParentClientOrderId) return false;
     if ("legs" in node) {
@@ -2187,7 +2192,10 @@ export class IbkrClient
     const distinct =
       new Set(decoded.orders.map(({ orderId }) => orderId)).size === decoded.orders.length;
     const canCorrelatePositionally =
-      cleanOrders && distinct && decoded.orders.length === request.nodes.length;
+      decoded.warnings.length === 0 &&
+      decoded.unrecognizedResponses.length === 0 &&
+      distinct &&
+      decoded.orders.length === request.nodes.length;
     const members = this.attachGraphParentOrderIds(
       request.nodes.map((node, index) => {
         const order = canCorrelatePositionally ? decoded.orders[index] : undefined;
@@ -2277,7 +2285,6 @@ export class IbkrClient
       decoded.orders.length === 2 &&
       hasDistinctBrokerOrderIds &&
       decoded.warnings.length === 0 &&
-      decoded.errors.length === 0 &&
       decoded.unrecognizedResponses.length === 0;
     const orders = decoded.orders.map<DerivativeContingentOrderEvidence>((order, index) => ({
       ...order,
@@ -2386,6 +2393,18 @@ export class IbkrClient
         }
         recognized = true;
       }
+      const orderStatus = record["order_status"] ?? record["orderStatus"];
+      const canonicalOrderStatus = this.canonicalIbkrOrderStatus(orderStatus);
+      if (
+        (record["error"] === undefined || record["error"] === null) &&
+        (canonicalOrderStatus === "FAILED" || canonicalOrderStatus === "REJECTED") &&
+        this.isMeaningfulBrokerError(record["text"] ?? record["warning_message"], record)
+      ) {
+        decoded.errors.push(
+          this.normalizeBrokerError(record["text"] ?? record["warning_message"], record)
+        );
+        recognized = true;
+      }
       const hasOrderId = "order_id" in record || "orderId" in record;
       const rawOrderId = record["order_id"] ?? record["orderId"];
       const orderId =
@@ -2395,7 +2414,6 @@ export class IbkrClient
             ? String(rawOrderId)
             : null;
       if (orderId !== null) {
-        const orderStatus = record["order_status"] ?? record["orderStatus"];
         if (
           typeof orderStatus === "string" &&
           this.canonicalIbkrOrderStatus(orderStatus) === "PENDING_CANCEL"
@@ -2461,6 +2479,8 @@ export class IbkrClient
     if (pendingCancelOrderId !== undefined) {
       return `Order ${pendingCancelOrderId} has a pending cancellation`;
     }
+    const error = decoded.errors[0];
+    if (error !== undefined) return error.message;
     const terminal = decoded.orders.find(
       ({ status }) => status === "REJECTED" || status === "CANCELED"
     );
@@ -2495,10 +2515,14 @@ export class IbkrClient
     const nested = typeof error === "object" && error !== null ? error : undefined;
     const nestedMessage = nested ? (nested as { message?: unknown }).message : undefined;
     const responseMessage = response["message"];
+    const responseText = response["text"];
+    const responseWarningMessage = response["warning_message"];
     const message =
       (typeof nestedMessage === "string" && nestedMessage.trim()) ||
       (typeof error === "string" && error.trim()) ||
       (typeof responseMessage === "string" && responseMessage.trim()) ||
+      (typeof responseText === "string" && responseText.trim()) ||
+      (typeof responseWarningMessage === "string" && responseWarningMessage.trim()) ||
       "IBKR rejected the order";
     const nestedCode = nested ? (nested as { code?: unknown }).code : undefined;
     const responseCode = response["code"];
@@ -2520,7 +2544,13 @@ export class IbkrClient
   ): boolean {
     const nested = typeof error === "object" && error !== null ? error : undefined;
     const nestedRecord = nested as Readonly<Record<string, unknown>> | undefined;
-    const messages = [error, nestedRecord?.["message"], response["message"]];
+    const messages = [
+      error,
+      nestedRecord?.["message"],
+      response["message"],
+      response["text"],
+      response["warning_message"],
+    ];
     if (messages.some((value) => typeof value === "string" && value.trim())) return true;
 
     const code = nestedRecord?.["code"] ?? response["code"];
