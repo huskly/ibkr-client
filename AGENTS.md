@@ -12,6 +12,7 @@
 - This is a public repository, so make any changes with that constraint in mind, the goal is for it
   to be a general purpose ibkr client.
 - Make sure the project README.md is kept up to date with features and behavior changes.
+- Always talk and write documentation markdown files in ASD-STE100 Simplified Technical English.
 
 ## Codex specific
 
