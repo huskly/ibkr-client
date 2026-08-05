@@ -1836,6 +1836,12 @@ export class IbkrClient
     node: DerivativeOrderGraphNode,
     order: IbkrLiveOrder
   ): boolean {
+    const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
+    if (!clientIdentity.valid) return false;
+    const expectedClientOrderId = this.graphClientOrderId(request, node);
+    if (clientIdentity.value !== undefined && clientIdentity.value !== expectedClientOrderId) {
+      return false;
+    }
     const parentIdentity = this.consistentStringAliases(
       order.parentId,
       order.parent_id,
@@ -1845,8 +1851,7 @@ export class IbkrClient
     if (!parentIdentity.valid) return false;
     const expectedParentClientOrderId = this.graphParentClientOrderId(request, node);
     if (expectedParentClientOrderId === undefined) {
-      const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
-      if (!clientIdentity.valid || clientIdentity.value !== request.rootClientOrderId) return false;
+      if (clientIdentity.value !== expectedClientOrderId) return false;
       if (parentIdentity.value !== undefined) return false;
     } else if (parentIdentity.value !== expectedParentClientOrderId) return false;
     if ("legs" in node) {
@@ -2187,7 +2192,10 @@ export class IbkrClient
     const distinct =
       new Set(decoded.orders.map(({ orderId }) => orderId)).size === decoded.orders.length;
     const canCorrelatePositionally =
-      cleanOrders && distinct && decoded.orders.length === request.nodes.length;
+      decoded.warnings.length === 0 &&
+      decoded.unrecognizedResponses.length === 0 &&
+      distinct &&
+      decoded.orders.length === request.nodes.length;
     const members = this.attachGraphParentOrderIds(
       request.nodes.map((node, index) => {
         const order = canCorrelatePositionally ? decoded.orders[index] : undefined;
@@ -2277,7 +2285,6 @@ export class IbkrClient
       decoded.orders.length === 2 &&
       hasDistinctBrokerOrderIds &&
       decoded.warnings.length === 0 &&
-      decoded.errors.length === 0 &&
       decoded.unrecognizedResponses.length === 0;
     const orders = decoded.orders.map<DerivativeContingentOrderEvidence>((order, index) => ({
       ...order,
@@ -2389,7 +2396,7 @@ export class IbkrClient
       const orderStatus = record["order_status"] ?? record["orderStatus"];
       const canonicalOrderStatus = this.canonicalIbkrOrderStatus(orderStatus);
       if (
-        record["error"] === undefined &&
+        (record["error"] === undefined || record["error"] === null) &&
         (canonicalOrderStatus === "FAILED" || canonicalOrderStatus === "REJECTED") &&
         this.isMeaningfulBrokerError(record["text"] ?? record["warning_message"], record)
       ) {

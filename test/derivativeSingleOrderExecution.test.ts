@@ -742,7 +742,7 @@ void test("contingent result rejects when an order status is REJECTED", async ()
     if (input.path === "iserver/account/U123/orders") {
       return [
         { order_id: "777", order_status: "PreSubmitted" },
-        { order_id: "888", order_status: "Inactive" },
+        { order_id: "888", order_status: "Rejected", text: "Child order was rejected" },
       ];
     }
     return sessionResponse(input);
@@ -766,9 +766,14 @@ void test("contingent result rejects when an order status is REJECTED", async ()
   assert.equal(result.state, "recovery_required");
   if (result.state === "recovery_required") {
     assert.deepEqual(
-      result.orders.map(({ orderId }) => orderId),
-      ["777", "888"]
+      result.orders.map(({ orderId, role }) => [orderId, role]),
+      [
+        ["777", "parent"],
+        ["888", "child"],
+      ]
     );
+    assert.equal(result.errors[0]?.message, "Child order was rejected");
+    assert.deepEqual(result.unrecognizedResponses, []);
   }
 });
 
