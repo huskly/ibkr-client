@@ -9,5 +9,8 @@ dist/
 # Local Claude Code settings
 .claude/settings.local.json
 
+# Local Git worktrees
+.worktrees/
+
 # Never commit keys
 *.pem
