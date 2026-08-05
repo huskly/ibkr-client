@@ -64,6 +64,7 @@ function equityOptionExecutionRequest(): DerivativeComboExecutionRequest {
       { contract: contract(222, 625, "OPT"), ratio: -1 },
     ],
     quantity: 1,
+    orderType: "LMT",
     priceEffect: "CREDIT",
     limit: 0.96,
     tif: "DAY",
@@ -80,6 +81,7 @@ function executionRequest(): DerivativeComboExecutionRequest {
       { contract: contract(892767774, 26600), ratio: -1 },
     ],
     quantity: 1,
+    orderType: "LMT",
     priceEffect: "CREDIT",
     limit: 39,
     tif: "DAY",
@@ -134,6 +136,79 @@ void test("atomic submission includes exact ratios, signed credit, client ID, an
     ],
   });
   assert.equal(client.calls.filter(({ path }) => path === "iserver/account/U123/orders").length, 1);
+});
+
+void test("combo STOP submission carries a signed stop price and reversed ratios", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/orders") {
+      return [{ order_id: "778", order_status: "PreSubmitted" }];
+    }
+    return sessionResponse(input);
+  });
+
+  const result = await client.submitDerivativeCombo({
+    accountId: "U123",
+    legs: [
+      { contract: contract(892767804, 26400), ratio: -1 },
+      { contract: contract(892767774, 26600), ratio: 1 },
+    ],
+    quantity: 1,
+    orderType: "STP",
+    priceEffect: "DEBIT",
+    stopPrice: 41,
+    tif: "GTC",
+    session: "REGULAR",
+    clientOrderId: "huskly-20260729-abc-stop",
+    extOperator: "felipecsl",
+    manualIndicator: true,
+  });
+  assert.equal(result.state, "accepted");
+  const placement = client.calls.find(({ path }) => path === "iserver/account/U123/orders");
+  assert.deepEqual(placement?.data, {
+    orders: [
+      {
+        acctId: "U123",
+        conidex: "28812380@CME;;;892767804/-1,892767774/1",
+        orderType: "STP",
+        price: 41,
+        side: "BUY",
+        tif: "GTC",
+        quantity: 1,
+        outsideRTH: false,
+        cOID: "huskly-20260729-abc-stop",
+        extOperator: "felipecsl",
+        manualIndicator: true,
+      },
+    ],
+  });
+});
+
+void test("combo STOP rejects a non-positive stop price", async () => {
+  const client = new FakeIbkrClient(() => {
+    throw new Error("broker must not be called");
+  });
+
+  await assert.rejects(
+    () =>
+      client.submitDerivativeCombo({
+        accountId: "U123",
+        legs: [
+          { contract: contract(892767804, 26400), ratio: -1 },
+          { contract: contract(892767774, 26600), ratio: 1 },
+        ],
+        quantity: 1,
+        orderType: "STP",
+        priceEffect: "DEBIT",
+        stopPrice: 0,
+        tif: "GTC",
+        session: "REGULAR",
+        clientOrderId: "huskly-20260729-abc-stop",
+        extOperator: "felipecsl",
+        manualIndicator: true,
+      }),
+    /Combo stop order requires a positive stop price/
+  );
+  assert.equal(client.calls.length, 0);
 });
 
 void test("equity-option submission omits CME operator metadata", async () => {

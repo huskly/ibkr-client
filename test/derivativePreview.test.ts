@@ -52,9 +52,7 @@ function contract(conid: number, strike: number): DerivativeContract {
   };
 }
 
-function request(
-  overrides: Partial<DerivativeComboPreviewRequest> = {}
-): DerivativeComboPreviewRequest {
+function request(): DerivativeComboPreviewRequest {
   return {
     accountId: "U123",
     legs: [
@@ -62,11 +60,11 @@ function request(
       { contract: contract(892767774, 26600), ratio: -1 },
     ],
     quantity: 1,
+    orderType: "LMT",
     priceEffect: "CREDIT",
     limit: 39,
     tif: "DAY",
     session: "REGULAR",
-    ...overrides,
   };
 }
 
