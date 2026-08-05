@@ -171,9 +171,9 @@ void test("futures-option submission fails before broker access without CME meta
   assert.equal(client.calls.length, 0);
 });
 
-void test("warning replies distinguish known chains from unknown warnings", async () => {
+void test("warning replies classify well-formed IDs and reject malformed IDs", async () => {
   const responses = [
-    [{ id: "unknown", message: ["Unclassified broker warning"], messageIds: ["x999"] }],
+    [{ id: "malformed", message: ["Malformed warning"], messageIds: ["x999", 7] }],
     [{ id: "other-known", message: ["Stop order disclosure"], messageIds: ["o10331"] }],
     [{ id: "known", message: ["Percentage constraint"], messageIds: ["o163"] }],
     [{ order_id: "777", order_status: "PreSubmitted" }],
@@ -183,8 +183,8 @@ void test("warning replies distinguish known chains from unknown warnings", asyn
     throw new Error(`Unexpected request ${input.path}`);
   });
 
-  const unknown = await client.acknowledgeOrderWarning({ replyId: "unknown", confirmed: true });
-  assert.equal(unknown.state === "warning" && unknown.warnings[0]?.known, false);
+  const malformed = await client.acknowledgeOrderWarning({ replyId: "malformed", confirmed: true });
+  assert.equal(malformed.state === "warning" && malformed.warnings[0]?.known, false);
   const otherKnown = await client.acknowledgeOrderWarning({
     replyId: "other-known",
     confirmed: true,

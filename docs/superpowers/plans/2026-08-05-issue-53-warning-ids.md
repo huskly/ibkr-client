@@ -29,11 +29,11 @@
 
 - [ ] **Step 1: Change the focused fixture to include a valid non-`o163` warning ID**
 
-Keep the existing `x999` fixture to prove an unrecognized string ID remains unknown. Add a separate `o10331` reply fixture with a valid warning message and `messageIds: ["o10331"]`, then assert that the decoded warning has `known === true`.
+Use a mixed-type `messageIds` fixture to prove malformed warning data remains unknown. Add a separate `o10331` reply fixture with a valid warning message and `messageIds: ["o10331"]`, then assert that the decoded warning has `known === true`.
 
 ```ts
 const responses = [
-  [{ id: "unknown", message: ["Unclassified broker warning"], messageIds: ["x999"] }],
+  [{ id: "malformed", message: ["Malformed warning"], messageIds: ["x999", 7] }],
   [{ id: "other-known", message: ["Stop order disclosure"], messageIds: ["o10331"] }],
   [{ id: "known", message: ["Percentage constraint"], messageIds: ["o163"] }],
   [{ order_id: "777", order_status: "PreSubmitted" }],
@@ -102,7 +102,7 @@ yarn tsc --noEmit -p tsconfig.test.json
 node --import tsx --test test/derivativeExecution.test.ts
 ```
 
-Expected: all tests in `test/derivativeExecution.test.ts` pass, including the `o10331` and `x999` assertions.
+Expected: all tests in `test/derivativeExecution.test.ts` pass, including the `o10331` and malformed-ID assertions.
 
 - [ ] **Step 5: Commit the implementation and documentation**
 
