@@ -406,7 +406,7 @@ export interface DerivativeOrderGraphRequest {
   accountId: string;
   /** Durable caller correlation for the root and the complete graph. */
   rootClientOrderId: string;
-  /** Parent nodes must precede children; graphs are deliberately bounded to eight members. */
+  /** Each non-root node can name any earlier member; graphs are bounded to eight members. */
   nodes: readonly DerivativeOrderGraphNode[];
 }
 

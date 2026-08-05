@@ -320,13 +320,13 @@ to guard against committed secrets.
 `submitDerivativeOrderGraph(...)` is the bounded (one through eight member) bracket API for
 broker-hosted derivative protection. A graph may combine atomic two-leg LIMIT combos with
 single-option LIMIT, STOP, and MARKET members. Every node has a caller-stable `memberId`; exactly
-one root carries `rootClientOrderId`, and each later node names that root with
-`parentMemberId`. Graphs are deliberately limited to one attachment level because IBKR child
-tickets omit `cOID` and therefore cannot provide a stable identity for attaching grandchildren. Accepted and
-fail-closed results retain each node's immutable request evidence (contracts/conids, signed ratios,
-side, quantity, TIF, session, and prices), stable depth role, parent member/broker IDs, and every
-broker order ID. Conids remain correlation evidence only; callers still own durable semantic option
-identity.
+one root carries `rootClientOrderId`. Each later node uses `parentMemberId` to name a member that
+comes before it. IBKR receives the root client order ID and the deterministic client order ID of
+each exact parent. This means that a graph can contain children, grandchildren, and deeper descendants.
+Accepted and fail-closed results retain each node's immutable request evidence (contracts/conids,
+signed ratios, side, quantity, TIF, session, and prices), stable depth role, parent member/broker
+IDs, and every broker order ID. Conids remain correlation evidence only; callers still own durable
+semantic option identity.
 
 Warnings are never acknowledged automatically. A warning result contains a JSON-safe
 `continuation` with the exact reply ID, full graph request, and all correlation accumulated so far;
@@ -342,10 +342,10 @@ filtered filled, canceled, and inactive order snapshots before using recent exec
 an exact broker ID is still queried even if execution history is unavailable.
 It requires complete active and filtered terminal snapshot markers, traverses both nested child
 collection aliases, and rejects contradictory aliases within a broker response before correlation.
-It correlates the root by the transmitted client ID and its complete ticket, and children by their
-transmitted parent ID plus contract or complete combo legs, order type, side, quantity, applicable
-signed limit or stop price, TIF, and regular/overnight session; synthesized child client IDs are not
-expected from the broker. Recovery accepts terminal members when the evidence is
+It correlates the root by the transmitted client ID and its complete ticket. It correlates each
+descendant by the deterministic client order ID of its exact parent, plus the contract or complete
+combo legs, order type, side, quantity, applicable signed limit or stop price, TIF, and
+regular/overnight session. Recovery accepts terminal members when the evidence is
 non-ambiguous and complete, preserves broker terminal states for each member, and fails closed when
 evidence is partial, duplicated, ambiguous, unknown, includes an unexpected attached order, or cannot
 prove required account, broker ID, or parent identity links.

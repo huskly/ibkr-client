@@ -124,11 +124,11 @@ const recoveredTerminalRootStatus = (orderId: string): Record<string, unknown> =
   tif: "DAY",
   outsideRTH: false,
 });
-const recoveredTerminalOrderStatus = (): Record<string, unknown> => ({
+const recoveredTerminalOrderStatus = (parentId = "pcs-42"): Record<string, unknown> => ({
   account: "U1",
   orderId: "12",
   order_id: "12",
-  parentId: "pcs-42",
+  parentId,
   order_status: "Filled",
   conid: 2,
   orderType: "MKT",
@@ -318,9 +318,8 @@ test("submits a root, child, and grandchild with exact activation links", async 
       ["grandchild", "stop", "11"],
     ]
   );
-  const data = client.calls.find(
-    (call) => call.method === "POST" && call.path.endsWith("/orders")
-  )?.data as { orders: Record<string, unknown>[] };
+  const data = client.calls.find((call) => call.method === "POST" && call.path.endsWith("/orders"))
+    ?.data as { orders: Record<string, unknown>[] };
   assert.equal(data.orders[0]?.["cOID"], "pcs-42");
   assert.equal(data.orders[1]?.["parentId"], "pcs-42");
   assert.equal(data.orders[2]?.["parentId"], "pcs-42:stop");
@@ -369,6 +368,97 @@ test("recovers exact graph from root or a known broker identity", async () => {
     (await client.recoverDerivativeOrderGraph({ accountId: "U1", orderId: "11" }, graph())).state,
     "accepted"
   );
+});
+
+test("recovers an active grandchild through its exact parent identity", async () => {
+  const client = new Fake((input) =>
+    input.path === "iserver/account/orders"
+      ? {
+          orders: [
+            liveRoot(),
+            {
+              account: "U1",
+              order_id: "11",
+              order_status: "Submitted",
+              conid: 1,
+              orderType: "STP",
+              side: "BUY",
+              totalSize: 1,
+              stopPrice: 2.4,
+              parentId: "pcs-42",
+            },
+            {
+              account: "U1",
+              order_id: "12",
+              order_status: "Submitted",
+              conid: 2,
+              orderType: "MKT",
+              side: "SELL",
+              totalSize: 1,
+              parentId: "pcs-42:stop",
+            },
+          ],
+        }
+      : session(input)
+  );
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    nestedGraph()
+  );
+  assert.equal(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId, parentOrderId }) => [
+      memberId,
+      orderId,
+      parentOrderId,
+    ]),
+    [
+      ["entry", "10", null],
+      ["stop", "11", "10"],
+      ["hedge", "12", "11"],
+    ]
+  );
+});
+
+test("nested recovery rejects a flattened grandchild parent identity", async () => {
+  const client = new Fake((input) =>
+    input.path === "iserver/account/orders"
+      ? {
+          orders: [
+            liveRoot(),
+            {
+              account: "U1",
+              order_id: "11",
+              order_status: "Submitted",
+              conid: 1,
+              orderType: "STP",
+              side: "BUY",
+              totalSize: 1,
+              stopPrice: 2.4,
+              parentId: "pcs-42",
+            },
+            {
+              account: "U1",
+              order_id: "12",
+              order_status: "Submitted",
+              conid: 2,
+              orderType: "MKT",
+              side: "SELL",
+              totalSize: 1,
+              parentId: "pcs-42",
+            },
+          ],
+        }
+      : session(input)
+  );
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    nestedGraph()
+  );
+  assert.equal(result.state, "recovery_required");
+  assert.equal(result.members[2]?.orderId, null);
 });
 
 test("recovery preserves partial fills reported by live orders", async () => {
@@ -663,19 +753,20 @@ test("recovers mixed active and terminal descendants in one graph", async () => 
         {
           execution_id: "exec-hedge",
           account: "U1",
-          order_ref: "pcs-42",
+          parent_order_ref: "pcs-42:stop",
           order_id: "12",
           conid: 2,
           size: 1,
         },
       ];
-    if (input.path === "iserver/account/order/status/12") return recoveredTerminalOrderStatus();
+    if (input.path === "iserver/account/order/status/12")
+      return recoveredTerminalOrderStatus("pcs-42:stop");
     return session(input);
   });
 
   const result = await client.recoverDerivativeOrderGraph(
     { accountId: "U1", rootClientOrderId: "pcs-42" },
-    graph()
+    nestedGraph()
   );
   assert.equal(result.state, "accepted");
   if (result.state !== "accepted") return;
