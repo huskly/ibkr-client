@@ -190,7 +190,6 @@ const IBKR_WORKING_STATUSES = new Set([
   "PENDING_CANCEL",
 ]);
 const RECOVERY_TERMINAL_ORDER_FILTERS = ["filled", "cancelled", "inactive"] as const;
-const KNOWN_ORDER_WARNING_IDS = new Set(["o163"]);
 
 interface DecodedOrderSubmission {
   responseIsArray: boolean;
@@ -2378,7 +2377,7 @@ export class IbkrClient
           known:
             Array.isArray(rawMessageIds) &&
             rawMessageIds.length > 0 &&
-            rawMessageIds.every((id) => typeof id === "string" && KNOWN_ORDER_WARNING_IDS.has(id)),
+            rawMessageIds.every((id) => typeof id === "string"),
         });
         recognized = true;
       } else if ("id" in record) {

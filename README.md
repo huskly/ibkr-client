@@ -198,8 +198,9 @@ return `recovery_required`, because they do not prove that every submitted ticke
   all-or-none response: `accepted` therefore requires exactly two non-failure acknowledgements,
   while mixed, incomplete, pending-cancel, canceled, rejected, unknown, or malformed evidence is
   returned as `recovery_required` with every observed broker order ID retained.
-- `acknowledgeOrderWarning(...)` replies once to an exact broker warning ID. Only documented
-  warning message IDs are marked `known`; consumers must stop on unknown warnings.
+- `acknowledgeOrderWarning(...)` replies once to an exact broker warning ID. Warnings with a
+  non-empty array of string message IDs are marked `known`; callers must still approve exact IDs,
+  and malformed or missing IDs remain unknown.
 - A warning from `submitDerivativeContingentOrders(...)` includes a typed `continuation` containing
   the exact reply ID and parent client ID. Pass that object unchanged to
   `acknowledgeContingentOrderWarning(...)`; its result retains both broker acknowledgements or
