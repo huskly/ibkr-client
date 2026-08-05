@@ -103,6 +103,11 @@ const graphTwoNodes = (): DerivativeOrderGraphRequest => {
     nodes: [full.nodes[0]!, full.nodes[1]!] as const,
   };
 };
+const nestedGraph = (): DerivativeOrderGraphRequest => {
+  const request = graph();
+  request.nodes[2]!.parentMemberId = "stop";
+  return request;
+};
 const recoveredTerminalRootStatus = (orderId: string): Record<string, unknown> => ({
   account: "U1",
   order_id: orderId,
@@ -289,17 +294,36 @@ test("invalid graph fails before broker access and transport placement is attemp
   );
 });
 
-test("rejects descendants that IBKR cannot attach to an unidentified child", async () => {
-  const invalid = graph();
-  invalid.nodes[2]!.parentMemberId = "stop";
-  const client = new Fake(() => {
-    throw new Error("broker access must not occur");
-  });
-  await assert.rejects(
-    () => client.submitDerivativeOrderGraph(invalid),
-    /only root-to-child attachments/
+test("submits a root, child, and grandchild with exact activation links", async () => {
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          { order_id: "10", order_status: "Submitted" },
+          { order_id: "11", order_status: "Submitted" },
+          { order_id: "12", order_status: "Submitted" },
+        ]
+      : session(input)
   );
-  assert.equal(client.calls.length, 0);
+  const result = await client.submitDerivativeOrderGraph(nestedGraph());
+  assert.equal(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map(({ role, parentMemberId, parentOrderId }) => [
+      role,
+      parentMemberId,
+      parentOrderId,
+    ]),
+    [
+      ["root", null, null],
+      ["child", "entry", "10"],
+      ["grandchild", "stop", "11"],
+    ]
+  );
+  const data = client.calls.find(
+    (call) => call.method === "POST" && call.path.endsWith("/orders")
+  )?.data as { orders: Record<string, unknown>[] };
+  assert.equal(data.orders[0]?.["cOID"], "pcs-42");
+  assert.equal(data.orders[1]?.["parentId"], "pcs-42");
+  assert.equal(data.orders[2]?.["parentId"], "pcs-42:stop");
 });
 
 test("recovers exact graph from root or a known broker identity", async () => {

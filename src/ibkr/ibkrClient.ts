@@ -1734,8 +1734,6 @@ export class IbkrClient
       if (node.parentMemberId === undefined) roots += 1;
       else if (!seen.has(node.parentMemberId))
         throw new Error("Graph parents must precede their children");
-      else if (node.parentMemberId !== request.nodes[0]?.memberId)
-        throw new Error("Derivative order graphs support only root-to-child attachments");
       if ("legs" in node) {
         this.validateComboPreview(node);
       } else {
@@ -1775,18 +1773,25 @@ export class IbkrClient
       : `${request.rootClientOrderId}:${node.memberId}`;
   }
 
+  private graphParentClientOrderId(
+    request: DerivativeOrderGraphRequest,
+    node: DerivativeOrderGraphNode
+  ): string | undefined {
+    if (node.parentMemberId === undefined) return undefined;
+    const parent = request.nodes.find(({ memberId }) => memberId === node.parentMemberId);
+    if (parent === undefined) throw new Error("Graph parent evidence was lost after validation");
+    return this.graphClientOrderId(request, parent);
+  }
+
   private graphOrderTicket(
     request: DerivativeOrderGraphRequest,
     node: DerivativeOrderGraphNode
   ): Record<string, unknown> {
-    const parent = request.nodes.find(({ memberId }) => memberId === node.parentMemberId);
-    if (node.parentMemberId !== undefined && parent === undefined) {
-      throw new Error("Graph parent evidence was lost after validation");
-    }
+    const parentClientOrderId = this.graphParentClientOrderId(request, node);
     const identity: Record<string, string> =
-      parent === undefined
+      parentClientOrderId === undefined
         ? { cOID: this.graphClientOrderId(request, node) }
-        : { parentId: this.graphClientOrderId(request, parent) };
+        : { parentId: parentClientOrderId };
     if ("legs" in node)
       return {
         ...this.comboOrderTicket(node),
