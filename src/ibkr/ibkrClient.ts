@@ -605,7 +605,7 @@ export class IbkrClient
     await this.prepareBrokerageAccount(input.accountId);
     const response = await this.req<IbkrLiveOrdersResponse>({
       path: "iserver/account/orders",
-      params: { force: true, accountId: input.accountId },
+      params: { accountId: input.accountId },
     });
     const flattenedActiveSnapshot = this.flattenCompleteOrderSnapshot(response);
     const activeSnapshotIncomplete = flattenedActiveSnapshot === null;
@@ -816,7 +816,7 @@ export class IbkrClient
       try {
         const response = await this.req<IbkrLiveOrdersResponse>({
           path: "iserver/account/orders",
-          params: { force: true, accountId, filters: filter },
+          params: { accountId, filters: filter },
         });
         const flattenedSnapshot = this.flattenCompleteOrderSnapshot(response);
         if (flattenedSnapshot === null) {
@@ -1272,7 +1272,7 @@ export class IbkrClient
     await this.prepareBrokerageAccount(input.accountId);
     const response = await this.req<IbkrLiveOrdersResponse>({
       path: "iserver/account/orders",
-      params: { force: true, accountId: input.accountId },
+      params: { accountId: input.accountId },
     });
     const order = response.orders?.find((candidate) => {
       if (!this.orderBelongsToAccount(candidate, input.accountId)) return false;
@@ -1291,7 +1291,7 @@ export class IbkrClient
     await this.prepareBrokerageAccount(accountId);
     const response = await this.req<IbkrLiveOrdersResponse>({
       path: "iserver/account/orders",
-      params: { force: true, accountId },
+      params: { accountId },
     });
     const flattened = this.flattenCompleteOrderSnapshot(response);
     if (flattened === null) {

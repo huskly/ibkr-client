@@ -107,7 +107,7 @@ void test("lists a typed active single option and preserves lifecycle evidence",
     ],
     uncertainty: [],
   });
-  assert.deepEqual(client.calls.at(-1)?.params, { force: true, accountId: "U123" });
+  assert.deepEqual(client.calls.at(-1)?.params, { accountId: "U123" });
 });
 
 void test("does not miss a live order hidden by a forced empty snapshot", async () => {
