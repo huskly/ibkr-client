@@ -129,7 +129,10 @@ void test("does not miss a live order hidden by a forced empty snapshot", async 
 
   const orders = await client.listActiveDerivativeOrders("U123");
 
-  assert.deepEqual(orders.map(({ orderId }) => orderId), ["99"]);
+  assert.deepEqual(
+    orders.map(({ orderId }) => orderId),
+    ["99"]
+  );
   assert.deepEqual(client.calls.at(-1)?.params, { accountId: "U123" });
 });
 
