@@ -174,6 +174,7 @@ void test("futures-option submission fails before broker access without CME meta
 void test("warning replies distinguish known chains from unknown warnings", async () => {
   const responses = [
     [{ id: "unknown", message: ["Unclassified broker warning"], messageIds: ["x999"] }],
+    [{ id: "other-known", message: ["Stop order disclosure"], messageIds: ["o10331"] }],
     [{ id: "known", message: ["Percentage constraint"], messageIds: ["o163"] }],
     [{ order_id: "777", order_status: "PreSubmitted" }],
   ];
@@ -184,6 +185,11 @@ void test("warning replies distinguish known chains from unknown warnings", asyn
 
   const unknown = await client.acknowledgeOrderWarning({ replyId: "unknown", confirmed: true });
   assert.equal(unknown.state === "warning" && unknown.warnings[0]?.known, false);
+  const otherKnown = await client.acknowledgeOrderWarning({
+    replyId: "other-known",
+    confirmed: true,
+  });
+  assert.equal(otherKnown.state === "warning" && otherKnown.warnings[0]?.known, true);
   const known = await client.acknowledgeOrderWarning({ replyId: "known", confirmed: true });
   assert.equal(known.state === "warning" && known.warnings[0]?.known, true);
   const accepted = await client.acknowledgeOrderWarning({ replyId: "final", confirmed: true });
