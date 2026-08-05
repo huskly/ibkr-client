@@ -284,15 +284,26 @@ export interface DerivativeComboLeg {
   ratio: 1 | -1;
 }
 
-export interface DerivativeComboPreviewRequest {
+interface DerivativeComboOrderFields {
   accountId: string;
   legs: [DerivativeComboLeg, DerivativeComboLeg];
   quantity: number;
   priceEffect: "CREDIT" | "DEBIT";
-  limit: number;
   tif: "DAY" | "GTC";
   session: "REGULAR" | "OVERNIGHT";
 }
+
+/**
+ * A combo (BAG) order's net price, signed by `priceEffect` exactly like a single-leg order's
+ * `limit`/`stopPrice`: negative for CREDIT, positive for DEBIT. STP exists so a combo can carry
+ * its own protective stop - a BAG parent can only take a BAG child at IBKR, so a vertical's
+ * protection must itself be a combo order, not a single-leg STOP (huskly/strategy-terminal#527).
+ */
+export type DerivativeComboPreviewRequest = DerivativeComboOrderFields &
+  (
+    | { orderType: "LMT"; limit: number; stopPrice?: never }
+    | { orderType: "STP"; stopPrice: number; limit?: never }
+  );
 
 export interface MarginImpact {
   current: number;

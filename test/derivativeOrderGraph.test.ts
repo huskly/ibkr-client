@@ -66,6 +66,7 @@ const graph = (): DerivativeOrderGraphRequest => ({
         { contract: contract(2), ratio: 1 },
       ],
       quantity: 1,
+      orderType: "LMT",
       priceEffect: "CREDIT",
       limit: 1.2,
       tif: "DAY",
@@ -103,6 +104,45 @@ const graphTwoNodes = (): DerivativeOrderGraphRequest => {
     nodes: [full.nodes[0]!, full.nodes[1]!] as const,
   };
 };
+/**
+ * A BAG parent with a BAG STOP child, same conidex with reversed ratios - the 2-level shape
+ * huskly/strategy-terminal#527 needs because IBKR rejects a combo parent with a non-combo child.
+ */
+const comboStopGraph = (): DerivativeOrderGraphRequest => ({
+  accountId: "U1",
+  rootClientOrderId: "pcs-42",
+  nodes: [
+    {
+      memberId: "entry",
+      accountId: "U1",
+      legs: [
+        { contract: contract(1), ratio: -1 },
+        { contract: contract(2), ratio: 1 },
+      ],
+      quantity: 1,
+      orderType: "LMT",
+      priceEffect: "CREDIT",
+      limit: 1.2,
+      tif: "DAY",
+      session: "REGULAR",
+    },
+    {
+      memberId: "stop",
+      parentMemberId: "entry",
+      accountId: "U1",
+      legs: [
+        { contract: contract(1), ratio: 1 },
+        { contract: contract(2), ratio: -1 },
+      ],
+      quantity: 1,
+      orderType: "STP",
+      priceEffect: "DEBIT",
+      stopPrice: 2.4,
+      tif: "GTC",
+      session: "REGULAR",
+    },
+  ],
+});
 const nestedGraph = (): DerivativeOrderGraphRequest => {
   const request = graph();
   request.nodes[2]!.parentMemberId = "stop";
@@ -189,6 +229,51 @@ test("submits combo, STOP, and MARKET graph with exact activation links", async 
   assert.equal(data.orders[2]?.["cOID"], "pcs-42:hedge");
   assert.equal(data.orders[2]?.["orderType"], "MKT");
   assert.equal("price" in data.orders[2]!, false);
+});
+
+test("submits a BAG STOP child with the same conidex and reversed ratios", async () => {
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          { order_id: "10", order_status: "Submitted" },
+          { order_id: "11", order_status: "PreSubmitted" },
+        ]
+      : session(input)
+  );
+  const result = await client.submitDerivativeOrderGraph(comboStopGraph());
+  assert.equal(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map((m) => [m.role, m.orderId, m.parentOrderId]),
+    [
+      ["root", "10", null],
+      ["child", "11", "10"],
+    ]
+  );
+  const data = client.calls.find((c) => c.method === "POST" && c.path.endsWith("/orders"))
+    ?.data as { orders: Record<string, unknown>[] };
+  assert.deepEqual(data.orders[0], {
+    acctId: "U1",
+    conidex: "28812380;;;1/-1,2/1",
+    orderType: "LMT",
+    price: -1.2,
+    side: "BUY",
+    tif: "DAY",
+    quantity: 1,
+    outsideRTH: false,
+    cOID: "pcs-42",
+  });
+  assert.deepEqual(data.orders[1], {
+    acctId: "U1",
+    conidex: "28812380;;;1/1,2/-1",
+    orderType: "STP",
+    price: 2.4,
+    side: "BUY",
+    tif: "GTC",
+    quantity: 1,
+    outsideRTH: false,
+    cOID: "pcs-42:stop",
+    parentId: "pcs-42",
+  });
 });
 
 test("warning continuation is restart-safe and supports chained replies", async () => {
@@ -736,6 +821,7 @@ test("recovery distinguishes combo siblings by quantity and signed limit price",
   const request = graph();
   const root = request.nodes[0]!;
   if (!("legs" in root)) throw new Error("Expected a combo root fixture");
+  if (root.orderType !== "LMT") throw new Error("Expected a LIMIT combo root fixture");
   request.nodes = [
     root,
     {

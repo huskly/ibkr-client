@@ -1691,8 +1691,18 @@ export class IbkrClient
     if (!Number.isSafeInteger(request.quantity) || request.quantity <= 0) {
       throw new Error("Combo quantity must be a positive integer");
     }
-    if (!Number.isFinite(request.limit) || request.limit <= 0) {
+    const orderType: unknown = request.orderType;
+    if (orderType !== "LMT" && orderType !== "STP") {
+      throw new Error("Combo order type must be LMT or STP");
+    }
+    if (request.orderType === "LMT" && (!Number.isFinite(request.limit) || request.limit <= 0)) {
       throw new Error("Combo limit must be a positive number");
+    }
+    if (
+      request.orderType === "STP" &&
+      (!Number.isFinite(request.stopPrice) || request.stopPrice <= 0)
+    ) {
+      throw new Error("Combo stop order requires a positive stop price");
     }
     const [first, second] = request.legs;
     if (first.ratio === second.ratio) throw new Error("Combo requires one long and one short leg");
@@ -1858,8 +1868,12 @@ export class IbkrClient
       const orderType = this.normalizeOrderType(order.order_type ?? order.orderType);
       const side = this.normalizeOrderSide(order.side);
       const quantity = this.firstPositiveNumber(order.total_size, order.totalSize, order.size);
-      const price = this.firstNumber(order.limitPrice, order.limit_price, order.price);
-      const expectedPrice = node.priceEffect === "CREDIT" ? -node.limit : node.limit;
+      const price =
+        node.orderType === "LMT"
+          ? this.firstNumber(order.limitPrice, order.limit_price, order.price)
+          : this.firstNumber(order.stopPrice, order.price);
+      const amount = node.orderType === "LMT" ? node.limit : node.stopPrice;
+      const expectedPrice = node.priceEffect === "CREDIT" ? -amount : amount;
       const outsideRth = order.outsideRTH ?? order.outside_rth;
       const tif = order.tif ?? order.timeInForce;
       return (
@@ -1868,7 +1882,7 @@ export class IbkrClient
           const liveLeg = liveLegs[index];
           return liveLeg?.conid === leg.contract.conid && liveLeg.ratio === leg.ratio;
         }) &&
-        orderType === this.normalizeOrderType("LMT") &&
+        orderType === this.normalizeOrderType(node.orderType) &&
         side === "BUY" &&
         quantity === node.quantity &&
         price === expectedPrice &&
@@ -2012,7 +2026,7 @@ export class IbkrClient
   private comboOrderTicket(request: DerivativeComboPreviewRequest): {
     acctId: string;
     conidex: string;
-    orderType: "LMT";
+    orderType: "LMT" | "STP";
     price: number;
     side: "BUY";
     tif: "DAY" | "GTC";
@@ -2021,13 +2035,14 @@ export class IbkrClient
   } {
     const exchange = request.legs[0].contract.exchange;
     const spreadConid = exchange === "SMART" ? "28812380" : `28812380@${exchange}`;
+    const amount = request.orderType === "LMT" ? request.limit : request.stopPrice;
     return {
       acctId: request.accountId,
       conidex: `${spreadConid};;;${request.legs
         .map(({ contract, ratio }) => `${String(contract.conid)}/${String(ratio)}`)
         .join(",")}`,
-      orderType: "LMT",
-      price: request.priceEffect === "CREDIT" ? -request.limit : request.limit,
+      orderType: request.orderType,
+      price: request.priceEffect === "CREDIT" ? -amount : amount,
       side: "BUY",
       tif: request.tif,
       quantity: request.quantity,
