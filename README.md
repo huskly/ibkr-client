@@ -214,6 +214,7 @@ return `recovery_required`, because they do not prove that every submitted ticke
   ID (`cOID`/`order_ref`). Broker IDs go directly to the exact endpoint; a customer ID is resolved
   through the live list and then read by exact broker ID.
 - `listActiveDerivativeOrders(accountId)` is the pre-placement risk view for one exact account. It
+  reads the normal IBKR order snapshot endpoint without the unreliable cache-clearing flag. It
   preserves every signed USD `conidex` member, including exchange-qualified spreads, and applies
   the outer order side to each ratio (or preserves a single conid/side). Caller and broker IDs,
   including echoed client `parentId` ownership, remain distinct alongside graph role, quantities,
@@ -341,7 +342,8 @@ nodes by position. A failed synchronous response retains a readable `text` or `w
 `errors` and recovery reasons when IBKR supplies one.
 `recoverDerivativeOrderGraph(...)` reconstructs the exact graph from its root client ID, any
 known member broker ID, and terminal evidence keyed by the durable root client ID. It searches
-filtered filled, canceled, and inactive order snapshots before using recent execution evidence;
+normal active and filtered filled, canceled, and inactive order snapshots before using recent
+execution evidence;
 an exact broker ID is still queried even if execution history is unavailable.
 It requires complete active and filtered terminal snapshot markers, traverses both nested child
 collection aliases, and rejects contradictory aliases within a broker response before correlation.

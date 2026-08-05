@@ -43,7 +43,7 @@ test suite:
 
 ```text
 yarn test test/derivativeActiveOrders.test.ts
-yarn check
+yarn run check
 yarn test
 yarn build
 ```
