@@ -158,6 +158,8 @@ export interface IbkrLiveOrder {
   limitPrice?: string | number;
   stopPrice?: string | number;
   stop_price?: string | number;
+  auxPrice?: string | number;
+  aux_price?: string | number;
   orderDescription?: string;
   order_description?: string;
   orderDesc?: string;

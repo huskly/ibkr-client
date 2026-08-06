@@ -607,7 +607,10 @@ export class IbkrClient
       path: "iserver/account/orders",
       params: { accountId: input.accountId },
     });
-    const flattenedActiveSnapshot = this.flattenCompleteOrderSnapshot(response);
+    const flattenedActiveSnapshot = this.resolveFlattenedGraphParentAliases(
+      request,
+      this.flattenCompleteOrderSnapshot(response)
+    );
     const activeSnapshotIncomplete = flattenedActiveSnapshot === null;
     const invalidActiveAccountEvidence =
       flattenedActiveSnapshot?.some(
@@ -818,7 +821,10 @@ export class IbkrClient
           path: "iserver/account/orders",
           params: { accountId, filters: filter },
         });
-        const flattenedSnapshot = this.flattenCompleteOrderSnapshot(response);
+        const flattenedSnapshot = this.resolveFlattenedGraphParentAliases(
+          request,
+          this.flattenCompleteOrderSnapshot(response)
+        );
         if (flattenedSnapshot === null) {
           terminalSnapshotLookupFailed = true;
           observedResponses.push({ source: "terminal_order_snapshot", filter, response });
@@ -952,12 +958,18 @@ export class IbkrClient
           invalidAttachedEvidence = true;
           continue;
         }
-        if (!this.orderHasValidRecoveryStatus(order)) {
+        // `iserver/account/order/status/{orderId}` carries no client order ID at all, so it can
+        // never prove attachment on its own. Judge the record this account has actually observed:
+        // the exact status read merged over the snapshot record that already named this graph.
+        // When there is no snapshot record to merge with, the attachment stays unproven and this
+        // still fails closed below.
+        const resolvedOrder = terminalOrder === undefined ? order : { ...terminalOrder, ...order };
+        if (!this.orderHasValidRecoveryStatus(resolvedOrder)) {
           invalidAttachedEvidence = true;
           terminalOrdersById.delete(orderId);
           continue;
         }
-        if (!this.terminalOrderTicketIsValid(order)) {
+        if (!this.terminalOrderTicketIsValid(resolvedOrder)) {
           invalidAttachedEvidence = true;
           terminalOrdersById.delete(orderId);
           continue;
@@ -973,18 +985,17 @@ export class IbkrClient
         if (
           terminalOrder !== undefined &&
           this.recoveryGraphAttachmentKey(request, terminalOrder) !==
-            this.recoveryGraphAttachmentKey(request, order)
+            this.recoveryGraphAttachmentKey(request, resolvedOrder)
         ) {
           invalidAttachedEvidence = true;
           terminalOrdersById.delete(orderId);
           continue;
         }
-        if (!this.recoveryGraphOrderIsAttached(request, order)) {
+        if (!this.recoveryGraphOrderIsAttached(request, resolvedOrder)) {
           invalidAttachedEvidence = true;
           terminalOrdersById.delete(orderId);
           continue;
         }
-        const resolvedOrder = terminalOrder === undefined ? order : { ...terminalOrder, ...order };
         terminalOrdersById.set(orderId, resolvedOrder);
         if (terminalOrder === undefined) linkedOrders.push(resolvedOrder);
       } catch (error) {
@@ -1050,6 +1061,76 @@ export class IbkrClient
     );
   }
 
+  /**
+   * IBKR echoes an attached child's `parentId` as the parent's own broker-assigned order ID, not
+   * as the client order ID the graph was submitted with, and it echoes it as a number. Both are
+   * evidence of the same attachment, so this rewrites such an echo back to the parent member's
+   * client order ID before any identity comparison, using only orders observed in the same
+   * snapshot.
+   *
+   * Nothing is inferred: a broker order ID is translated only when exactly one observed order of
+   * this graph carries it, and every other alias is left untouched, so an unexplained parent still
+   * fails closed.
+   */
+  private resolveGraphParentAliases(
+    request: DerivativeOrderGraphRequest,
+    orders: readonly IbkrLiveOrder[]
+  ): IbkrLiveOrder[] {
+    const graphClientOrderIds = this.graphClientOrderIds(request);
+    const memberClientOrderIdByOrderId = new Map<string, string | null>();
+    for (const order of orders) {
+      const identity = this.consistentStringAliases(order.cOID, order.order_ref);
+      if (!identity.valid || identity.value === undefined) continue;
+      if (!graphClientOrderIds.has(identity.value)) continue;
+      const orderId = this.recoveryOrderId(order);
+      if (orderId === undefined) continue;
+      const existing = memberClientOrderIdByOrderId.get(orderId);
+      memberClientOrderIdByOrderId.set(
+        orderId,
+        existing === undefined || existing === identity.value ? identity.value : null
+      );
+    }
+    if (memberClientOrderIdByOrderId.size === 0) return [...orders];
+    const translate = (value: unknown): unknown => {
+      if (typeof value !== "string" && typeof value !== "number") return value;
+      return memberClientOrderIdByOrderId.get(String(value).trim()) ?? value;
+    };
+    return orders.map((order) => {
+      const aliases = [
+        order.parentId,
+        order.parent_id,
+        order.parentClientOrderId,
+        order.parent_order_ref,
+      ];
+      if (aliases.every((alias) => alias === undefined)) return order;
+      const resolved = { ...order };
+      if (order.parentId !== undefined) resolved.parentId = translate(order.parentId) as string;
+      if (order.parent_id !== undefined) resolved.parent_id = translate(order.parent_id) as string;
+      if (order.parentClientOrderId !== undefined) {
+        resolved.parentClientOrderId = translate(order.parentClientOrderId) as string;
+      }
+      if (order.parent_order_ref !== undefined) {
+        resolved.parent_order_ref = translate(order.parent_order_ref) as string;
+      }
+      return resolved;
+    });
+  }
+
+  private resolveFlattenedGraphParentAliases(
+    request: DerivativeOrderGraphRequest,
+    flattened: { order: IbkrLiveOrder; nestedParent: IbkrLiveOrder | null }[] | null
+  ): { order: IbkrLiveOrder; nestedParent: IbkrLiveOrder | null }[] | null {
+    if (flattened === null) return null;
+    const resolved = this.resolveGraphParentAliases(
+      request,
+      flattened.map(({ order }) => order)
+    );
+    return flattened.map((entry, index) => ({
+      order: resolved[index] ?? entry.order,
+      nestedParent: entry.nestedParent,
+    }));
+  }
+
   private recoveryGraphAttachmentKey(
     request: DerivativeOrderGraphRequest,
     order: IbkrLiveOrder
@@ -1097,7 +1178,12 @@ export class IbkrClient
       values: readonly unknown[],
       normalize: (value: unknown) => string | boolean | undefined
     ) => {
-      const provided = values.filter((value) => value !== undefined);
+      // An empty string is IBKR's "this field does not apply to this order", not a value that
+      // conflicts with its own aliases: a stop order carries `price: ""` next to a real
+      // `stop_price`. Treating it as provided marked every such ticket malformed.
+      const provided = values.filter(
+        (value) => value !== undefined && !(typeof value === "string" && value.trim() === "")
+      );
       if (provided.length === 0) return;
       const normalized = provided.map(normalize);
       const [first] = normalized;
@@ -1128,15 +1214,24 @@ export class IbkrClient
     addAliases("side", [order.side], (value) =>
       typeof value === "string" ? this.normalizeOrderSide(value) : undefined
     );
-    addAliases("quantity", [order.total_size, order.totalSize, order.size], normalizeNumber);
+    // `size` is IBKR's remaining size, not an alias of the ticket quantity: a filled order reports
+    // `size: "0.0"` next to `total_size: "1.0"`. Comparing the two marked every filled ticket
+    // malformed, which is exactly the evidence recovery needs most.
+    addAliases("quantity", [order.total_size, order.totalSize], normalizeNumber);
     addAliases(
       "price",
-      [order.limitPrice, order.limit_price, order.stopPrice, order.price],
+      [
+        order.limitPrice,
+        order.limit_price,
+        order.stopPrice,
+        order.stop_price,
+        order.auxPrice,
+        order.aux_price,
+        order.price,
+      ],
       normalizeNumber
     );
-    addAliases("tif", [order.tif, order.timeInForce], (value) =>
-      typeof value === "string" ? value.toUpperCase() : undefined
-    );
+    addAliases("tif", [order.tif, order.timeInForce], (value) => this.canonicalTimeInForce(value));
     addAliases("outsideRTH", [order.outsideRTH, order.outside_rth], (value) =>
       typeof value === "boolean" ? value : undefined
     );
@@ -1784,6 +1879,28 @@ export class IbkrClient
     this.cmeOperatorMetadata(node.contract.assetClass, node);
   }
 
+  /**
+   * IBKR's order snapshot reports a DAY order's time in force as `CLOSE` ("good until the close"),
+   * while the order it was submitted with, and `iserver/account/order/status`, both say `DAY`.
+   * They are the same instruction, so recovery must not read the two spellings as different
+   * orders. Every other value is passed through unchanged and still has to match exactly.
+   */
+  private canonicalTimeInForce(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const upper = value.trim().toUpperCase();
+    if (upper === "") return undefined;
+    return upper === "CLOSE" ? "DAY" : upper;
+  }
+
+  /**
+   * A stop price reaches this client under four spellings. IBKR sends `stop_price` and `auxPrice`
+   * on the order snapshot, `stopPrice` on some payloads, and an empty `price` string for the same
+   * order - an empty string means "not applicable here", never zero.
+   */
+  private observedStopPrice(order: IbkrLiveOrder): number | undefined {
+    return this.firstNumber(order.stopPrice, order.stop_price, order.auxPrice, order.aux_price);
+  }
+
   private graphClientOrderId(
     request: DerivativeOrderGraphRequest,
     node: DerivativeOrderGraphNode
@@ -1871,11 +1988,11 @@ export class IbkrClient
       const price =
         node.orderType === "LMT"
           ? this.firstNumber(order.limitPrice, order.limit_price, order.price)
-          : this.firstNumber(order.stopPrice, order.price);
+          : this.observedStopPrice(order);
       const amount = node.orderType === "LMT" ? node.limit : node.stopPrice;
       const expectedPrice = node.priceEffect === "CREDIT" ? -amount : amount;
       const outsideRth = order.outsideRTH ?? order.outside_rth;
-      const tif = order.tif ?? order.timeInForce;
+      const tif = this.canonicalTimeInForce(order.tif ?? order.timeInForce);
       return (
         liveLegs.length === node.legs.length &&
         node.legs.every((leg, index) => {
@@ -1886,7 +2003,7 @@ export class IbkrClient
         side === "BUY" &&
         quantity === node.quantity &&
         price === expectedPrice &&
-        (tif === undefined || tif.toUpperCase() === node.tif) &&
+        (tif === undefined || tif === node.tif) &&
         (outsideRth === undefined || outsideRth === (node.session === "OVERNIGHT"))
       );
     }
@@ -1898,19 +2015,19 @@ export class IbkrClient
       node.orderType === "LMT"
         ? this.firstNumber(order.limitPrice, order.limit_price, order.price)
         : node.orderType === "STP"
-          ? this.firstNumber(order.stopPrice, order.price)
+          ? this.observedStopPrice(order)
           : undefined;
     const expectedPrice =
       node.orderType === "LMT" ? node.limit : node.orderType === "STP" ? node.stopPrice : undefined;
     const outsideRth = order.outsideRTH ?? order.outside_rth;
-    const tif = order.tif ?? order.timeInForce;
+    const tif = this.canonicalTimeInForce(order.tif ?? order.timeInForce);
     return (
       order.conid === node.contract.conid &&
       orderType === expectedOrderType &&
       side === node.side &&
       quantity === node.quantity &&
       price === expectedPrice &&
-      (tif === undefined || tif.toUpperCase() === node.tif) &&
+      (tif === undefined || tif === node.tif) &&
       (outsideRth === undefined || outsideRth === (node.session === "OVERNIGHT"))
     );
   }
@@ -1934,13 +2051,12 @@ export class IbkrClient
   ): boolean {
     try {
       const tif = order.tif ?? order.timeInForce;
-      const outsideRth = order.outsideRTH ?? order.outside_rth;
       const status = order.order_status ?? order.orderStatus ?? order.status;
-      if (
-        typeof tif !== "string" ||
-        typeof outsideRth !== "boolean" ||
-        typeof status !== "string"
-      ) {
+      // IBKR never reports `outsideRTH` on the order snapshot, so requiring it here made terminal
+      // evidence unusable for every real order. Identity still rests on the client order ID, the
+      // conidex, the order type, the side, the quantity, the price, and the time in force, all of
+      // which `recoveryOrderMatchesGraphNode` compares exactly below.
+      if (typeof tif !== "string" || typeof status !== "string") {
         return false;
       }
       return this.recoveryOrderMatchesGraphNode(request, node, order);

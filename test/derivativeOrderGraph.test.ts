@@ -2205,3 +2205,121 @@ test("recovers expected terminal children through every parent-client alias", as
     assert.equal(result.members[1]?.status, "CANCELED", parentAlias);
   }
 });
+
+/**
+ * Every field spelling below is copied from a real IBKR paper account (2026-08-06), where a
+ * filled BAG entry with an armed BAG STOP child could not be recovered at all: the snapshot
+ * reports a DAY order as `timeInForce: "CLOSE"`, echoes the child's `parentId` as the parent's
+ * numeric broker order ID, spells the stop price `stop_price` next to an empty `price`, and the
+ * exact status read reports `size` as the remaining quantity with no client order ID at all.
+ */
+const liveComboSnapshot = (): Record<string, unknown>[] => [
+  {
+    acct: "U1",
+    account: "U1",
+    orderId: 980150331,
+    order_ref: "pcs-42",
+    conidex: "28812380;;;1/-1,2/1",
+    conid: 28812380,
+    secType: "BAG",
+    side: "BUY",
+    totalSize: 1,
+    filledQuantity: 1,
+    remainingQuantity: 0,
+    sizeAndFills: "1",
+    status: "Filled",
+    orderType: "Limit",
+    origOrderType: "LIMIT",
+    price: "-1.2",
+    avgPrice: "-1.20000005",
+    timeInForce: "CLOSE",
+  },
+  {
+    acct: "U1",
+    account: "U1",
+    orderId: 980150332,
+    order_ref: "pcs-42:stop",
+    parentId: 980150331,
+    conidex: "28812380;;;1/1,2/-1",
+    conid: 28812380,
+    secType: "BAG",
+    side: "BUY",
+    totalSize: 1,
+    filledQuantity: 0,
+    remainingQuantity: 1,
+    sizeAndFills: "0/1",
+    status: "PreSubmitted",
+    orderType: "Stop",
+    origOrderType: "STOP",
+    price: "",
+    stop_price: "2.40",
+    auxPrice: "2.40",
+    timeInForce: "GTC",
+  },
+];
+const liveComboStatus = (): Record<string, unknown> => ({
+  account: "U1",
+  order_id: 980150331,
+  conidex: "28812380;;;1/-1,2/1",
+  conid: 28812380,
+  sec_type: "BAG",
+  side: "B",
+  order_type: "LIMIT",
+  limit_price: "-1.2",
+  size: "0.0",
+  total_size: "1.0",
+  cum_fill: "1.0",
+  size_and_fills: "1",
+  order_status: "Filled",
+  tif: "DAY",
+});
+
+test("recovers a filled combo entry and its armed combo STOP from real IBKR field spellings", async () => {
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      return input.params?.["filters"] === "filled"
+        ? { orders: [liveComboSnapshot()[0]] }
+        : input.params?.["filters"] === undefined
+          ? { orders: liveComboSnapshot() }
+          : { orders: [] };
+    }
+    if (input.path === "iserver/account/order/status/980150331") return liveComboStatus();
+    if (input.path === "iserver/account/trades") return [];
+    return session(input);
+  });
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", orderId: "980150331" },
+    comboStopGraph()
+  );
+  assert.equal(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId, status, parentOrderId }) => [
+      memberId,
+      orderId,
+      status,
+      parentOrderId,
+    ]),
+    [
+      ["entry", "980150331", "FILLED", null],
+      ["stop", "980150332", "WORKING", "980150331"],
+    ]
+  );
+});
+
+test("graph recovery still fails closed when a parent order ID names no member of the graph", async () => {
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      const [entry, stop] = liveComboSnapshot();
+      return input.params?.["filters"] === undefined
+        ? { orders: [entry, { ...stop, parentId: 555000111 }] }
+        : { orders: [] };
+    }
+    if (input.path === "iserver/account/trades") return [];
+    return session(input);
+  });
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    comboStopGraph()
+  );
+  assert.equal(result.state, "recovery_required");
+});
