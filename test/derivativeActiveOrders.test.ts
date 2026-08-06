@@ -202,6 +202,36 @@ void test("falls back to conid for a scalar single-leg conidex", async () => {
   assert.ok(!order?.uncertainty.includes("AGGREGATE_ONLY"));
 });
 
+void test("reads the snake_case stop price of a resting combo STOP child", async () => {
+  // Real shape of an attached BAG STOP child on a paper account: IBKR reports `stop_price` as a
+  // positive decimal string, and never populates the camelCase `stopPrice` alias.
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [
+      {
+        account: "U123",
+        order_id: "980150332",
+        cOID: "pcs-entry-afa2ac2f:root_1",
+        parent_order_id: "980150331",
+        conidex: "28812380;;;906570511/1,907108616/-1",
+        side: "B",
+        sec_type: "BAG",
+        total_size: "1.0",
+        cum_fill: "0.0",
+        order_status: "PreSubmitted",
+        order_type: "STP",
+        limit_price: "",
+        stop_price: "2.80",
+        tif: "GTC",
+      },
+    ],
+  });
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.equal(order?.orderType, "STOP");
+  assert.equal(order?.stopPrice, 2.8);
+  assert.equal(order?.parentOrderId, "980150331");
+});
+
 void test("preserves every signed USD combo leg", async () => {
   const client = new FakeIbkrClient({
     snapshot: true,

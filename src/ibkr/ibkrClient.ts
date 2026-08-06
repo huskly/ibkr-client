@@ -2592,11 +2592,16 @@ export class IbkrClient
       order.filledQuantity,
       order.filled
     );
-    const remainingQuantity = this.firstNumber(
-      order.remainingQuantity,
-      order.remaining_size,
-      order.remaining
-    );
+    // `iserver/account/order/status/{orderId}` never carries a remaining-quantity field: it
+    // reports only `total_size` and `cum_fill`. Derive the remainder from those two authoritative
+    // values, exactly as `normalizeActiveDerivativeOrder` already does for the order snapshot.
+    // Nothing is invented here - if either input is missing, this stays `undefined` and the
+    // lifecycle read still fails closed below.
+    const remainingQuantity =
+      this.firstNumber(order.remainingQuantity, order.remaining_size, order.remaining) ??
+      (quantity !== undefined && filledQuantity !== undefined && filledQuantity >= 0
+        ? Math.max(0, quantity - filledQuantity)
+        : undefined);
     if (
       quantity === undefined ||
       filledQuantity === undefined ||
@@ -2742,7 +2747,7 @@ export class IbkrClient
             : "UNKNOWN",
       orderType: this.normalizeOrderType(order.order_type ?? order.orderType) ?? null,
       limitPrice: this.firstNumber(order.limitPrice, order.limit_price, order.price) ?? null,
-      stopPrice: this.firstNumber(order.stopPrice) ?? null,
+      stopPrice: this.firstNumber(order.stopPrice, order.stop_price) ?? null,
       enteredAt: orderTime,
       updatedAt:
         order.lastExecutionTime_r !== undefined || order.lastExecutionTime !== undefined

@@ -318,6 +318,55 @@ void test("exact lifecycle reads retain an evicted combo's partial-fill economic
   );
 });
 
+void test("lifecycle derives the remainder when IBKR reports only total and filled sizes", async () => {
+  // `iserver/account/order/status/{orderId}` carries no remaining-quantity field at all. This is
+  // the real payload shape of a resting combo (BAG) limit order on a paper account.
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["DUR318631"], selectedAccount: "DUR318631" };
+    }
+    if (input.path === "iserver/account/order/status/980150331") {
+      return {
+        account: "DUR318631",
+        order_id: 980150331,
+        cOID: "pcs-entry-afa2ac2f",
+        order_status: "Submitted",
+        conidex: "28812380;;;906570511/-1,907108616/1",
+        sec_type: "BAG",
+        order_type: "LIMIT",
+        limit_price: "-1.11",
+        size: "1.0",
+        total_size: "1.0",
+        cum_fill: "0.0",
+        size_and_fills: "0/1",
+        tif: "DAY",
+      };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+  const result = await client.getDerivativeOrderStatus("DUR318631", "980150331");
+  assert.equal(result.status, "WORKING");
+  assert.equal(result.quantity, 1);
+  assert.equal(result.filledQuantity, 0);
+  assert.equal(result.remainingQuantity, 1);
+});
+
+void test("lifecycle still fails closed when the filled quantity itself is missing", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U123"], selectedAccount: "U123" };
+    }
+    if (input.path === "iserver/account/order/status/777") {
+      return { account: "U123", order_id: 777, order_status: "Submitted", total_size: "1.0" };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+  await assert.rejects(
+    () => client.getDerivativeOrderStatus("U123", "777"),
+    /returned incomplete fill quantities/
+  );
+});
+
 void test("customer order IDs resolve the same typed lifecycle", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/accounts") {
