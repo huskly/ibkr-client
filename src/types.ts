@@ -472,7 +472,12 @@ export type DerivativeOrderGraphResult =
 
 export type DerivativeOrderGraphLookup =
   | { accountId: string; rootClientOrderId: string; orderId?: never }
-  | { accountId: string; orderId: string; rootClientOrderId?: never };
+  | {
+      accountId: string;
+      /** An exact broker order ID from the caller's durable checkpoint. */
+      orderId: string;
+      rootClientOrderId?: never;
+    };
 
 export type DerivativeMultiOrderResult =
   | {

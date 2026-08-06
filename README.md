@@ -342,9 +342,11 @@ nodes by position. A failed synchronous response retains a readable `text` or `w
 `errors` and recovery reasons when IBKR supplies one.
 `recoverDerivativeOrderGraph(...)` reconstructs the exact graph from its root client ID, any
 known member broker ID, and terminal evidence keyed by the durable root client ID. It searches
-normal active and filtered filled, canceled, and inactive order snapshots before using recent
-execution evidence;
-an exact broker ID is still queried even if execution history is unavailable.
+normal active and filtered filled, canceled, and inactive order snapshots before it uses recent
+execution evidence. It queries an exact broker ID even if execution history is unavailable. When the
+caller supplies a durable broker ID, the exact status read can identify only that member without a
+client order ID. The account and broker ID must match, and the complete ticket must match exactly one
+requested node. Conflicting identity or listing evidence still fails closed.
 It requires complete active and filtered terminal snapshot markers, traverses both nested child
 collection aliases, and rejects contradictory aliases within a broker response before correlation.
 It correlates the root by the transmitted client ID and its complete ticket. It correlates each

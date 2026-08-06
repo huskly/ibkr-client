@@ -627,10 +627,16 @@ export class IbkrClient
       .map(({ order }) => order)
       .filter((order) => this.orderHasExactAccount(order, input.accountId));
     const activeMatchesByMember = new Map<string, IbkrLiveOrder[]>();
+    const knownActiveOrders = accountOrders.filter(
+      (order) => input.orderId !== undefined && this.recoveryOrderId(order) === input.orderId
+    );
+    const conflictingKnownActiveOrders = knownActiveOrders.filter(
+      (order) => !this.recoveryGraphOrderMayBeAttached(request, order)
+    );
     const observedCandidates: unknown[] =
       activeSnapshotIncomplete || invalidActiveAccountEvidence || invalidNestedActiveEvidence
         ? [response]
-        : [];
+        : [...conflictingKnownActiveOrders];
     observedCandidates.push(
       ...accountOrders.filter((order) => this.recoveryGraphOrderMayBeAttached(request, order))
     );
@@ -660,6 +666,13 @@ export class IbkrClient
       input.accountId,
       request,
       input.orderId
+    );
+    const conflictingKnownActiveTickets = knownActiveOrders.filter((activeOrder) =>
+      terminalEvidence.linkedOrders.some(
+        (terminalOrder) =>
+          this.recoveryOrderId(terminalOrder) === input.orderId &&
+          this.terminalOrderTicketConflicts(activeOrder, terminalOrder)
+      )
     );
     this.reconcileSelectedGraphMembers(request, selected, terminalEvidence);
     if (unresolved.length > 0) {
@@ -729,6 +742,8 @@ export class IbkrClient
       activeSnapshotIncomplete ||
       invalidActiveAccountEvidence ||
       invalidNestedActiveEvidence ||
+      conflictingKnownActiveOrders.length > 0 ||
+      conflictingKnownActiveTickets.length > 0 ||
       terminalEvidence.invalidAttachedEvidence ||
       terminalEvidence.terminalSnapshotLookupFailed ||
       members.some(({ status }) => status === "UNKNOWN" || status === "WARNING_PENDING")
@@ -814,6 +829,7 @@ export class IbkrClient
     const candidateOrderIds = new Set<string>();
     if (knownOrderId !== undefined) candidateOrderIds.add(knownOrderId);
     const terminalOrdersById = new Map<string, IbkrLiveOrder>();
+    const exactStatusAttachmentOrderIds = new Set<string>();
 
     for (const filter of RECOVERY_TERMINAL_ORDER_FILTERS) {
       try {
@@ -832,6 +848,11 @@ export class IbkrClient
         }
         for (const { order, nestedParent } of flattenedSnapshot) {
           if (!this.recoveryGraphOrderMayBeAttached(request, order)) {
+            if (knownOrderId !== undefined && this.recoveryOrderId(order) === knownOrderId) {
+              observedResponses.push(order);
+              invalidAttachedEvidence = true;
+              continue;
+            }
             if (
               nestedParent === null ||
               !this.recoveryGraphOrderIsAttached(request, nestedParent)
@@ -958,11 +979,10 @@ export class IbkrClient
           invalidAttachedEvidence = true;
           continue;
         }
-        // `iserver/account/order/status/{orderId}` carries no client order ID at all, so it can
-        // never prove attachment on its own. Judge the record this account has actually observed:
-        // the exact status read merged over the snapshot record that already named this graph.
-        // When there is no snapshot record to merge with, the attachment stays unproven and this
-        // still fails closed below.
+        // Prefer graph attachment from a snapshot when it exists. IBKR's exact status response can
+        // omit every client-order identity field. The caller's durable broker ID can establish that
+        // one member's attachment when the status response contains no conflicting attachment
+        // evidence and its complete ticket identifies exactly one requested node below.
         const resolvedOrder = terminalOrder === undefined ? order : { ...terminalOrder, ...order };
         if (!this.orderHasValidRecoveryStatus(resolvedOrder)) {
           invalidAttachedEvidence = true;
@@ -992,9 +1012,16 @@ export class IbkrClient
           continue;
         }
         if (!this.recoveryGraphOrderIsAttached(request, resolvedOrder)) {
-          invalidAttachedEvidence = true;
-          terminalOrdersById.delete(orderId);
-          continue;
+          const callerNamedStatusWithoutAttachment =
+            orderId === knownOrderId &&
+            terminalOrder === undefined &&
+            !this.orderHasRecoveryAttachmentEvidence(order);
+          if (!callerNamedStatusWithoutAttachment) {
+            invalidAttachedEvidence = true;
+            terminalOrdersById.delete(orderId);
+            continue;
+          }
+          exactStatusAttachmentOrderIds.add(orderId);
         }
         terminalOrdersById.set(orderId, resolvedOrder);
         if (terminalOrder === undefined) linkedOrders.push(resolvedOrder);
@@ -1019,6 +1046,19 @@ export class IbkrClient
         invalidAttachedEvidence = true;
         continue;
       }
+      if (exactStatusAttachmentOrderIds.has(orderId)) {
+        const matchingNodes = request.nodes.filter((node) =>
+          this.exactStatusTicketMatchesGraphNode(request, node, resolvedOrder)
+        );
+        const [matchingNode] = matchingNodes;
+        if (matchingNodes.length !== 1 || matchingNode === undefined) {
+          invalidAttachedEvidence = true;
+          continue;
+        }
+        const existing = byNode.get(matchingNode.memberId);
+        if (existing !== undefined) existing.push(resolvedOrder);
+        continue;
+      }
       for (const node of request.nodes) {
         if (this.terminalOrderMatchesGraphNode(request, node, resolvedOrder)) {
           const existing = byNode.get(node.memberId);
@@ -1040,6 +1080,17 @@ export class IbkrClient
     order: IbkrLiveOrder
   ): boolean {
     return this.recoveryGraphAttachmentKey(request, order) !== null;
+  }
+
+  private orderHasRecoveryAttachmentEvidence(order: IbkrLiveOrder): boolean {
+    return [
+      order.cOID,
+      order.order_ref,
+      order.parentId,
+      order.parent_id,
+      order.parentClientOrderId,
+      order.parent_order_ref,
+    ].some((value) => value !== undefined);
   }
 
   private recoveryGraphOrderMayBeAttached(
@@ -2042,6 +2093,20 @@ export class IbkrClient
     } catch {
       return false;
     }
+  }
+
+  private exactStatusTicketMatchesGraphNode(
+    request: DerivativeOrderGraphRequest,
+    node: DerivativeOrderGraphNode,
+    order: IbkrLiveOrder
+  ): boolean {
+    if (this.orderHasRecoveryAttachmentEvidence(order)) return false;
+    const parentClientOrderId = this.graphParentClientOrderId(request, node);
+    const orderWithExpectedAttachment: IbkrLiveOrder =
+      parentClientOrderId === undefined
+        ? { ...order, cOID: this.graphClientOrderId(request, node) }
+        : { ...order, parentId: parentClientOrderId };
+    return this.terminalOrderMatchesGraphNode(request, node, orderWithExpectedAttachment);
   }
 
   private terminalOrderMatchesGraphNode(
