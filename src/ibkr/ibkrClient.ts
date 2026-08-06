@@ -3692,12 +3692,23 @@ export class IbkrClient
       path: "trsrv/secdef",
       params: { conids: String(conid) },
     });
-    const raw = response[String(conid)];
+    // IBKR answers with `{ secdef: [contract] }`; the keyed-by-conid shape is kept for gateway
+    // builds that still answer that way. An entry that names a different conid is not evidence
+    // about this one, so it is ignored rather than trusted.
+    const keyed = response[String(conid)];
+    const candidates = [
+      ...(Array.isArray(response.secdef) ? response.secdef : []),
+      ...(Array.isArray(keyed) ? keyed : keyed === undefined ? [] : [keyed]),
+    ];
+    const raw = candidates.find(
+      (candidate) => candidate.conid === undefined || candidate.conid === conid
+    );
     if (!raw) return null;
     return normalizeOptionContract({
       conid: raw.conid ?? conid,
-      symbol: raw.symbol,
-      maturityDate: raw.expiry,
+      // `symbol` is absent on this payload; IBKR names the underlying `ticker`/`undSym` here.
+      symbol: raw.symbol ?? raw.ticker ?? raw.undSym,
+      maturityDate: raw.expiry ?? raw.maturityDate,
       right: raw.putOrCall,
       strike: raw.strike,
     });

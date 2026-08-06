@@ -296,15 +296,22 @@ export interface IbkrSecdefResponse {
   secdef?: IbkrSecdefContract[];
 }
 
-/** `trsrv/secdef` response keyed by conid. */
-export type IbkrSecdefByConidResponse = Record<
-  string,
-  | {
-      conid?: number;
-      symbol?: string;
-      expiry?: string;
-      putOrCall?: string;
-      strike?: string | number;
-    }
-  | undefined
->;
+/** One contract definition as `trsrv/secdef` describes it. */
+export interface IbkrSecdefContract {
+  conid?: number;
+  symbol?: string;
+  ticker?: string;
+  undSym?: string;
+  expiry?: string;
+  maturityDate?: string;
+  putOrCall?: string;
+  strike?: string | number;
+}
+
+/**
+ * `trsrv/secdef` answers with a `secdef` array. Older IBKR gateway builds answer with a map keyed
+ * by conid, so both shapes are accepted.
+ */
+export type IbkrSecdefByConidResponse = {
+  secdef?: IbkrSecdefContract[];
+} & Record<string, IbkrSecdefContract | IbkrSecdefContract[] | undefined>;

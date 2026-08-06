@@ -477,6 +477,44 @@ void test("conid details normalize back to canonical OSI", async () => {
   });
 });
 
+void test("conid details normalize from the secdef array IBKR actually answers with", async () => {
+  // Real `trsrv/secdef` payload shape (paper account, 2026-08-06): a `secdef` array, the
+  // underlying named `ticker`/`undSym` rather than `symbol`, and a string strike.
+  const client = new FakeIbkrClient((input) => {
+    assert.equal(input.path, "trsrv/secdef");
+    return {
+      secdef: [
+        {
+          conid: 906570511,
+          assetClass: "OPT",
+          expiry: "20260911",
+          lastTradingDay: "20260911",
+          putOrCall: "P",
+          strike: "281",
+          ticker: "IWM",
+          undSym: "IWM",
+          multiplier: 100,
+        },
+      ],
+    };
+  });
+  assert.deepEqual(await client.getOptionContract(906570511), {
+    conid: 906570511,
+    symbol: "IWM   260911P00281000",
+    underlying: "IWM",
+    expiry: "2026-09-11",
+    strike: 281,
+    right: "P",
+  });
+});
+
+void test("conid details ignore a secdef entry that names a different conid", async () => {
+  const client = new FakeIbkrClient(() => ({
+    secdef: [{ conid: 111, expiry: "20260911", putOrCall: "P", strike: "281", ticker: "IWM" }],
+  }));
+  assert.equal(await client.getOptionContract(906570511), null);
+});
+
 void test("price history resolves the contract and normalizes OHLCV", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "trsrv/stocks") {
