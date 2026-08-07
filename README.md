@@ -339,8 +339,13 @@ chained and unknown warnings remain pending for the caller, and mixed, partial,
 duplicated, terminal, malformed, or ambiguous acknowledgements return `recovery_required`. Broker
 IDs from ambiguous acknowledgements are retained as uncorrelated responses rather than assigned to
 nodes by position. Submission acknowledgements are correlated only by the echoed `local_order_id`
-or `cOID`. If IBKR does not echo a complete and consistent identity for each member,
-the result is `recovery_required`, and the client does not assign the broker IDs to graph members.
+or `cOID`. Nested child acknowledgements under `children` or `childOrders` are flattened before
+correlation, so a parent-only top-level array does not hide live child broker IDs.
+`accepted` requires one distinct non-null broker order ID for every requested graph member. If any
+member still has a null order ID after correlation, the result is `recovery_required` and the reason
+names those member IDs. Partial evidence never looks like full acceptance. If IBKR does not echo a
+complete and consistent identity for each member, the result is `recovery_required`, and the client
+does not assign uncorrelated broker IDs to graph members by position.
 A failed synchronous response retains a readable `text` or `warning_message` in
 `errors` and recovery reasons when IBKR supplies one.
 `recoverDerivativeOrderGraph(...)` reconstructs the exact graph from its root client ID, any

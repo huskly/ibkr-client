@@ -193,6 +193,9 @@ export interface IbkrOrderAcceptedResponse {
   orderStatus?: string;
   local_order_id?: string;
   cOID?: string;
+  /** Nested child acknowledgements that some graph placements return under the parent record. */
+  children?: IbkrOrderAcceptedResponse[];
+  childOrders?: IbkrOrderAcceptedResponse[];
 }
 
 export interface IbkrOrderWarningResponse {

@@ -78,6 +78,8 @@ That is why the result is not simply `success: true/false`.
 
 `recovery_required` means: “we do not know the complete broker state.” The client retains every observed order ID and response, and callers must reconcile before attempting another write. Blind retrying could duplicate an entry or protective order.
 
+`accepted` is stricter than “the broker created something.” It requires one distinct broker order ID for every requested graph member. If the submission response is partial, nested, or only some members correlate, the client returns `recovery_required` and names the members that still have no order ID. Nested child acknowledgements under `children` or `childOrders` are included in that correlation.
+
 ### Mental model
 
 The simplest way to remember it:

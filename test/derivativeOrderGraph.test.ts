@@ -458,6 +458,95 @@ test("partial and duplicated graph acknowledgements fail closed", async () => {
   }
 });
 
+test("accepts nested child acknowledgements from children and childOrders collections", async () => {
+  for (const childKey of ["children", "childOrders"] as const) {
+    const client = new Fake((input) =>
+      input.path.endsWith("/orders") && input.method === "POST"
+        ? [
+            {
+              order_id: "10",
+              order_status: "Submitted",
+              local_order_id: "pcs-42",
+              [childKey]: [
+                {
+                  order_id: "11",
+                  order_status: "PreSubmitted",
+                  local_order_id: "pcs-42:stop",
+                },
+              ],
+            },
+          ]
+        : session(input)
+    );
+
+    const result = await client.submitDerivativeOrderGraph(comboStopGraph());
+
+    assert.equal(result.state, "accepted", childKey);
+    assert.deepEqual(
+      result.members.map(({ memberId, orderId, parentOrderId }) => [
+        memberId,
+        orderId,
+        parentOrderId,
+      ]),
+      [
+        ["entry", "10", null],
+        ["stop", "11", "10"],
+      ]
+    );
+  }
+});
+
+test("partial graph acknowledgements never report accepted and name members without order IDs", async () => {
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [{ order_id: "10", order_status: "Filled", local_order_id: "pcs-42" }]
+      : session(input)
+  );
+
+  const result = await client.submitDerivativeOrderGraph(comboStopGraph());
+
+  assert.equal(result.state, "recovery_required");
+  if (result.state !== "recovery_required") return;
+  assert.notEqual(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId }) => [memberId, orderId]),
+    [
+      ["entry", "10"],
+      ["stop", null],
+    ]
+  );
+  assert.match(result.reasons[0] ?? "", /missing broker order IDs for member\(s\): stop/);
+  assert.equal(
+    result.members.filter(({ orderId }) => orderId !== null).length,
+    1,
+    "partial evidence retains the known member ID without claiming full acceptance"
+  );
+});
+
+test("malformed nested child collections fail closed without dropping the parent acknowledgement", async () => {
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          {
+            order_id: "10",
+            order_status: "Submitted",
+            local_order_id: "pcs-42",
+            children: { order_id: "11", local_order_id: "pcs-42:stop" },
+          },
+        ]
+      : session(input)
+  );
+
+  const result = await client.submitDerivativeOrderGraph(comboStopGraph());
+
+  assert.equal(result.state, "recovery_required");
+  if (result.state !== "recovery_required") return;
+  assert.equal(result.members[0]?.orderId, "10");
+  assert.equal(result.members[1]?.orderId, null);
+  assert.match(result.reasons[0] ?? "", /missing broker order IDs for member\(s\): stop/);
+  assert.equal(result.unrecognizedResponses.length > 0, true);
+});
+
 test("invalid graph fails before broker access and transport placement is attempted once", async () => {
   const invalid = graph();
   invalid.nodes[2]!.parentMemberId = "missing";
