@@ -319,7 +319,7 @@ void test("individual option quotes preserve activity values and normalize unava
     assert.deepEqual({ volume: quote.volume, openInterest: quote.openInterest }, expected, name);
     assert.equal(
       client.calls.find((call) => call.path === "iserver/marketdata/snapshot")?.params?.["fields"],
-      "84,86,87,7308,7638,7762"
+      "84,86,87,6509,7308,7638,7762"
     );
   }
 });
@@ -607,4 +607,92 @@ void test("unresolvable non-stock symbol fails closed without a snapshot", async
   const quotes = await client.getQuotes(["NOPE"]);
   assert.deepEqual(quotes, {});
   assert.equal(snapshots, 0);
+});
+
+void test("option quotes carry market-data availability and snapshot timestamp", async () => {
+  const cases = [
+    {
+      name: "live snapshot with an update time",
+      snapshot: { "6509": "RpB", _updated: 1787000000000 },
+      expected: { availability: "live", timestamp: "2026-08-17T20:53:20.000Z" },
+    },
+    {
+      name: "delayed snapshot",
+      snapshot: { "6509": "DpB", _updated: 1787000000000 },
+      expected: { availability: "delayed", timestamp: "2026-08-17T20:53:20.000Z" },
+    },
+    {
+      name: "frozen snapshot",
+      snapshot: { "6509": "ZpB", _updated: 1787000000 },
+      expected: { availability: "frozen", timestamp: "2026-08-17T20:53:20.000Z" },
+    },
+    {
+      // An absent 6509 is "unavailable", and an absent update time stays null rather than
+      // becoming a fabricated "now".
+      name: "no availability marker and no update time",
+      snapshot: {},
+      expected: { availability: "unavailable", timestamp: null },
+    },
+  ] as const;
+
+  for (const { name, snapshot, expected } of cases) {
+    let snapshots = 0;
+    const client = new FakeIbkrClient((input) => {
+      if (input.path !== "iserver/marketdata/snapshot") return discoveryResponse(input);
+      snapshots += 1;
+      return snapshots === 1
+        ? []
+        : [{ conid: 102, "84": "4", "86": "4.2", "7308": "0.25", ...snapshot }];
+    });
+
+    const quote = await client.getOptionQuote({
+      symbol: "MSTR",
+      expiry: "2026-08-21",
+      strike: 215,
+      right: "C",
+    });
+    assert.ok(quote, `expected a quote for ${name}`);
+    assert.deepEqual(
+      { availability: quote.availability, timestamp: quote.timestamp },
+      expected,
+      name
+    );
+  }
+});
+
+void test("underlying quotes carry market-data availability and snapshot timestamp", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") {
+      return {
+        MSTR: [
+          {
+            name: "MicroStrategy",
+            contracts: [{ conid: 272110, exchange: "NASDAQ", isUS: true }],
+          },
+        ],
+      };
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return snapshots === 1
+        ? []
+        : [
+            {
+              conid: 272110,
+              "31": "400.10",
+              "55": "MSTR",
+              "84": "400.00",
+              "86": "400.20",
+              "6509": "DpB",
+              _updated: 1787000000000,
+            },
+          ];
+    }
+    return [];
+  });
+
+  const quotes = await client.getQuotes(["MSTR"]);
+  assert.equal(quotes["MSTR"]?.availability, "delayed");
+  assert.equal(quotes["MSTR"]?.timestamp, "2026-08-17T20:53:20.000Z");
 });

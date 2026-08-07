@@ -36,6 +36,7 @@ export type {
   DerivativeContract,
   DerivativeContractQuery,
   DerivativeDataAvailability,
+  MarketDataAvailability,
   DerivativeDiscoveryClient,
   DerivativeExpiry,
   DerivativeExpiryQuery,

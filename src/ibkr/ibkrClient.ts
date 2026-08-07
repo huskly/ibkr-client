@@ -131,6 +131,7 @@ const OPTION_QUOTE_FIELDS = [
   "84", // Bid
   "86", // Ask
   "87", // Formatted volume
+  "6509", // Market data availability
   "7308", // Delta
   "7638", // Option open interest
   "7762", // Unformatted volume
@@ -4134,6 +4135,8 @@ export class IbkrClient
           delta,
           volume,
           openInterest,
+          availability: normalizeDerivativeDataAvailability(snapshot?.["6509"]),
+          timestamp: snapshot ? this.snapshotTimestamp(snapshot) : null,
         });
       }
     }
@@ -4496,6 +4499,8 @@ export class IbkrClient
 
     return {
       symbol,
+      availability: normalizeDerivativeDataAvailability(snapshot["6509"]),
+      timestamp: this.snapshotTimestamp(snapshot),
       reference: {
         ...(description !== undefined ? { description } : {}),
         ...(exchange !== undefined ? { exchange, exchangeName: exchange } : {}),
