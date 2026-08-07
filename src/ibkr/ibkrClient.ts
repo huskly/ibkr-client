@@ -2413,10 +2413,15 @@ export class IbkrClient
         return { ...evidence, status: order.status };
       })
     );
+    const memberOrderIds = members.map(({ orderId }) => orderId);
+    const hasCompleteMemberOrderIds =
+      memberOrderIds.every((orderId): orderId is string => orderId !== null) &&
+      new Set(memberOrderIds).size === request.nodes.length;
     const hasCompleteIdentityCorrelation =
       distinct &&
       decoded.orders.length === request.nodes.length &&
-      correlatedOrders.size === request.nodes.length;
+      correlatedOrders.size === request.nodes.length &&
+      hasCompleteMemberOrderIds;
     if (
       decoded.warnings.length === 1 &&
       decoded.orders.length === 0 &&
@@ -2463,14 +2468,24 @@ export class IbkrClient
         warnings: [],
       };
     }
+    const membersMissingOrderIds = members
+      .filter(({ orderId }) => orderId === null)
+      .map(({ memberId }) => memberId);
+    const hasNonFailureOrderStatuses = decoded.orders.every(
+      ({ status }) => status !== "UNKNOWN" && status !== "REJECTED" && status !== "CANCELED"
+    );
     const hasIdentityCorrelationFailure =
       decoded.pendingCancelOrderIds.length === 0 &&
       decoded.errors.length === 0 &&
-      decoded.orders.every(
-        ({ status }) => status !== "UNKNOWN" && status !== "REJECTED" && status !== "CANCELED"
-      ) &&
+      hasNonFailureOrderStatuses &&
       decoded.orders.length === request.nodes.length &&
       !hasCompleteIdentityCorrelation;
+    const hasNamedMissingMemberIds =
+      membersMissingOrderIds.length > 0 &&
+      decoded.pendingCancelOrderIds.length === 0 &&
+      decoded.errors.length === 0 &&
+      hasNonFailureOrderStatuses &&
+      !hasIdentityCorrelationFailure;
     return {
       state: "recovery_required",
       rootClientOrderId: request.rootClientOrderId,
@@ -2478,7 +2493,9 @@ export class IbkrClient
       reasons: [
         hasIdentityCorrelationFailure
           ? "IBKR did not return a unique client order identity for each graph member"
-          : this.submissionRecoveryReason(decoded, decoded.orders.length, request.nodes.length),
+          : hasNamedMissingMemberIds
+            ? `IBKR graph submission is missing broker order IDs for member(s): ${membersMissingOrderIds.join(", ")}`
+            : this.submissionRecoveryReason(decoded, decoded.orders.length, request.nodes.length),
       ],
       warnings: decoded.warnings,
       errors: decoded.errors,
@@ -2567,17 +2584,64 @@ export class IbkrClient
     return this.contingentRecoveryResult(decoded, orders, parentClientOrderId);
   }
 
+  private flattenOrderSubmissionItems(response: unknown): {
+    responseIsArray: boolean;
+    items: unknown[];
+    malformedNesting: unknown[];
+  } {
+    const responseIsArray = Array.isArray(response);
+    const rootItems = responseIsArray ? response : [response];
+    const items: unknown[] = [];
+    const malformedNesting: unknown[] = [];
+    const visiting = new Set<object>();
+
+    const visit = (rawItems: readonly unknown[]): void => {
+      for (const item of rawItems) {
+        if (typeof item !== "object" || item === null || Array.isArray(item)) {
+          items.push(item);
+          continue;
+        }
+        if (visiting.has(item)) {
+          malformedNesting.push({ ...item });
+          continue;
+        }
+        visiting.add(item);
+        const record = item as Readonly<Record<string, unknown>>;
+        const childCollections = [record["childOrders"], record["children"]];
+        const hasMalformedChildCollection = childCollections.some(
+          (children) => children !== undefined && !Array.isArray(children)
+        );
+        items.push(item);
+        if (hasMalformedChildCollection) {
+          malformedNesting.push({ ...record });
+          visiting.delete(item);
+          continue;
+        }
+        const children = new Set<unknown>();
+        for (const collection of childCollections) {
+          if (!Array.isArray(collection)) continue;
+          for (const child of collection) children.add(child);
+        }
+        if (children.size > 0) visit([...children]);
+        visiting.delete(item);
+      }
+    };
+
+    visit(rootItems);
+    return { responseIsArray, items, malformedNesting };
+  }
+
   private decodeOrderSubmission(response: unknown): DecodedOrderSubmission {
-    const items = Array.isArray(response) ? response : [response];
+    const { responseIsArray, items, malformedNesting } = this.flattenOrderSubmissionItems(response);
     const decoded: DecodedOrderSubmission = {
-      responseIsArray: Array.isArray(response),
+      responseIsArray,
       orders: [],
       rawOrderResponses: new Map(),
       invalidClientOrderIdentityOrders: new Set(),
       pendingCancelOrderIds: [],
       warnings: [],
       errors: [],
-      unrecognizedResponses: [],
+      unrecognizedResponses: [...malformedNesting],
     };
     for (const item of items) {
       if (typeof item !== "object" || item === null || Array.isArray(item)) {
