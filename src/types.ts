@@ -164,6 +164,10 @@ export interface BrokerQuote {
   symbol: string;
   reference: BrokerQuoteReference;
   quote: BrokerQuoteData;
+  /** Whether this snapshot is live, delayed, frozen, or absent (IBKR field 6509). */
+  availability: MarketDataAvailability;
+  /** ISO 8601 instant the snapshot was last updated; null when IBKR reports no update time. */
+  timestamp: string | null;
 }
 
 /** One normalized daily/intraday market-data history bar. */
@@ -182,8 +186,11 @@ export type OptionRight = "C" | "P";
 export type DerivativeAssetClass = "OPT" | "FOP";
 
 /** Normalized market-data timeline reported by IBKR snapshot field 6509. */
-export type DerivativeDataAvailability =
+export type MarketDataAvailability =
   "live" | "delayed" | "frozen" | "frozen-delayed" | "unavailable";
+
+/** Derivative-specific spelling of {@link MarketDataAvailability}; the values are identical. */
+export type DerivativeDataAvailability = MarketDataAvailability;
 
 /** Query one exact expiration while retaining trading-class and venue identity. */
 export interface DerivativeContractQuery {
@@ -775,6 +782,10 @@ export interface OptionMarketQuote extends OptionContract {
   delta: number;
   volume: number | null;
   openInterest: number | null;
+  /** Whether this snapshot is live, delayed, frozen, or absent (IBKR field 6509). */
+  availability: MarketDataAvailability;
+  /** ISO 8601 instant the snapshot was last updated; null when IBKR reports no update time. */
+  timestamp: string | null;
 }
 
 export interface PriceHistoryRequest {
