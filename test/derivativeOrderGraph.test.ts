@@ -203,9 +203,9 @@ test("submits combo, STOP, and MARKET graph with exact activation links", async 
   const client = new Fake((input) =>
     input.path.endsWith("/orders") && input.method === "POST"
       ? [
-          { order_id: "10", order_status: "Submitted" },
-          { order_id: "11", order_status: "Submitted" },
-          { order_id: "12", order_status: "Submitted" },
+          { order_id: "10", order_status: "Submitted", local_order_id: "pcs-42" },
+          { order_id: "11", order_status: "Submitted", local_order_id: "pcs-42:stop" },
+          { order_id: "12", order_status: "Submitted", local_order_id: "pcs-42:hedge" },
         ]
       : session(input)
   );
@@ -235,8 +235,8 @@ test("submits a BAG STOP child with the same conidex and reversed ratios", async
   const client = new Fake((input) =>
     input.path.endsWith("/orders") && input.method === "POST"
       ? [
-          { order_id: "10", order_status: "Submitted" },
-          { order_id: "11", order_status: "PreSubmitted" },
+          { order_id: "10", order_status: "Submitted", local_order_id: "pcs-42" },
+          { order_id: "11", order_status: "PreSubmitted", local_order_id: "pcs-42:stop" },
         ]
       : session(input)
   );
@@ -276,6 +276,96 @@ test("submits a BAG STOP child with the same conidex and reversed ratios", async
   });
 });
 
+test("correlates reordered graph acknowledgements by echoed client order ID", async () => {
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          {
+            order_id: "11",
+            order_status: "PreSubmitted",
+            local_order_id: "pcs-42:stop",
+          },
+          { order_id: "10", order_status: "Submitted", cOID: "pcs-42" },
+        ]
+      : session(input)
+  );
+
+  const result = await client.submitDerivativeOrderGraph(comboStopGraph());
+
+  assert.equal(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId, parentOrderId }) => [
+      memberId,
+      orderId,
+      parentOrderId,
+    ]),
+    [
+      ["entry", "10", null],
+      ["stop", "11", "10"],
+    ]
+  );
+});
+
+test("does not correlate graph acknowledgements without echoed identity", async () => {
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          { order_id: "11", order_status: "PreSubmitted" },
+          { order_id: "10", order_status: "Submitted" },
+        ]
+      : session(input)
+  );
+
+  const result = await client.submitDerivativeOrderGraph(comboStopGraph());
+
+  assert.equal(result.state, "recovery_required");
+  if (result.state !== "recovery_required") return;
+  assert.deepEqual(
+    result.members.map(({ orderId }) => orderId),
+    [null, null]
+  );
+  assert.deepEqual(
+    result.unrecognizedResponses.map((response) => (response as { order_id: string }).order_id),
+    ["11", "10"]
+  );
+});
+
+test("fails closed on conflicting echoed identities and keeps raw evidence", async () => {
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          {
+            order_id: "10",
+            order_status: "Submitted",
+            local_order_id: "pcs-42",
+            cOID: "different-root",
+          },
+          {
+            order_id: "11",
+            order_status: "PreSubmitted",
+            local_order_id: "pcs-42:stop",
+          },
+        ]
+      : session(input)
+  );
+
+  const result = await client.submitDerivativeOrderGraph(comboStopGraph());
+
+  assert.equal(result.state, "recovery_required");
+  if (result.state !== "recovery_required") return;
+  assert.match(result.reasons[0] ?? "", /unique client order identity/);
+  assert.equal(result.members[0]?.orderId, null);
+  assert.equal(result.members[1]?.orderId, "11");
+  assert.deepEqual(result.unrecognizedResponses, [
+    {
+      order_id: "10",
+      order_status: "Submitted",
+      local_order_id: "pcs-42",
+      cOID: "different-root",
+    },
+  ]);
+});
+
 test("warning continuation is restart-safe and supports chained replies", async () => {
   let reply = 0;
   const client = new Fake((input) => {
@@ -285,9 +375,17 @@ test("warning continuation is restart-safe and supports chained replies", async 
       return ++reply === 1
         ? [{ id: "w2", message: ["again"], messageIds: ["o163"] }]
         : [
-            { order_id: "10", order_status: "Submitted" },
-            { order_id: "11", order_status: "Submitted" },
-            { order_id: "12", order_status: "Submitted" },
+            { order_id: "10", order_status: "Submitted", local_order_id: "pcs-42" },
+            {
+              order_id: "11",
+              order_status: "Submitted",
+              local_order_id: "pcs-42:stop",
+            },
+            {
+              order_id: "12",
+              order_status: "Submitted",
+              local_order_id: "pcs-42:hedge",
+            },
           ];
     return session(input);
   });
@@ -354,7 +452,7 @@ test("partial and duplicated graph acknowledgements fail closed", async () => {
       [null, null, null]
     );
     assert.deepEqual(
-      result.unrecognizedResponses.map((item) => (item as { orderId: string }).orderId),
+      result.unrecognizedResponses.map((item) => (item as { order_id: string }).order_id),
       response.map((item) => item.order_id)
     );
   }
@@ -383,9 +481,9 @@ test("submits a root, child, and grandchild with exact activation links", async 
   const client = new Fake((input) =>
     input.path.endsWith("/orders") && input.method === "POST"
       ? [
-          { order_id: "10", order_status: "Submitted" },
-          { order_id: "11", order_status: "Submitted" },
-          { order_id: "12", order_status: "Submitted" },
+          { order_id: "10", order_status: "Submitted", local_order_id: "pcs-42" },
+          { order_id: "11", order_status: "Submitted", local_order_id: "pcs-42:stop" },
+          { order_id: "12", order_status: "Submitted", local_order_id: "pcs-42:hedge" },
         ]
       : session(input)
   );
@@ -449,9 +547,14 @@ test("retains graph member IDs when a terminal acknowledgement includes rejectio
   const client = new Fake((input) =>
     input.path.endsWith("/orders") && input.method === "POST"
       ? [
-          { order_id: "10", order_status: "Submitted" },
-          { order_id: "11", order_status: "Rejected", text: "STOP order was rejected" },
-          { order_id: "12", order_status: "Submitted" },
+          {
+            order_id: "11",
+            order_status: "Rejected",
+            local_order_id: "pcs-42:stop",
+            text: "STOP order was rejected",
+          },
+          { order_id: "12", order_status: "Submitted", local_order_id: "pcs-42:hedge" },
+          { order_id: "10", order_status: "Submitted", local_order_id: "pcs-42" },
         ]
       : session(input)
   );

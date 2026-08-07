@@ -194,6 +194,8 @@ const RECOVERY_TERMINAL_ORDER_FILTERS = ["filled", "cancelled", "inactive"] as c
 interface DecodedOrderSubmission {
   responseIsArray: boolean;
   orders: DerivativeSubmittedOrder[];
+  rawOrderResponses: Map<DerivativeSubmittedOrder, Readonly<Record<string, unknown>>>;
+  invalidClientOrderIdentityOrders: Set<DerivativeSubmittedOrder>;
   pendingCancelOrderIds: string[];
   warnings: OrderWarning[];
   errors: BrokerErrorDetail[];
@@ -2386,19 +2388,24 @@ export class IbkrClient
       decoded.unrecognizedResponses.length === 0;
     const distinct =
       new Set(decoded.orders.map(({ orderId }) => orderId)).size === decoded.orders.length;
-    const canCorrelatePositionally =
-      decoded.warnings.length === 0 &&
-      decoded.unrecognizedResponses.length === 0 &&
-      distinct &&
-      decoded.orders.length === request.nodes.length;
+    const ordersByClientOrderId = new Map<string, DerivativeSubmittedOrder[]>();
+    for (const order of decoded.orders) {
+      if (order.clientOrderId === null) continue;
+      const matchingOrders = ordersByClientOrderId.get(order.clientOrderId) ?? [];
+      matchingOrders.push(order);
+      ordersByClientOrderId.set(order.clientOrderId, matchingOrders);
+    }
+    const correlatedOrders = new Set<DerivativeSubmittedOrder>();
     const members = this.attachGraphParentOrderIds(
-      request.nodes.map((node, index) => {
-        const order = canCorrelatePositionally ? decoded.orders[index] : undefined;
+      request.nodes.map((node) => {
+        const matchingOrders = ordersByClientOrderId.get(this.graphClientOrderId(request, node));
+        const order = matchingOrders?.length === 1 ? matchingOrders[0] : undefined;
         if (order === undefined)
           return (
             previousMembers.find(({ memberId }) => memberId === node.memberId) ??
             this.graphMemberEvidence(request, node)
           );
+        correlatedOrders.add(order);
         const evidence = this.graphMemberEvidence(request, node, {
           order_id: order.orderId,
           order_status: order.status,
@@ -2406,6 +2413,10 @@ export class IbkrClient
         return { ...evidence, status: order.status };
       })
     );
+    const hasCompleteIdentityCorrelation =
+      distinct &&
+      decoded.orders.length === request.nodes.length &&
+      correlatedOrders.size === request.nodes.length;
     if (
       decoded.warnings.length === 1 &&
       decoded.orders.length === 0 &&
@@ -2439,8 +2450,7 @@ export class IbkrClient
     }
     if (
       cleanOrders &&
-      distinct &&
-      decoded.orders.length === request.nodes.length &&
+      hasCompleteIdentityCorrelation &&
       decoded.pendingCancelOrderIds.length === 0 &&
       decoded.orders.every(
         ({ status }) => status !== "UNKNOWN" && status !== "REJECTED" && status !== "CANCELED"
@@ -2453,18 +2463,34 @@ export class IbkrClient
         warnings: [],
       };
     }
+    const hasIdentityCorrelationFailure =
+      decoded.pendingCancelOrderIds.length === 0 &&
+      decoded.errors.length === 0 &&
+      decoded.orders.every(
+        ({ status }) => status !== "UNKNOWN" && status !== "REJECTED" && status !== "CANCELED"
+      ) &&
+      decoded.orders.length === request.nodes.length &&
+      !hasCompleteIdentityCorrelation;
     return {
       state: "recovery_required",
       rootClientOrderId: request.rootClientOrderId,
       members,
       reasons: [
-        this.submissionRecoveryReason(decoded, decoded.orders.length, request.nodes.length),
+        hasIdentityCorrelationFailure
+          ? "IBKR did not return a unique client order identity for each graph member"
+          : this.submissionRecoveryReason(decoded, decoded.orders.length, request.nodes.length),
       ],
       warnings: decoded.warnings,
       errors: decoded.errors,
-      unrecognizedResponses: canCorrelatePositionally
-        ? decoded.unrecognizedResponses
-        : [...decoded.unrecognizedResponses, ...decoded.orders],
+      unrecognizedResponses: [
+        ...decoded.unrecognizedResponses,
+        ...decoded.orders
+          .filter(
+            (order) =>
+              !correlatedOrders.has(order) && !decoded.invalidClientOrderIdentityOrders.has(order)
+          )
+          .map((order) => decoded.rawOrderResponses.get(order) ?? order),
+      ],
     };
   }
 
@@ -2546,6 +2572,8 @@ export class IbkrClient
     const decoded: DecodedOrderSubmission = {
       responseIsArray: Array.isArray(response),
       orders: [],
+      rawOrderResponses: new Map(),
+      invalidClientOrderIdentityOrders: new Set(),
       pendingCancelOrderIds: [],
       warnings: [],
       errors: [],
@@ -2615,15 +2643,25 @@ export class IbkrClient
         ) {
           decoded.pendingCancelOrderIds.push(orderId);
         }
-        decoded.orders.push({
+        const clientOrderIdentity = this.consistentStringAliases(
+          record["local_order_id"],
+          record["cOID"]
+        );
+        const order: DerivativeSubmittedOrder = {
           orderId,
           status: this.normalizeDerivativeOrderStatus(
             typeof orderStatus === "string" ? orderStatus : undefined,
             0,
             0
           ),
-          clientOrderId: null,
-        });
+          clientOrderId: clientOrderIdentity.value ?? null,
+        };
+        decoded.orders.push(order);
+        decoded.rawOrderResponses.set(order, { ...record });
+        if (!clientOrderIdentity.valid) {
+          decoded.invalidClientOrderIdentityOrders.add(order);
+          decoded.unrecognizedResponses.push({ ...record });
+        }
         recognized = true;
       } else if (hasOrderId) {
         decoded.unrecognizedResponses.push({ ...record });

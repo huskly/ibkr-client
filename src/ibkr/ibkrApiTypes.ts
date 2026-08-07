@@ -191,6 +191,8 @@ export interface IbkrOrderAcceptedResponse {
   orderId?: string | number;
   order_status?: string;
   orderStatus?: string;
+  local_order_id?: string;
+  cOID?: string;
 }
 
 export interface IbkrOrderWarningResponse {

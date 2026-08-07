@@ -338,7 +338,10 @@ attempted once after revalidating the account's authentication and competing-ses
 chained and unknown warnings remain pending for the caller, and mixed, partial,
 duplicated, terminal, malformed, or ambiguous acknowledgements return `recovery_required`. Broker
 IDs from ambiguous acknowledgements are retained as uncorrelated responses rather than assigned to
-nodes by position. A failed synchronous response retains a readable `text` or `warning_message` in
+nodes by position. Submission acknowledgements are correlated only by the echoed `local_order_id`
+or `cOID`. If IBKR does not echo a complete and consistent identity for each member,
+the result is `recovery_required`, and the client does not assign the broker IDs to graph members.
+A failed synchronous response retains a readable `text` or `warning_message` in
 `errors` and recovery reasons when IBKR supplies one.
 `recoverDerivativeOrderGraph(...)` reconstructs the exact graph from its root client ID, any
 known member broker ID, and terminal evidence keyed by the durable root client ID. It searches
