@@ -507,7 +507,6 @@ test("partial graph acknowledgements never report accepted and name members with
 
   assert.equal(result.state, "recovery_required");
   if (result.state !== "recovery_required") return;
-  assert.notEqual(result.state, "accepted");
   assert.deepEqual(
     result.members.map(({ memberId, orderId }) => [memberId, orderId]),
     [
