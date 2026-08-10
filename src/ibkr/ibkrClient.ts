@@ -3896,10 +3896,12 @@ export class IbkrClient
     const key = [underlying, input.expiry, String(input.strike), input.right].join(":");
     let pending = this.optionContractResolution.get(key);
     if (!pending) {
-      pending = this.loadExactOptionContract({ ...input, symbol: underlying }, month).catch((error) => {
-        this.optionContractResolution.delete(key);
-        throw error;
-      });
+      pending = this.loadExactOptionContract({ ...input, symbol: underlying }, month).catch(
+        (error: unknown) => {
+          this.optionContractResolution.delete(key);
+          throw error;
+        }
+      );
       this.optionContractResolution.set(key, pending);
     }
     return pending;
@@ -3936,8 +3938,7 @@ export class IbkrClient
         continue;
       }
       if (
-        contract &&
-        contract.underlying === input.symbol &&
+        contract?.underlying === input.symbol &&
         contract.expiry === input.expiry &&
         contract.right === input.right &&
         contract.strike === input.strike
@@ -4144,7 +4145,7 @@ export class IbkrClient
     const normalized = symbol.trim().toUpperCase();
     let pending = this.optionUnderlyingDiscovery.get(normalized);
     if (!pending) {
-      pending = this.loadOptionUnderlying(normalized).catch((error) => {
+      pending = this.loadOptionUnderlying(normalized).catch((error: unknown) => {
         this.optionUnderlyingDiscovery.delete(normalized);
         throw error;
       });
@@ -4171,7 +4172,11 @@ export class IbkrClient
     if (!Number.isSafeInteger(conid) || conid <= 0) {
       throw new Error(`IBKR returned an invalid option underlying contract id for ${symbol}`);
     }
-    return { conid, symbol: candidate.symbol?.trim().toUpperCase() || symbol };
+    const candidateSymbol = candidate.symbol?.trim().toUpperCase();
+    return {
+      conid,
+      symbol: candidateSymbol === "" || candidateSymbol === undefined ? symbol : candidateSymbol,
+    };
   }
 
   private async loadOptionContracts(symbol: string, month: string): Promise<OptionContract[]> {
@@ -4209,7 +4214,7 @@ export class IbkrClient
       for (const raw of responses.flat()) {
         const contract = normalizeOptionContract({
           conid: raw.conid,
-          symbol: raw.symbol ?? underlying.symbol ?? symbol,
+          symbol: raw.symbol ?? underlying.symbol,
           maturityDate: raw.maturityDate,
           right: raw.right,
           strike: raw.strike,
