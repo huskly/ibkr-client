@@ -16,6 +16,7 @@ import type {
   BrokerOrdersOptions,
   BrokerPosition,
   BrokerQuote,
+  BrokerQuoteRequest,
   BrokerTransaction,
   BrokerTransactionHistory,
   BrokerErrorDetail,
@@ -1650,7 +1651,18 @@ export class IbkrClient
   async getPositions(symbol?: string): Promise<BrokerPosition[]> {
     const accountId = await this.getAccountId();
     const rows = await this.fetchAllPositions(accountId);
-    const dayPnl = await this.fetchDayPnl(rows.map((p) => String(p.conid)).filter(Boolean));
+    for (const position of rows) {
+      if (
+        position.conid === undefined ||
+        !Number.isSafeInteger(position.conid) ||
+        position.conid <= 0
+      ) {
+        throw new Error(
+          `IBKR returned an invalid position contract id for ${position.contractDesc ?? "-"}`
+        );
+      }
+    }
+    const dayPnl = await this.fetchDayPnl(rows.map((position) => String(position.conid)));
 
     let positions = rows.map((p) => this.normalizePosition(p, dayPnl));
     if (symbol) {
@@ -1705,7 +1717,11 @@ export class IbkrClient
       assetClass === "OPT"
         ? (extractOsiPositionSymbol(contractDescription) ?? contractDescription)
         : contractDescription;
+    if (p.conid === undefined || !Number.isSafeInteger(p.conid) || p.conid <= 0) {
+      throw new Error(`IBKR returned an invalid position contract id for ${symbol}`);
+    }
     return {
+      brokerId: String(p.conid),
       symbol,
       assetType: ASSET_CLASS_LABELS[assetClass] ?? (assetClass || "-"),
       longQuantity: qty > 0 ? qty : 0,
@@ -1714,19 +1730,50 @@ export class IbkrClient
       ...(p.multiplier === undefined ? {} : { multiplier: p.multiplier }),
       marketPrice: toNumber(p.mktPrice),
       marketValue: toNumber(p.mktValue),
-      currentDayProfitLoss: p.conid !== undefined ? (dayPnl.get(p.conid) ?? 0) : 0,
+      currentDayProfitLoss: dayPnl.get(p.conid) ?? 0,
       openProfitLoss: toNumber(p.unrealizedPnl),
     };
   }
 
-  async getQuotes(symbols: string[]): Promise<Record<string, BrokerQuote>> {
-    const contracts = await Promise.all(symbols.map((symbol) => this.resolveQuoteContract(symbol)));
-    const resolvedContracts = contracts.filter(
-      (contract): contract is QuoteContract => contract !== undefined
-    );
-    if (!resolvedContracts.length) return {};
+  async getQuotes(requests: readonly BrokerQuoteRequest[]): Promise<Record<string, BrokerQuote>> {
+    const unique = new Map<string, BrokerQuoteRequest>();
+    for (const request of requests) {
+      if (!request.symbol.trim()) throw new Error("A quote request symbol is required");
+      const existing = unique.get(request.symbol);
+      if (existing !== undefined && existing.brokerId !== request.brokerId) {
+        throw new Error(`Conflicting IBKR broker contract ids for ${request.symbol}`);
+      }
+      unique.set(request.symbol, request);
+    }
 
-    const conids = resolvedContracts.map((contract) => contract.conid).join(",");
+    const contracts = await Promise.all(
+      [...unique.values()].map(async (request): Promise<QuoteContract | undefined> => {
+        if (request.brokerId === undefined) return this.resolveQuoteContract(request.symbol);
+        if (!/^[1-9]\d*$/.test(request.brokerId)) {
+          throw new Error(`Invalid IBKR broker contract id: ${request.brokerId}`);
+        }
+        const conid = Number(request.brokerId);
+        if (!Number.isSafeInteger(conid) || conid <= 0) {
+          throw new Error(`Invalid IBKR broker contract id: ${request.brokerId}`);
+        }
+        return {
+          requestedSymbol: request.symbol,
+          symbol: request.symbol,
+          conid,
+        };
+      })
+    );
+    return this.fetchQuotes(
+      contracts.filter((contract): contract is QuoteContract => contract !== undefined)
+    );
+  }
+
+  private async fetchQuotes(
+    contracts: readonly QuoteContract[]
+  ): Promise<Record<string, BrokerQuote>> {
+    if (!contracts.length) return {};
+
+    const conids = contracts.map((contract) => contract.conid).join(",");
     const params = { conids, fields: QUOTE_FIELDS };
     await this.req<unknown>({ path: "iserver/marketdata/snapshot", params }); // warm up
     await this.wait(2000);
@@ -1744,17 +1791,16 @@ export class IbkrClient
         .map((snapshot) => [snapshot.conid, snapshot])
     );
     const histories = await Promise.all(
-      resolvedContracts.map((contract) => this.fetchQuoteHistory(contract.conid))
+      contracts.map((contract) => this.fetchQuoteHistory(contract.conid))
     );
     const quotes: Record<string, BrokerQuote> = {};
 
-    for (const [index, contract] of resolvedContracts.entries()) {
+    for (const [index, contract] of contracts.entries()) {
       const snapshot = snapshotByConid.get(contract.conid);
       if (snapshot === undefined) continue;
       const history = histories[index];
       const quote = this.normalizeQuote(contract, snapshot, history);
       quotes[contract.requestedSymbol] = quote;
-      quotes[contract.symbol] = quote;
     }
 
     return quotes;
