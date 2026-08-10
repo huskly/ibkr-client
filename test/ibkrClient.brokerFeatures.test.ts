@@ -238,20 +238,33 @@ void test("getPositions exposes canonical OSI symbols for options", async () => 
   ]);
 });
 
-void test("getPositions rejects a missing broker contract id", async () => {
-  const client = new FakeIbkrClient((input) => {
-    if (input.path === "portfolio/accounts") return [{ accountId: "U123" }];
-    if (input.path === "portfolio/U123/positions/0") {
-      return [{ contractDesc: "NFLX", assetClass: "STK", position: 1 }];
-    }
-    if (input.path === "portfolio/U123/positions/1") return [];
-    throw new Error(`Unexpected request: ${input.path}`);
-  });
+void test("getPositions rejects invalid broker contract ids before market-data requests", async () => {
+  for (const conid of [undefined, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "portfolio/accounts") return [{ accountId: "U123" }];
+      if (input.path === "portfolio/U123/positions/0") {
+        return [
+          {
+            ...(conid === undefined ? {} : { conid }),
+            contractDesc: "NFLX",
+            assetClass: "STK",
+            position: 1,
+          },
+        ];
+      }
+      if (input.path === "portfolio/U123/positions/1") return [];
+      throw new Error(`Unexpected request: ${input.path}`);
+    });
 
-  await assert.rejects(
-    () => client.getPositions(),
-    /IBKR returned an invalid position contract id for NFLX/
-  );
+    await assert.rejects(
+      () => client.getPositions(),
+      /IBKR returned an invalid position contract id for NFLX/
+    );
+    assert.equal(
+      client.calls.some(({ path }) => path === "iserver/marketdata/snapshot"),
+      false
+    );
+  }
 });
 
 void test("fetchOrders treats every active IBKR status as WORKING", async () => {
