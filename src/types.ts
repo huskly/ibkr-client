@@ -52,6 +52,8 @@ export interface AccountBalances {
 }
 
 export interface BrokerPosition {
+  /** Broker-native contract id for exact reads in the current broker session. */
+  brokerId: string;
   /** Human-readable contract symbol/description. */
   symbol: string;
   /** Normalized asset type, e.g. EQUITY, OPTION, FUTURE. */
@@ -160,6 +162,13 @@ export interface BrokerQuoteData {
  * Broker-neutral quote, mirroring huskly-cli's (Schwab-shaped) `BrokerQuote` so
  * consumers normalize IBKR and Schwab quotes through one code path.
  */
+export interface BrokerQuoteRequest {
+  /** Stable caller-facing key used in the returned quote record. */
+  symbol: string;
+  /** Broker-native contract id from the current broker session, when already known. */
+  brokerId?: string;
+}
+
 export interface BrokerQuote {
   symbol: string;
   reference: BrokerQuoteReference;
@@ -812,7 +821,7 @@ export interface BrokerClient {
   getAccountId(): Promise<string>;
   getAccountBalances(): Promise<AccountBalances>;
   getPositions(symbol?: string): Promise<BrokerPosition[]>;
-  getQuotes(symbols: string[]): Promise<Record<string, BrokerQuote>>;
+  getQuotes(requests: readonly BrokerQuoteRequest[]): Promise<Record<string, BrokerQuote>>;
   searchInstruments(
     symbol: string,
     projection?: BrokerInstrumentSearchProjection

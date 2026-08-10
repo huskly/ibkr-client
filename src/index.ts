@@ -28,6 +28,7 @@ export type {
   BrokerPosition,
   BrokerQuote,
   BrokerQuoteData,
+  BrokerQuoteRequest,
   BrokerQuoteReference,
   BrokerTransaction,
   BrokerTransactionHistory,

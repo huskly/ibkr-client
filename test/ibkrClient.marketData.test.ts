@@ -688,7 +688,7 @@ void test("OSI getQuotes resolves the option conid before requesting a snapshot"
     return discoveryResponse(input);
   });
   const symbol = "MSTR  260821C00215000";
-  const quotes = await client.getQuotes([symbol]);
+  const quotes = await client.getQuotes([{ symbol }]);
   assert.equal(quotes[symbol]?.quote.lastPrice, 4.1);
   assert.equal(
     client.calls.some(
@@ -696,6 +696,49 @@ void test("OSI getQuotes resolves the option conid before requesting a snapshot"
     ),
     true
   );
+});
+
+void test("known broker ids quote held options without symbol rediscovery", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      assert.equal(input.params?.["conids"], "987654");
+      return snapshots === 1
+        ? []
+        : [{ conid: 987654, "31": "4.10", "55": "NFLX", "84": "4", "86": "4.2" }];
+    }
+    if (input.path === "iserver/marketdata/history") {
+      assert.equal(input.params?.["conid"], "987654");
+      return { data: [] };
+    }
+    throw new Error(`Known broker ids must not use symbol discovery: ${input.path}`);
+  });
+  const symbol = "NFLX  260821C01200000";
+  const quotes = await client.getQuotes([{ symbol, brokerId: "987654" }]);
+  assert.equal(quotes[symbol]?.quote.lastPrice, 4.1);
+  assert.equal(quotes["NFLX"], undefined);
+});
+
+void test("invalid or conflicting broker ids fail before market-data requests", async () => {
+  const client = new FakeIbkrClient((input) => {
+    throw new Error(`No request was expected: ${input.path}`);
+  });
+  for (const brokerId of ["", " 1", "0", "-1", "1.5", "12x", "9007199254740992"]) {
+    await assert.rejects(
+      () => client.getQuotes([{ symbol: "NFLX  260821C01200000", brokerId }]),
+      /Invalid IBKR broker contract id/
+    );
+  }
+  await assert.rejects(
+    () =>
+      client.getQuotes([
+        { symbol: "NFLX  260821C01200000", brokerId: "1" },
+        { symbol: "NFLX  260821C01200000", brokerId: "2" },
+      ]),
+    /Conflicting IBKR broker contract ids/
+  );
+  assert.equal(client.calls.length, 0);
 });
 
 void test("index symbol getQuotes falls back to secdef/search when trsrv/stocks is empty", async () => {
@@ -724,7 +767,7 @@ void test("index symbol getQuotes falls back to secdef/search when trsrv/stocks 
     if (input.path === "iserver/marketdata/history") return { data: [] };
     throw new Error(`Unexpected request: ${input.path}`);
   });
-  const quotes = await client.getQuotes(["VIX"]);
+  const quotes = await client.getQuotes([{ symbol: "VIX" }]);
   assert.equal(quotes["VIX"]?.quote.lastPrice, 13.5);
   assert.equal(
     client.calls.some(
@@ -747,7 +790,7 @@ void test("unresolvable non-stock symbol fails closed without a snapshot", async
     if (input.path === "iserver/marketdata/history") return { data: [] };
     throw new Error(`Unexpected request: ${input.path}`);
   });
-  const quotes = await client.getQuotes(["NOPE"]);
+  const quotes = await client.getQuotes([{ symbol: "NOPE" }]);
   assert.deepEqual(quotes, {});
   assert.equal(snapshots, 0);
 });
@@ -835,7 +878,7 @@ void test("underlying quotes carry market-data availability and snapshot timesta
     return [];
   });
 
-  const quotes = await client.getQuotes(["MSTR"]);
+  const quotes = await client.getQuotes([{ symbol: "MSTR" }]);
   assert.equal(quotes["MSTR"]?.availability, "delayed");
   assert.equal(quotes["MSTR"]?.timestamp, "2026-08-17T20:53:20.000Z");
 });
