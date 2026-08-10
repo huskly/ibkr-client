@@ -1,6 +1,6 @@
 {
   "name": "@huskly/ibkr-client",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "description": "Interactive Brokers Web API client with OAuth 1.0a authentication",
   "type": "module",
   "main": "dist/index.js",
