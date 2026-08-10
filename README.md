@@ -84,6 +84,8 @@ The reusable `IbkrClient` also exposes typed, read-only strategy data:
 - `getOptionChain(...)` returns an exact-expiry chain with canonical OSI symbols, conids,
   bid/ask/mid prices, delta, session volume, and open interest.
 - `getOptionQuote(...)` resolves and prices one exact contract with the same market-data shape.
+  It uses one security-definition request after the per-underlying session search. It does not load
+  the complete option chain.
 - `getOptionContract(conid)` maps a broker conid back to durable OSI identity.
 
 ### Broker-neutral derivative discovery
