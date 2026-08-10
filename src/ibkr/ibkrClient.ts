@@ -125,6 +125,12 @@ interface QuoteContract {
   exchange?: string;
 }
 
+/** An optionable underlying resolved and primed in the current IBKR session. */
+interface OptionUnderlying {
+  conid: number;
+  symbol: string;
+}
+
 /** Live market-data snapshot field 78 = position's P&L for the current day. */
 const DAY_PNL_FIELD = "78";
 const OPTION_QUOTE_FIELDS = [
@@ -234,6 +240,10 @@ function parseRetryAfter(raw: unknown): number | undefined {
   return undefined;
 }
 
+function isUnknownRecord(input: unknown): input is Readonly<Record<string, unknown>> {
+  return typeof input === "object" && input !== null && !Array.isArray(input);
+}
+
 function isHeadersLike(input: unknown): input is { get(name: string): string | null } {
   return (
     typeof input === "object" &&
@@ -341,6 +351,8 @@ export class IbkrClient
   private initPromise?: Promise<void>;
   private accountIdPromise?: Promise<string>;
   private readonly optionDiscovery = new Map<string, Promise<OptionContract[]>>();
+  private readonly optionUnderlyingDiscovery = new Map<string, Promise<OptionUnderlying>>();
+  private readonly optionContractResolution = new Map<string, Promise<OptionContract | null>>();
   private readonly derivativeDiscovery = new Map<string, Promise<DerivativeContract[]>>();
   private readonly requestScheduler: IbkrRequestScheduler;
 
@@ -3882,16 +3894,99 @@ export class IbkrClient
     });
   }
 
-  private async resolveOptionContract(input: OptionQuoteRequest): Promise<OptionContract | null> {
-    const contracts = await this.discoverOptions(input.symbol, monthCode(input.expiry));
-    return (
-      contracts.find(
-        (contract) =>
-          contract.expiry === input.expiry &&
-          contract.right === input.right &&
-          contract.strike === input.strike
-      ) ?? null
-    );
+  private resolveOptionContract(input: OptionQuoteRequest): Promise<OptionContract | null> {
+    const underlying = input.symbol.trim().toUpperCase();
+    const month = monthCode(input.expiry);
+    const key = [underlying, input.expiry, String(input.strike), input.right].join(":");
+    let pending = this.optionContractResolution.get(key);
+    if (!pending) {
+      pending = this.loadExactOptionContract({ ...input, symbol: underlying }, month).then(
+        (contract) => {
+          if (contract === null) this.optionContractResolution.delete(key);
+          return contract;
+        },
+        (error: unknown) => {
+          this.optionContractResolution.delete(key);
+          throw error;
+        }
+      );
+      this.optionContractResolution.set(key, pending);
+    }
+    return pending;
+  }
+
+  /** Resolve one known option directly, without enumerating its month's complete chain. */
+  private async loadExactOptionContract(
+    input: OptionQuoteRequest,
+    month: string
+  ): Promise<OptionContract | null> {
+    const underlying = await this.discoverOptionUnderlying(input.symbol);
+    const definitions = await this.req<unknown>({
+      path: "iserver/secdef/info",
+      params: {
+        conid: String(underlying.conid),
+        sectype: "OPT",
+        month,
+        strike: input.strike,
+        right: input.right,
+      },
+    });
+    if (!Array.isArray(definitions)) {
+      throw new Error(`IBKR returned malformed option definitions for ${input.symbol} ${month}`);
+    }
+    const matches: OptionContract[] = [];
+    let malformed = false;
+    for (const raw of definitions) {
+      if (!isUnknownRecord(raw)) {
+        malformed = true;
+        continue;
+      }
+      const rawConid = raw["conid"];
+      const rawSymbol = raw["symbol"];
+      const rawMaturityDate = raw["maturityDate"];
+      const rawRight = raw["right"];
+      const rawStrike = raw["strike"];
+      const rawSecType = raw["secType"];
+      let contract: OptionContract | null;
+      try {
+        contract = normalizeOptionContract({
+          conid: typeof rawConid === "number" ? rawConid : undefined,
+          symbol: typeof rawSymbol === "string" ? rawSymbol : underlying.symbol,
+          maturityDate: typeof rawMaturityDate === "string" ? rawMaturityDate : undefined,
+          right: typeof rawRight === "string" ? rawRight : undefined,
+          strike:
+            typeof rawStrike === "string" || typeof rawStrike === "number" ? rawStrike : undefined,
+        });
+      } catch {
+        contract = null;
+      }
+      if (
+        contract === null ||
+        (rawSecType !== undefined &&
+          (typeof rawSecType !== "string" || rawSecType.toUpperCase() !== "OPT"))
+      ) {
+        malformed = true;
+        continue;
+      }
+      if (
+        contract.underlying === input.symbol &&
+        contract.expiry === input.expiry &&
+        contract.right === input.right &&
+        contract.strike === input.strike
+      ) {
+        matches.push(contract);
+      }
+    }
+    if (malformed) {
+      throw new Error(`IBKR returned malformed option definitions for ${input.symbol} ${month}`);
+    }
+    const unique = [...new Map(matches.map((contract) => [contract.conid, contract])).values()];
+    if (unique.length > 1) {
+      throw new Error(
+        `IBKR returned ambiguous option definitions for ${input.symbol} ${input.expiry}`
+      );
+    }
+    return unique[0] ?? null;
   }
 
   private discoverDerivativeMonth(
@@ -4085,22 +4180,67 @@ export class IbkrClient
     return pending;
   }
 
-  private async loadOptionContracts(symbol: string, month: string): Promise<OptionContract[]> {
-    // This search is load-bearing: IBKR silently returns empty strikes unless the current
+  /** Search once per underlying because IBKR uses this call to prime option lookup state. */
+  private discoverOptionUnderlying(symbol: string): Promise<OptionUnderlying> {
+    const normalized = symbol.trim().toUpperCase();
+    let pending = this.optionUnderlyingDiscovery.get(normalized);
+    if (!pending) {
+      pending = this.loadOptionUnderlying(normalized).catch((error: unknown) => {
+        this.optionUnderlyingDiscovery.delete(normalized);
+        throw error;
+      });
+      this.optionUnderlyingDiscovery.set(normalized, pending);
+    }
+    return pending;
+  }
+
+  private async loadOptionUnderlying(symbol: string): Promise<OptionUnderlying> {
+    // This search is load-bearing: IBKR silently returns empty definitions unless the current
     // session has first searched the underlying.
-    const search = await this.req<IbkrSecdefSearchResult[]>({
+    const search = await this.req<unknown>({
       path: "iserver/secdef/search",
       params: { symbol },
     });
-    const underlying = search.find(
-      (candidate) =>
-        candidate.conid !== undefined &&
-        candidate.sections?.some((section) => section.secType === "OPT")
-    );
-    if (underlying?.conid === undefined) {
-      throw new Error(`IBKR did not identify ${symbol} as an optionable underlying`);
+    if (!Array.isArray(search)) {
+      throw new Error(`IBKR returned malformed option underlying results for ${symbol}`);
     }
+    const candidates = search.flatMap((item) => {
+      if (!isUnknownRecord(item)) return [];
+      const candidateSymbol = item["symbol"];
+      if (typeof candidateSymbol !== "string" || candidateSymbol.trim().toUpperCase() !== symbol) {
+        return [];
+      }
+      const sections = item["sections"];
+      if (
+        !Array.isArray(sections) ||
+        !sections.some(
+          (section) =>
+            isUnknownRecord(section) &&
+            typeof section["secType"] === "string" &&
+            section["secType"].trim().toUpperCase() === "OPT"
+        )
+      ) {
+        return [];
+      }
+      const conid = Number(item["conid"]);
+      return Number.isSafeInteger(conid) && conid > 0 ? [{ conid, symbol }] : [];
+    });
+    const unique = [
+      ...new Map(candidates.map((candidate) => [candidate.conid, candidate])).values(),
+    ];
+    if (unique.length !== 1) {
+      throw new Error(
+        `IBKR option underlying identity is ${unique.length ? "ambiguous" : "missing"} for ${symbol}`
+      );
+    }
+    const [underlying] = unique;
+    if (underlying === undefined)
+      throw new Error(`IBKR lost the selected underlying for ${symbol}`);
+    return underlying;
+  }
 
+  private async loadOptionContracts(symbol: string, month: string): Promise<OptionContract[]> {
+    const underlying = await this.discoverOptionUnderlying(symbol);
     const strikes = await this.req<IbkrSecdefStrikesResponse>({
       path: "iserver/secdef/strikes",
       params: { conid: String(underlying.conid), sectype: "OPT", month },
@@ -4134,7 +4274,7 @@ export class IbkrClient
       for (const raw of responses.flat()) {
         const contract = normalizeOptionContract({
           conid: raw.conid,
-          symbol: raw.symbol ?? underlying.symbol ?? symbol,
+          symbol: raw.symbol ?? underlying.symbol,
           maturityDate: raw.maturityDate,
           right: raw.right,
           strike: raw.strike,

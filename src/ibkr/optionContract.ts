@@ -75,6 +75,8 @@ export function normalizeOptionContract(input: {
   const strike = Number(input.strike);
   if (
     input.conid === undefined ||
+    !Number.isSafeInteger(input.conid) ||
+    input.conid <= 0 ||
     !input.symbol ||
     !input.maturityDate ||
     (right !== "C" && right !== "P") ||

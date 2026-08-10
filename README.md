@@ -70,7 +70,8 @@ validated at runtime. Its broker-neutral account API includes:
   funds, buying power, excess liquidity, cushion, SMA, equity-with-loan, Reg-T, initial- and
   maintenance-margin, full, look-ahead, and leverage values. Margin values are `null` when IBKR
   omits or returns an invalid value; numeric zero remains `0`.
-- `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes.
+- `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes. `getQuotes()` also
+  resolves a complete OSI option symbol without loading its option chain.
 - `fetchTransactionHistory()` for normalized portfolio transactions.
 - `fetchOrders()` for normalized live orders, including aggregate `WORKING`
   matching across IBKR's active order states.
@@ -84,6 +85,8 @@ The reusable `IbkrClient` also exposes typed, read-only strategy data:
 - `getOptionChain(...)` returns an exact-expiry chain with canonical OSI symbols, conids,
   bid/ask/mid prices, delta, session volume, and open interest.
 - `getOptionQuote(...)` resolves and prices one exact contract with the same market-data shape.
+  It uses one security-definition request after the per-underlying session search. It does not load
+  the complete option chain.
 - `getOptionContract(conid)` maps a broker conid back to durable OSI identity.
 
 ### Broker-neutral derivative discovery
@@ -135,9 +138,11 @@ to `live`, `delayed`, `frozen`, `frozen-delayed`, or `unavailable`. A missing su
 never reported as live data. All discovery APIs are read-only and do not call preview, order,
 warning-reply, or cancellation endpoints.
 
-Contract discovery always calls `secdef/search` before `secdef/strikes`, because IBKR keeps
-that priming state in the authenticated session. Empty post-prime strikes and incomplete
-bid/ask/delta snapshots throw instead of looking like a valid chain with no candidates.
+Full-chain contract discovery always calls `secdef/search` before `secdef/strikes`, because IBKR
+keeps that priming state in the authenticated session. An exact OSI lookup uses the cached
+per-underlying search and one `secdef/info` request. It does not request the strike list. Empty
+post-prime strikes and incomplete bid/ask/delta snapshots throw instead of looking like a valid
+chain with no candidates.
 Request shaping is resilient by design: option discovery normalizes the requested symbol,
 applies bounded batching for secondary-definition and market-data calls, and retries read-only
 requests on transient `429` responses with capped exponential backoff (including `Retry-After`

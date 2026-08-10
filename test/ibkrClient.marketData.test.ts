@@ -534,6 +534,149 @@ void test("price history resolves the contract and normalizes OHLCV", async () =
   ]);
 });
 
+void test("known option resolution uses one direct secdef request and caches it", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
+    }
+    if (input.path === "iserver/secdef/strikes") {
+      throw new Error("Exact option resolution must not enumerate strikes");
+    }
+    if (input.path === "iserver/secdef/info") {
+      assert.equal(input.params?.["conid"], "272110");
+      assert.equal(input.params?.["sectype"], "OPT");
+      assert.equal(input.params?.["month"], "AUG26");
+      if (input.params?.["right"] === "P") {
+        assert.equal(input.params["strike"], 95);
+        return [{ conid: 103, symbol: "MSTR", maturityDate: "20260821", right: "P", strike: 95 }];
+      }
+      assert.equal(input.params?.["right"], "C");
+      assert.equal(input.params?.["strike"], 215);
+      return [
+        { conid: 101, symbol: "MSTR", maturityDate: "20260814", right: "C", strike: 215 },
+        { conid: 102, symbol: "MSTR", maturityDate: "20260821", right: "C", strike: 215 },
+      ];
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      return [
+        { conid: 102, "84": "4", "86": "4.2", "7308": "0.25" },
+        { conid: 103, "84": "1", "86": "1.2", "7308": "-0.1" },
+      ];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const request = { symbol: "MSTR", expiry: "2026-08-21", strike: 215, right: "C" as const };
+  const [first, second] = await Promise.all([
+    client.getOptionQuote(request),
+    client.getOptionQuote(request),
+  ]);
+  const third = await client.getOptionQuote({
+    symbol: "mstr",
+    expiry: "2026-08-21",
+    strike: 95,
+    right: "P",
+  });
+  assert.equal(first?.conid, 102);
+  assert.equal(second?.conid, 102);
+  assert.equal(third?.conid, 103);
+  assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/search").length, 1);
+  assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/info").length, 2);
+  assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/strikes").length, 0);
+});
+
+void test("known option resolution rejects a mismatched direct definition", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
+    }
+    if (input.path === "iserver/secdef/info") {
+      return [{ conid: 101, symbol: "MSTR", maturityDate: "20260814", right: "C", strike: 215 }];
+    }
+    if (input.path === "iserver/secdef/strikes") {
+      throw new Error("Exact option resolution must not enumerate strikes");
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  assert.equal(
+    await client.getOptionQuote({
+      symbol: "MSTR",
+      expiry: "2026-08-21",
+      strike: 215,
+      right: "C",
+    }),
+    null
+  );
+  assert.equal(
+    client.calls.filter((call) => call.path === "iserver/marketdata/snapshot").length,
+    0
+  );
+  await client.getOptionQuote({
+    symbol: "MSTR",
+    expiry: "2026-08-21",
+    strike: 215,
+    right: "C",
+  });
+  assert.equal(
+    client.calls.filter((call) => call.path === "iserver/secdef/info").length,
+    2,
+    "a negative response is not cached"
+  );
+});
+
+void test("known option resolution rejects ambiguous or invalid broker definitions", async () => {
+  for (const definitions of [
+    [
+      { conid: 101, symbol: "MSTR", maturityDate: "20260821", right: "C", strike: 215 },
+      { conid: 102, symbol: "MSTR", maturityDate: "20260821", right: "C", strike: 215 },
+    ],
+    [{ conid: 0, symbol: "MSTR", maturityDate: "20260821", right: "C", strike: 215 }],
+  ]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/secdef/search") {
+        return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
+      }
+      if (input.path === "iserver/secdef/info") return definitions;
+      throw new Error(`Unexpected request: ${input.path}`);
+    });
+    await assert.rejects(
+      () =>
+        client.getOptionQuote({
+          symbol: "MSTR",
+          expiry: "2026-08-21",
+          strike: 215,
+          right: "C",
+        }),
+      /ambiguous|malformed/
+    );
+    assert.equal(
+      client.calls.filter((call) => call.path === "iserver/marketdata/snapshot").length,
+      0
+    );
+  }
+});
+
+void test("known option resolution requires exact broker evidence for the underlying", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: 272110, symbol: "WRONG", sections: [{ secType: "OPT" }] }];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+  await assert.rejects(
+    () =>
+      client.getOptionQuote({
+        symbol: "MSTR",
+        expiry: "2026-08-21",
+        strike: 215,
+        right: "C",
+      }),
+    /underlying identity is missing/
+  );
+  assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/info").length, 0);
+});
+
 void test("OSI getQuotes resolves the option conid before requesting a snapshot", async () => {
   let snapshots = 0;
   const client = new FakeIbkrClient((input) => {
