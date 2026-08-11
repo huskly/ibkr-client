@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { IbkrPriceHistoryContractError } from "../src/index.js";
-import type {
-  AccountBalances,
-  BrokerClient,
-  BrokerQuoteOptions,
-  BrokerQuoteRequest,
-  PriceHistoryContractCandidate,
-  PriceHistoryContractSelector,
-  PriceHistoryResult,
-  PriceHistorySecurityType,
-  PriceHistoryTelemetry,
+import {
+  IbkrHttpError,
+  IbkrPriceHistoryContractError,
+  type AccountBalances,
+  type BrokerClient,
+  type BrokerQuoteOptions,
+  type BrokerQuoteRequest,
+  type IbkrHttpErrorResponse,
+  type PriceHistoryContractCandidate,
+  type PriceHistoryContractSelector,
+  type PriceHistoryResult,
+  type PriceHistorySecurityType,
+  type PriceHistoryTelemetry,
 } from "../src/index.js";
 
 interface PackageManifest {
@@ -70,4 +72,16 @@ test("package exposes only the library and no CLI entry point", async () => {
   }
   assert.equal(manifest.dependencies?.["chalk"], undefined);
   assert.equal(manifest.dependencies?.["commander"], undefined);
+});
+
+void test("package exports structured HTTP error evidence", () => {
+  const response: IbkrHttpErrorResponse = {
+    status: 500,
+    body: "Chart data unavailable",
+    retryAfter: null,
+  };
+  const error = new IbkrHttpError("Response status 500", 500, response);
+  assert.equal(error.status, 500);
+  assert.equal(error.statusCode, 500);
+  assert.equal(error.response, response);
 });

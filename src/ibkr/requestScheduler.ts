@@ -2,11 +2,12 @@ export type IbkrRequestPriority = "EXECUTION" | "STANDARD" | "DISCOVERY";
 
 export type IbkrRequestErrorClassification =
   | { kind: "THROTTLED"; retryAfterMs?: number }
+  | { kind: "SERVER_ERROR" }
   | { kind: "TEMPORARILY_BLOCKED" }
   | { kind: "OTHER" };
 
 export interface IbkrRequestTelemetry {
-  event: "THROTTLED" | "CIRCUIT_OPEN";
+  event: "THROTTLED" | "SERVER_RETRY" | "CIRCUIT_OPEN";
   endpoint: string;
   attempt: number;
   delayMs: number;
@@ -31,6 +32,7 @@ interface RequestOptions {
   endpoint: string;
   priority: IbkrRequestPriority;
   retryable?: boolean;
+  retryServerErrors?: boolean;
 }
 
 interface ScheduledJob {
@@ -38,6 +40,7 @@ interface ScheduledJob {
   endpoint: string;
   priority: IbkrRequestPriority;
   retryable: boolean;
+  retryServerErrors: boolean;
   attempts: number;
   task: () => Promise<unknown>;
   resolve: (value: unknown) => void;
@@ -117,6 +120,21 @@ export class IbkrRequestScheduler {
     ) {
       throw new Error("Invalid IBKR request concurrency limits");
     }
+    if (
+      !Number.isSafeInteger(this.maxRetries) ||
+      this.maxRetries < 0 ||
+      !Number.isSafeInteger(this.retryBaseDelayMs) ||
+      this.retryBaseDelayMs <= 0 ||
+      !Number.isSafeInteger(this.retryMaxDelayMs) ||
+      this.retryMaxDelayMs < this.retryBaseDelayMs ||
+      !Number.isFinite(this.jitterRatio) ||
+      this.jitterRatio < 0 ||
+      this.jitterRatio > 1 ||
+      !Number.isSafeInteger(this.circuitDurationMs) ||
+      this.circuitDurationMs <= 0
+    ) {
+      throw new Error("Invalid IBKR request retry limits");
+    }
   }
 
   schedule<T>(options: RequestOptions, task: () => Promise<T>): Promise<T> {
@@ -128,6 +146,7 @@ export class IbkrRequestScheduler {
         endpoint: options.endpoint,
         priority: options.priority,
         retryable: options.retryable ?? true,
+        retryServerErrors: options.retryServerErrors ?? false,
         attempts: 0,
         task,
         resolve: (value) => {
@@ -203,6 +222,30 @@ export class IbkrRequestScheduler {
       this.openCircuit(job, error);
       return;
     }
+    if (classification.kind === "SERVER_ERROR") {
+      if (!job.retryServerErrors || job.attempts >= this.maxRetries) {
+        job.reject(error);
+        return;
+      }
+      const delayMs = this.retryDelay(job.attempts);
+      job.attempts += 1;
+      this.onTelemetry({
+        event: "SERVER_RETRY",
+        endpoint: job.endpoint,
+        attempt: job.attempts,
+        delayMs,
+      });
+      void this.sleep(delayMs).then(
+        () => {
+          this.queue.push(job);
+          this.drain();
+        },
+        () => {
+          job.reject(error);
+        }
+      );
+      return;
+    }
     if (classification.kind !== "THROTTLED") {
       job.reject(error);
       return;
@@ -231,10 +274,17 @@ export class IbkrRequestScheduler {
     });
   }
 
-  private retryDelay(attempt: number, retryAfterMs: number | undefined): number {
-    const base =
-      retryAfterMs ?? Math.min(this.retryBaseDelayMs * 2 ** attempt, this.retryMaxDelayMs);
-    return Math.max(1, Math.ceil(base * (1 + this.jitterRatio * this.random())));
+  private retryDelay(attempt: number, retryAfterMs?: number): number {
+    const base = Math.min(
+      retryAfterMs ?? this.retryBaseDelayMs * 2 ** attempt,
+      this.retryMaxDelayMs
+    );
+    const random = this.random();
+    const boundedRandom = Number.isFinite(random) ? Math.min(1, Math.max(0, random)) : 0;
+    return Math.min(
+      this.retryMaxDelayMs,
+      Math.max(1, Math.ceil(base * (1 + this.jitterRatio * boundedRandom)))
+    );
   }
 
   private ensureBackoffWait(): void {

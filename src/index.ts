@@ -2,9 +2,10 @@
 export {
   IbkrClient,
   IbkrBrokerResponseError,
+  IbkrHttpError,
   IbkrPriceHistoryContractError,
 } from "./ibkr/ibkrClient.js";
-export type { IbkrClientOptions } from "./ibkr/ibkrClient.js";
+export type { IbkrClientOptions, IbkrHttpErrorResponse } from "./ibkr/ibkrClient.js";
 export { IbkrRequestSchedulerError } from "./ibkr/requestScheduler.js";
 export type {
   IbkrRequestPriority,

@@ -4,6 +4,7 @@ import {
   IbkrBrokerResponseError,
   IbkrClient,
   IbkrPriceHistoryContractError,
+  IbkrHttpError,
   type IbkrClientOptions,
 } from "../src/ibkr/ibkrClient.js";
 import { IbkrRequestSchedulerError } from "../src/ibkr/requestScheduler.js";
@@ -871,7 +872,147 @@ void test("history rejects overflow in normalized volume", async () => {
 });
 
 void test("known option resolution caches exact requests and reprimes each distinct lookup", async () => {
-  const client = new FakeIbkrClient((input) => {
+void test("price history retries one structured 500 and emits safe telemetry", async () => {
+  let historyCalls = 0;
+  const sleeps: number[] = [];
+  const telemetry: unknown[] = [];
+  const client = new FakeIbkrClient(
+    (input) => {
+      if (input.path === "trsrv/stocks") {
+        return { MSTR: [{ assetClass: "STK", contracts: [{ conid: 272110 }] }] };
+      }
+      if (input.path === "iserver/marketdata/history") {
+        historyCalls += 1;
+        if (historyCalls === 1) throw new Error("Response status 500: Chart data unavailable");
+        return { data: [{ t: 1, o: 1, h: 2, l: 0.5, c: 1.5, v: 10 }] };
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    },
+    {
+      requestScheduler: {
+        maxRetries: 2,
+        retryBaseDelayMs: 100,
+        retryMaxDelayMs: 500,
+        jitterRatio: 0.5,
+        now: () => 123,
+        random: () => 0,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+      onRequestTelemetry: (event) => telemetry.push(event),
+    }
+  );
+
+  assert.equal((await client.getPriceHistory({ symbol: "MSTR", days: 5 }))[0]?.close, 1.5);
+  assert.equal(historyCalls, 2);
+  assert.deepEqual(sleeps, [100]);
+  assert.deepEqual(telemetry, [
+    { event: "SERVER_RETRY", endpoint: "iserver/marketdata", attempt: 1, delayMs: 100 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(telemetry), /MSTR|272110|token|https?:/i);
+});
+
+void test("exhausted price-history retries retain final structured HTTP evidence", async () => {
+  let historyCalls = 0;
+  const sleeps: number[] = [];
+  const client = new FakeIbkrClient(
+    (input) => {
+      if (input.path === "trsrv/stocks") {
+        return { MSTR: [{ assetClass: "STK", contracts: [{ conid: 272110 }] }] };
+      }
+      if (input.path === "iserver/marketdata/history") {
+        historyCalls += 1;
+        throw new Error(`Response status 503: unavailable-${String(historyCalls)}`);
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    },
+    {
+      requestScheduler: {
+        maxRetries: 2,
+        retryBaseDelayMs: 100,
+        retryMaxDelayMs: 150,
+        jitterRatio: 1,
+        random: () => 1,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    }
+  );
+
+  await assert.rejects(
+    () => client.getPriceHistory({ symbol: "MSTR", days: 5 }),
+    (error: unknown) => {
+      assert.ok(error instanceof IbkrHttpError);
+      assert.equal(error.status, 503);
+      assert.equal(error.statusCode, 503);
+      assert.deepEqual(error.response, {
+        status: 503,
+        body: "unavailable-3",
+        retryAfter: null,
+      });
+      return true;
+    }
+  );
+  assert.equal(historyCalls, 3);
+  assert.deepEqual(sleeps, [150, 150], "backoff plus jitter stays at the configured bound");
+});
+
+void test("price history does not retry a structured non-retryable 4xx", async () => {
+  let historyCalls = 0;
+  const client = new FakeIbkrClient(
+    (input) => {
+      if (input.path === "trsrv/stocks") {
+        return { MSTR: [{ assetClass: "STK", contracts: [{ conid: 272110 }] }] };
+      }
+      historyCalls += 1;
+      throw new Error("Response status 404: No history contract");
+    },
+    { requestScheduler: { sleep: () => Promise.reject(new Error("must not sleep")) } }
+  );
+
+  await assert.rejects(
+    () => client.getPriceHistory({ symbol: "MSTR", days: 5 }),
+    (error: unknown) =>
+      error instanceof IbkrHttpError &&
+      error.status === 404 &&
+      error.response.body === "No history contract"
+  );
+  assert.equal(historyCalls, 1);
+});
+
+void test("a cancellation 5xx remains single-attempt", async () => {
+  let cancellationCalls = 0;
+  const client = new FakeIbkrClient(
+    (input) => {
+      if (input.path === "iserver/accounts") {
+        return { accounts: ["DU123"], selectedAccount: "DU123" };
+      }
+      if (input.method === "DELETE") {
+        cancellationCalls += 1;
+        throw new Error("Response status 500: Cancellation state unknown");
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    },
+    {
+      requestScheduler: { maxRetries: 3, sleep: () => Promise.reject(new Error("must not sleep")) },
+    }
+  );
+
+  await assert.rejects(
+    () =>
+      client.cancelDerivativeOrder({
+        accountId: "DU123",
+        orderId: "77",
+        assetClass: "OPT",
+      }),
+    (error: unknown) => error instanceof IbkrHttpError && error.status === 500
+  );
+  assert.equal(cancellationCalls, 1);
+});
+
+void test("known option resolution uses one direct secdef request and caches it", async () => {  const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/secdef/search") {
       return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
     }

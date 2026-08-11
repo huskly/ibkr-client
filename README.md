@@ -298,13 +298,22 @@ session-level transaction guard keeps each stateful security-definition search w
 strike or definition request. An exact expiry/strike/right request expands only that requested
 contract.
 
-A 429 pauses the shared queue behind one `Retry-After`-aware exponential backoff with jitter;
-individual queued reads do not start independent retry loops. Exhausted throttling throws
+A 429 pauses the shared queue behind one `Retry-After`-aware exponential backoff with jitter.
+Individual queued reads do not start independent retry loops. Exhausted throttling throws
 `IbkrRequestSchedulerError` with code `IBKR_THROTTLED`. A broker temporary-block response opens a
-bounded circuit, rejects queued work, and throws code `IBKR_TEMPORARILY_BLOCKED` without retrying.
-`IbkrClient` accepts optional scheduler limits and an `onRequestTelemetry` callback. Telemetry
-contains only a sanitized endpoint category, event, attempt, and delay—never account IDs, order
-IDs, credentials, or request payloads.
+bounded circuit, rejects queued work, and throws code `IBKR_TEMPORARILY_BLOCKED` without a retry.
+
+A price-history read retries a 5xx response with bounded exponential backoff and jitter. No other
+request retries a 5xx response. HTTP errors use `IbkrHttpError`. Its `status`, `statusCode`, and
+`response` fields keep the final numeric status, a bounded response body, and the safe
+`Retry-After` value when it is available. Callers do not have to parse the error message. Order
+placement, warning replies, cancellation, account selection, and
+all other writes have one HTTP attempt, including for 429 and 5xx responses.
+
+`IbkrClient` accepts optional scheduler limits and an `onRequestTelemetry` callback. Scheduler
+options also accept `now`, `sleep`, and `random` functions for controlled runtimes and tests.
+Telemetry for each retry contains only a sanitized endpoint category, event, attempt, and delay. It
+does not contain account IDs, order IDs, credentials, request payloads, or full URLs.
 
 ### Authorized read-only smoke test
 

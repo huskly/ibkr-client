@@ -128,3 +128,69 @@ void test("temporary block opens a bounded circuit and rejects queued discovery"
       error instanceof IbkrRequestSchedulerError && error.code === "IBKR_TEMPORARILY_BLOCKED"
   );
 });
+
+void test("server retries are opt-in and use a per-job bounded delay", async () => {
+  const sleeps: number[] = [];
+  const telemetry: unknown[] = [];
+  let attempts = 0;
+  const scheduler = new IbkrRequestScheduler({
+    maxRetries: 1,
+    retryBaseDelayMs: 100,
+    retryMaxDelayMs: 125,
+    jitterRatio: 1,
+    random: () => 99,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+    classifyError: () => ({ kind: "SERVER_ERROR" }),
+    onTelemetry: (event) => telemetry.push(event),
+  });
+
+  const result = await scheduler.schedule(
+    {
+      endpoint: "iserver/marketdata",
+      priority: "STANDARD",
+      retryServerErrors: true,
+    },
+    async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("server");
+      return "history";
+    }
+  );
+
+  assert.equal(result, "history");
+  assert.equal(attempts, 2);
+  assert.deepEqual(sleeps, [125]);
+  assert.deepEqual(telemetry, [
+    { event: "SERVER_RETRY", endpoint: "iserver/marketdata", attempt: 1, delayMs: 125 },
+  ]);
+});
+
+void test("server errors are not retried without explicit read opt-in", async () => {
+  let attempts = 0;
+  const finalError = new Error("final server evidence");
+  const scheduler = new IbkrRequestScheduler({
+    classifyError: () => ({ kind: "SERVER_ERROR" }),
+    sleep: () => Promise.reject(new Error("must not sleep")),
+  });
+
+  await assert.rejects(
+    () =>
+      scheduler.schedule({ endpoint: "account/orders", priority: "EXECUTION" }, async () => {
+        attempts += 1;
+        throw finalError;
+      }),
+    (error: unknown) => error === finalError
+  );
+  assert.equal(attempts, 1);
+});
+
+void test("scheduler rejects retry settings that are not bounded", () => {
+  assert.throws(() => new IbkrRequestScheduler({ maxRetries: -1 }), /retry limits/);
+  assert.throws(
+    () => new IbkrRequestScheduler({ retryBaseDelayMs: 500, retryMaxDelayMs: 100 }),
+    /retry limits/
+  );
+  assert.throws(() => new IbkrRequestScheduler({ jitterRatio: 1.1 }), /retry limits/);
+});

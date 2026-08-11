@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { IbkrClient } from "../src/ibkr/ibkrClient.js";
+import { IbkrClient, IbkrHttpError } from "../src/ibkr/ibkrClient.js";
 import type { DerivativeComboExecutionRequest, DerivativeContract } from "../src/types.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
@@ -626,10 +626,14 @@ void test("placement transport errors retain their structured details and are ne
   });
 
   await assert.rejects(client.submitDerivativeCombo(executionRequest()), (error) => {
-    assert.equal(error, transportError);
-    assert.deepEqual(transportError.response.data, {
-      error: { code: "BROKER_DOWN", retryable: false },
+    assert.ok(error instanceof IbkrHttpError);
+    assert.equal(error.status, 503);
+    assert.deepEqual(error.response, {
+      status: 503,
+      body: '{"error":{"code":"BROKER_DOWN","retryable":false}}',
+      retryAfter: null,
     });
+    assert.equal(error.cause, transportError);
     return true;
   });
   assert.equal(client.calls.filter(({ path }) => path === "iserver/account/U123/orders").length, 1);
