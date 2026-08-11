@@ -3830,11 +3830,7 @@ export class IbkrClient
     };
     let bars: PriceHistoryBar[];
     try {
-      const history = await this.requestHistoryWithChartRetries(
-        contract,
-        requestedSymbol,
-        request
-      );
+      const history = await this.requestHistoryWithChartRetries(contract, requestedSymbol, request);
       bars = this.normalizeHistoryResponse(requestedSymbol, history, interval);
       this.assertHistoryCoverage(requestedSymbol, bars, interval);
     } catch (error) {
@@ -4851,7 +4847,12 @@ export class IbkrClient
         bars = this.normalizeHistoryResponse(symbol, history, window);
       } catch (error) {
         if (!this.isChartDataUnavailable(error)) throw error;
-        this.throwInsufficientHistory(symbol, interval, [...observed, ...completed.map(({ bars }) => bars)], error);
+        this.throwInsufficientHistory(
+          symbol,
+          interval,
+          [...observed, ...completed.map(({ bars }) => bars)],
+          error
+        );
       }
       try {
         this.assertHistoryCoverage(symbol, bars, window);
@@ -4867,7 +4868,10 @@ export class IbkrClient
       completed.push({ bars, start: window.start, end: window.end });
     }
     this.assertHistoryWindowContinuity(symbol, interval, completed);
-    const result = this.mergeHistoryBars(symbol, completed.map(({ bars }) => bars));
+    const result = this.mergeHistoryBars(
+      symbol,
+      completed.map(({ bars }) => bars)
+    );
     this.assertHistoryCoverage(symbol, result, interval);
     return result;
   }
@@ -4885,20 +4889,15 @@ export class IbkrClient
     const overlapDays = 7;
     const windows: { start: number; end: number; days: number }[] = [];
     let end = interval.end;
-    while (true) {
+    for (;;) {
       const endDay = this.utcDayStart(end);
       const start = Math.max(interval.start, endDay - (maximumPeriodDays - 1) * DAY_MS);
       windows.push({ start, end, days: (endDay - start) / DAY_MS + 1 });
       if (start === interval.start) return windows;
       if (windows.length >= 12) {
-        throw new IbkrInsufficientHistoryError(
-          symbol,
-          interval.start,
-          interval.end,
-          null,
-          null,
-          { cause }
-        );
+        throw new IbkrInsufficientHistoryError(symbol, interval.start, interval.end, null, null, {
+          cause,
+        });
       }
       end = start + overlapDays * DAY_MS - 1;
     }
@@ -4918,7 +4917,6 @@ export class IbkrClient
       if (!isFiniteHistoryBar(bar)) {
         throw new Error(`IBKR returned an incomplete or non-finite history bar for ${symbol}`);
       }
-      if (bar.t < interval.start || bar.t > interval.end) continue;
       const normalized = {
         datetime: bar.t,
         open: bar.o,
@@ -4930,6 +4928,7 @@ export class IbkrClient
       if (!Number.isFinite(normalized.volume)) {
         throw new Error(`IBKR returned a non-finite normalized history volume for ${symbol}`);
       }
+      if (bar.t < interval.start || bar.t > interval.end) continue;
       bars.push(normalized);
     }
     return this.mergeHistoryBars(symbol, [bars]);
@@ -4950,7 +4949,9 @@ export class IbkrClient
           existing.close !== bar.close ||
           existing.volume !== bar.volume
         ) {
-          throw new Error(`IBKR returned conflicting history bars for ${symbol} at ${String(bar.datetime)}`);
+          throw new Error(
+            `IBKR returned conflicting history bars for ${symbol} at ${String(bar.datetime)}`
+          );
         }
         continue;
       }
@@ -5038,7 +5039,9 @@ export class IbkrClient
     const status = brokerDetail?.statusCode ?? this.httpStatusFromError(error);
     if (status !== 500) return false;
     const transportResponse =
-      typeof error === "object" && error !== null ? (error as { response?: unknown }).response : undefined;
+      typeof error === "object" && error !== null
+        ? (error as { response?: unknown }).response
+        : undefined;
     const responseData =
       typeof transportResponse === "object" && transportResponse !== null
         ? (transportResponse as { data?: unknown }).data

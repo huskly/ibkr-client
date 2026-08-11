@@ -17,6 +17,8 @@ interface RequestInput {
   data?: object;
 }
 
+const TEST_NOW = Date.UTC(2026, 7, 31);
+
 const config: IbkrOauth1Config = {
   accessTokenSecret: "test",
   accessToken: "test",
@@ -44,6 +46,10 @@ class FakeIbkrClient extends IbkrClient {
 
   protected override wait(_ms: number): Promise<void> {
     return Promise.resolve();
+  }
+
+  protected override now(): number {
+    return TEST_NOW;
   }
 }
 
@@ -103,16 +109,16 @@ function historyWindow(input: RequestInput): { start: number; end: number } {
   const end = Date.UTC(
     Number(rawEnd.slice(0, 4)),
     Number(rawEnd.slice(4, 6)) - 1,
-    Number(rawEnd.slice(6, 8)),
-    Number(rawEnd.slice(9, 11)),
-    Number(rawEnd.slice(12, 14)),
-    Number(rawEnd.slice(15, 17))
+    Number(rawEnd.slice(6, 8))
   );
   const periodDays = Number.parseInt(String(input.params?.["period"]), 10);
   return { start: end - (periodDays - 1) * 86_400_000, end };
 }
 
-function bar(t: number, value = 1): { t: number; o: number; h: number; l: number; c: number; v: number } {
+function bar(
+  t: number,
+  value = 1
+): { t: number; o: number; h: number; l: number; c: number; v: number } {
   return { t, o: value, h: value + 1, l: value - 1, c: value, v: value };
 }
 
@@ -622,6 +628,91 @@ void test("price history validates the contract and returns the exact request co
   });
 });
 
+void test("daily history retries Chart data unavailable and uses a covering standard period", async () => {
+  const requestTelemetry: string[] = [];
+  let historyCalls = 0;
+  const start = TEST_NOW - 219 * 86_400_000;
+  const client = new FakeIbkrClient(
+    (input) => {
+      const contract = historyContractInfo(input);
+      if (contract !== undefined) return contract;
+      if (input.path !== "iserver/marketdata/history") throw new Error("Unexpected request");
+      historyCalls += 1;
+      if (historyCalls <= 3) {
+        assert.equal(input.params?.["period"], "220d");
+        throw httpResponseError(500, { error: "Chart data unavailable" });
+      }
+      assert.equal(input.params?.["period"], "1y");
+      return { data: [bar(start), bar(TEST_NOW)] };
+    },
+    { onRequestTelemetry: ({ event }) => requestTelemetry.push(event) }
+  );
+
+  const result = await client.getPriceHistory({
+    symbol: "SPX",
+    contract: { conid: 416904 },
+    days: 220,
+  });
+  assert.deepEqual(
+    result.bars.map(({ datetime }) => datetime),
+    [start, TEST_NOW]
+  );
+  assert.deepEqual(requestTelemetry, ["HISTORY_RETRY", "HISTORY_RETRY", "HISTORY_PERIOD_FALLBACK"]);
+});
+
+void test("daily history does not recover authentication or entitlement transport errors", async () => {
+  for (const [status, body] of [
+    [401, { error: "Authentication required" }],
+    [403, { error: "Market data entitlement required" }],
+    [500, { error: "Ambiguous contract" }],
+  ] as const) {
+    let historyCalls = 0;
+    const client = new FakeIbkrClient((input) => {
+      const contract = historyContractInfo(input);
+      if (contract !== undefined) return contract;
+      historyCalls += 1;
+      throw httpResponseError(status, body);
+    });
+    await assert.rejects(() =>
+      client.getPriceHistory({ symbol: "SPX", contract: { conid: 416904 }, days: 220 })
+    );
+    assert.equal(historyCalls, 1);
+  }
+});
+
+void test("window recovery merges matching overlap bars in chronological order", async () => {
+  const start = TEST_NOW - 399 * 86_400_000;
+  let historyCalls = 0;
+  let previousStart: number | undefined;
+  const client = new FakeIbkrClient((input) => {
+    const contract = historyContractInfo(input);
+    if (contract !== undefined) return contract;
+    if (input.path !== "iserver/marketdata/history") throw new Error("Unexpected request");
+    historyCalls += 1;
+    if (historyCalls <= 3) throw httpResponseError(500, { error: "Chart data unavailable" });
+    const window = historyWindow(input);
+    const data = [bar(window.start), bar(window.end)];
+    if (previousStart !== undefined) data.push(bar(previousStart));
+    previousStart = window.start;
+    return { data };
+  });
+
+  const result = await client.getPriceHistory({
+    symbol: "SPX",
+    contract: { conid: 416904 },
+    startDate: start,
+    endDate: TEST_NOW,
+  });
+  const times = result.bars.map(({ datetime }) => datetime);
+  assert.deepEqual(times, [...new Set(times)]);
+  assert.deepEqual(
+    times,
+    [...times].sort((left, right) => left - right)
+  );
+  assert.equal(times[0], start);
+  assert.equal(times.at(-1), TEST_NOW);
+});
+
 void test("days history keeps the first calendar-day bar when request time is later", async () => {
   class TimedHistoryClient extends FakeIbkrClient {
     protected override now(): number {
@@ -643,7 +734,10 @@ void test("days history keeps the first calendar-day bar when request time is la
     contract: { conid: 416904 },
     days: 5,
   });
-  assert.deepEqual(result.bars.map(({ datetime }) => datetime), [first, TEST_NOW]);
+  assert.deepEqual(
+    result.bars.map(({ datetime }) => datetime),
+    [first, TEST_NOW]
+  );
 });
 
 void test("history coverage accepts closed and non-Monday-to-Friday boundary dates", async () => {
@@ -666,10 +760,10 @@ void test("history coverage accepts closed and non-Monday-to-Friday boundary dat
     startDate: start,
     endDate: end,
   });
-  assert.deepEqual(result.bars.map(({ datetime }) => datetime), [
-    firstAvailableSession,
-    lastAvailableSession,
-  ]);
+  assert.deepEqual(
+    result.bars.map(({ datetime }) => datetime),
+    [firstAvailableSession, lastAvailableSession]
+  );
 });
 
 void test("window recovery rejects a successful truncated middle window", async () => {
