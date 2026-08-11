@@ -89,7 +89,9 @@ The reusable `IbkrClient` also exposes typed, read-only strategy data:
   bid/ask/mid prices, delta, session volume, and open interest.
 - `getOptionQuote(...)` resolves and prices one exact contract with the same market-data shape.
   It uses one security-definition request after the per-underlying session search. It does not load
-  the complete option chain.
+  the complete option chain. When an exact ticker has listings in more than one market, option
+  discovery selects the one listing with `SMART` option routing. It rejects the result if `SMART`
+  does not identify one listing.
 - `getOptionContract(conid)` maps a broker conid back to durable OSI identity.
 
 ### Broker-neutral derivative discovery

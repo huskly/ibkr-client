@@ -585,6 +585,69 @@ void test("known option resolution uses one direct secdef request and caches it"
   assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/strikes").length, 0);
 });
 
+void test("option discovery selects one SMART listing among exact ticker matches", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [
+        {
+          conid: 100,
+          symbol: "NFLX",
+          sections: [{ secType: "OPT", exchange: "CDE" }],
+        },
+        {
+          conid: 200,
+          symbol: "NFLX",
+          sections: [{ secType: "OPT", exchange: "BOX;SMART;CBOE" }],
+        },
+      ];
+    }
+    if (input.path === "iserver/secdef/info") {
+      assert.equal(input.params?.["conid"], "200");
+      return [{ conid: 201, symbol: "NFLX", maturityDate: "20260828", right: "C", strike: 75 }];
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      return [{ conid: 201, "84": "4", "86": "4.2", "7308": "0.25" }];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const quote = await client.getOptionQuote({
+    symbol: "NFLX",
+    expiry: "2026-08-28",
+    strike: 75,
+    right: "C",
+  });
+  assert.equal(quote?.conid, 201);
+});
+
+void test("option discovery rejects more than one SMART listing", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [
+        { conid: 100, symbol: "NFLX", sections: [{ secType: "OPT", exchange: "SMART" }] },
+        {
+          conid: 200,
+          symbol: "NFLX",
+          sections: [{ secType: "OPT", exchange: "CBOE;SMART" }],
+        },
+      ];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () =>
+      client.getOptionQuote({
+        symbol: "NFLX",
+        expiry: "2026-08-28",
+        strike: 75,
+        right: "C",
+      }),
+    /underlying identity is ambiguous/
+  );
+  assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/info").length, 0);
+});
+
 void test("known option resolution rejects a mismatched direct definition", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/secdef/search") {
