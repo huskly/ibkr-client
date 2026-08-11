@@ -89,7 +89,7 @@ export class IbkrRequestScheduler {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: () => number;
   private readonly classifyError: (error: unknown) => IbkrRequestErrorClassification;
-  private readonly onTelemetry: (event: IbkrRequestTelemetry) => void;
+  private readonly onTelemetry: (event: IbkrRequestTelemetry) => unknown;
   private readonly queue: ScheduledJob[] = [];
   private sequence = 0;
   private active = 0;
@@ -294,7 +294,7 @@ export class IbkrRequestScheduler {
 
   private emitTelemetry(event: IbkrRequestTelemetry): void {
     try {
-      const result: unknown = this.onTelemetry(event);
+      const result = this.onTelemetry(event);
       void Promise.resolve(result).catch(() => undefined);
     } catch {
       // Telemetry observers cannot change request scheduling or settlement.
