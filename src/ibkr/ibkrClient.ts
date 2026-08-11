@@ -422,10 +422,10 @@ export class IbkrClient
   private initPromise?: Promise<void>;
   private accountIdPromise?: Promise<string>;
   private readonly optionDiscovery = new Map<string, Promise<OptionContract[]>>();
-  private readonly optionUnderlyingDiscovery = new Map<string, Promise<OptionUnderlying>>();
   private readonly optionContractResolution = new Map<string, Promise<OptionContract | null>>();
   private readonly derivativeDiscovery = new Map<string, Promise<DerivativeContract[]>>();
   private readonly requestScheduler: IbkrRequestScheduler;
+  private secdefPrimingTail: Promise<void> = Promise.resolve();
   private readonly onPriceHistoryTelemetry: (event: PriceHistoryTelemetry) => void;
 
   constructor(config: IbkrOauth1Config, options: IbkrClientOptions = {}) {
@@ -2999,6 +2999,27 @@ export class IbkrClient
     throw new Error("IBKR returned a malformed secdef/search response");
   }
 
+  /** Serialize IBKR operations that mutate and then consume session security-definition state. */
+  private withSecdefPriming<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.secdefPrimingTail.then(operation);
+    this.secdefPrimingTail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
+  /** Run one state-mutating search outside a larger priming transaction. */
+  private searchSecdef(
+    params: Record<string, string | number | boolean | null | undefined>
+  ): Promise<IbkrSecdefSearchResult[]> {
+    return this.withSecdefPriming(async () =>
+      this.parseSecdefSearchResponse(
+        await this.req<unknown>({ path: "iserver/secdef/search", params })
+      )
+    );
+  }
+
   private isMeaningfulBrokerError(
     error: unknown,
     response: Readonly<Record<string, unknown>>
@@ -3753,12 +3774,7 @@ export class IbkrClient
     }
     // `trsrv/stocks` is equity/ETF-only. Fall back to security-definition search so
     // non-stock roots (indexes like VIX, futures, etc.) still resolve to a conid.
-    const search = this.parseSecdefSearchResponse(
-      await this.req<unknown>({
-        path: "iserver/secdef/search",
-        params: { symbol: symbol.trim().toUpperCase() },
-      })
-    );
+    const search = await this.searchSecdef({ symbol: symbol.trim().toUpperCase() });
     const candidate = search.find(
       (item) =>
         item.conid !== undefined &&
@@ -3821,13 +3837,19 @@ export class IbkrClient
           `IBKR returned an incomplete or non-finite history bar for ${requestedSymbol}`
         );
       }
+      const volume = bar.v * volumeFactor;
+      if (!Number.isFinite(volume)) {
+        throw new Error(
+          `IBKR returned a non-finite normalized history volume for ${requestedSymbol}`
+        );
+      }
       return {
         datetime: bar.t,
         open: bar.o,
         high: bar.h,
         low: bar.l,
         close: bar.c,
-        volume: bar.v * volumeFactor,
+        volume,
       };
     });
     return {
@@ -3863,12 +3885,7 @@ export class IbkrClient
       });
     }
 
-    const search = this.parseSecdefSearchResponse(
-      await this.req<unknown>({
-        path: "iserver/secdef/search",
-        params: { symbol: requestedSymbol },
-      })
-    );
+    const search = await this.searchSecdef({ symbol: requestedSymbol });
     const candidates = search.flatMap((item): PriceHistoryCandidate[] => {
       const symbol = item.symbol?.trim().toUpperCase();
       const conid = Number(item.conid);
@@ -4251,11 +4268,18 @@ export class IbkrClient
   }
 
   /** Resolve one known option directly, without enumerating its month's complete chain. */
-  private async loadExactOptionContract(
+  private loadExactOptionContract(
     input: OptionQuoteRequest,
     month: string
   ): Promise<OptionContract | null> {
-    const underlying = await this.discoverOptionUnderlying(input.symbol);
+    return this.withSecdefPriming(() => this.loadExactOptionContractPrimed(input, month));
+  }
+
+  private async loadExactOptionContractPrimed(
+    input: OptionQuoteRequest,
+    month: string
+  ): Promise<OptionContract | null> {
+    const underlying = await this.loadOptionUnderlying(input.symbol);
     const definitions = await this.req<unknown>({
       path: "iserver/secdef/info",
       params: {
@@ -4358,7 +4382,27 @@ export class IbkrClient
     return pending;
   }
 
-  private async loadDerivativeContracts(
+  private loadDerivativeContracts(
+    underlying: string,
+    assetClass: DerivativeAssetClass,
+    month: string,
+    requestedExchange?: string,
+    requestedRight?: OptionRight,
+    requestedStrike?: number
+  ): Promise<DerivativeContract[]> {
+    return this.withSecdefPriming(() =>
+      this.loadDerivativeContractsPrimed(
+        underlying,
+        assetClass,
+        month,
+        requestedExchange,
+        requestedRight,
+        requestedStrike
+      )
+    );
+  }
+
+  private async loadDerivativeContractsPrimed(
     underlying: string,
     assetClass: DerivativeAssetClass,
     month: string,
@@ -4517,20 +4561,6 @@ export class IbkrClient
     return pending;
   }
 
-  /** Search once per underlying because IBKR uses this call to prime option lookup state. */
-  private discoverOptionUnderlying(symbol: string): Promise<OptionUnderlying> {
-    const normalized = symbol.trim().toUpperCase();
-    let pending = this.optionUnderlyingDiscovery.get(normalized);
-    if (!pending) {
-      pending = this.loadOptionUnderlying(normalized).catch((error: unknown) => {
-        this.optionUnderlyingDiscovery.delete(normalized);
-        throw error;
-      });
-      this.optionUnderlyingDiscovery.set(normalized, pending);
-    }
-    return pending;
-  }
-
   private async loadOptionUnderlying(symbol: string): Promise<OptionUnderlying> {
     // This search is load-bearing: IBKR silently returns empty definitions unless the current
     // session has first searched the underlying.
@@ -4579,8 +4609,15 @@ export class IbkrClient
     return underlying;
   }
 
-  private async loadOptionContracts(symbol: string, month: string): Promise<OptionContract[]> {
-    const underlying = await this.discoverOptionUnderlying(symbol);
+  private loadOptionContracts(symbol: string, month: string): Promise<OptionContract[]> {
+    return this.withSecdefPriming(() => this.loadOptionContractsPrimed(symbol, month));
+  }
+
+  private async loadOptionContractsPrimed(
+    symbol: string,
+    month: string
+  ): Promise<OptionContract[]> {
+    const underlying = await this.loadOptionUnderlying(symbol);
     const strikes = await this.req<IbkrSecdefStrikesResponse>({
       path: "iserver/secdef/strikes",
       params: { conid: String(underlying.conid), sectype: "OPT", month },

@@ -738,6 +738,79 @@ void test("an invalid explicit conid preserves the contract-info broker rejectio
   );
 });
 
+void test("history search cannot interleave with derivative search-to-strikes priming", async () => {
+  let releaseDerivativeSearch: (() => void) | undefined;
+  const derivativeSearchCanFinish = new Promise<void>((resolve) => {
+    releaseDerivativeSearch = resolve;
+  });
+  let markDerivativeSearchStarted: (() => void) | undefined;
+  const derivativeSearchStarted = new Promise<void>((resolve) => {
+    markDerivativeSearchStarted = resolve;
+  });
+  let primedSymbol: string | undefined;
+  const client = new FakeIbkrClient(async (input) => {
+    if (input.path === "iserver/secdef/search") {
+      const symbol = String(input.params?.["symbol"]);
+      if (symbol === "NDX") {
+        markDerivativeSearchStarted?.();
+        await derivativeSearchCanFinish;
+        primedSymbol = symbol;
+        return [{ conid: 416843, symbol, sections: [{ secType: "OPT", exchange: "SMART" }] }];
+      }
+      assert.equal(symbol, "SPX");
+      primedSymbol = symbol;
+      return [{ conid: 416904, symbol, sections: [{ secType: "IND", exchange: "CBOE" }] }];
+    }
+    if (input.path === "iserver/secdef/strikes") {
+      return primedSymbol === "NDX" ? { call: [20000], put: [] } : { call: [], put: [] };
+    }
+    if (input.path === "iserver/secdef/info") {
+      return [
+        {
+          conid: 9001,
+          symbol: "NDX",
+          secType: "OPT",
+          maturityDate: "20260821",
+          right: "C",
+          strike: 20000,
+          exchange: "SMART",
+          tradingClass: "NDX",
+          multiplier: "100",
+        },
+      ];
+    }
+    if (input.path === "iserver/contract/416904/info") {
+      return {
+        con_id: 416904,
+        local_symbol: "SPX",
+        instrument_type: "IND",
+        exchange: "CBOE",
+      };
+    }
+    if (input.path === "iserver/marketdata/history") return { data: [] };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const derivative = client.getDerivativeContracts({
+    underlying: "NDX",
+    assetClass: "OPT",
+    expiration: "2026-08-21",
+  });
+  await derivativeSearchStarted;
+  const history = client.getPriceHistory({ symbol: "SPX", days: 5 });
+  releaseDerivativeSearch?.();
+
+  const [contracts, result] = await Promise.all([derivative, history]);
+  assert.equal(contracts[0]?.conid, 9001);
+  assert.equal(result.contract.conid, 416904);
+  assert.deepEqual(
+    client.calls
+      .filter(({ path }) => path === "iserver/secdef/search" || path === "iserver/secdef/strikes")
+      .map(({ path, params }) => `${path}:${String(params?.["symbol"] ?? "")}`),
+    ["iserver/secdef/search:NDX", "iserver/secdef/strikes:", "iserver/secdef/search:SPX"]
+  );
+});
+
 void test("history rejects malformed and non-finite provider data", async () => {
   for (const history of [
     {},
@@ -768,7 +841,36 @@ void test("history rejects malformed and non-finite provider data", async () => 
   }
 });
 
-void test("known option resolution uses one direct secdef request and caches it", async () => {
+void test("history rejects overflow in normalized volume", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/contract/416904/info") {
+      return {
+        con_id: 416904,
+        local_symbol: "SPX",
+        instrument_type: "IND",
+        exchange: "CBOE",
+      };
+    }
+    if (input.path === "iserver/marketdata/history") {
+      return {
+        volumeFactor: 2,
+        data: [{ t: 1, o: 1, h: 1, l: 1, c: 1, v: Number.MAX_VALUE }],
+      };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+  await assert.rejects(
+    () =>
+      client.getPriceHistory({
+        symbol: "SPX",
+        contract: { conid: 416904 },
+        days: 5,
+      }),
+    /non-finite normalized history volume/
+  );
+});
+
+void test("known option resolution caches exact requests and reprimes each distinct lookup", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/secdef/search") {
       return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
@@ -814,7 +916,11 @@ void test("known option resolution uses one direct secdef request and caches it"
   assert.equal(first?.conid, 102);
   assert.equal(second?.conid, 102);
   assert.equal(third?.conid, 103);
-  assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/search").length, 1);
+  assert.equal(
+    client.calls.filter((call) => call.path === "iserver/secdef/search").length,
+    2,
+    "each distinct direct definition lookup must refresh session priming"
+  );
   assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/info").length, 2);
   assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/strikes").length, 0);
 });

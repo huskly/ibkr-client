@@ -117,8 +117,8 @@ for these errors.
 - `getOptionChain(...)` returns an exact-expiry chain with canonical OSI symbols, conids,
   bid/ask/mid prices, delta, session volume, and open interest.
 - `getOptionQuote(...)` resolves and prices one exact contract with the same market-data shape.
-  It uses one security-definition request after the per-underlying session search. It does not load
-  the complete option chain. When an exact ticker has listings in more than one market, option
+  It serializes the session search with one exact security-definition request. It caches an
+  identical exact request and does not load the complete option chain. When an exact ticker has listings in more than one market, option
   discovery selects the one listing with `SMART` option routing. It rejects the result if `SMART`
   does not identify one listing.
 - `getOptionContract(conid)` maps a broker conid back to durable OSI identity.
@@ -175,10 +175,11 @@ never reported as live data. All discovery APIs are read-only and do not call pr
 warning-reply, or cancellation endpoints.
 
 Full-chain contract discovery always calls `secdef/search` before `secdef/strikes`, because IBKR
-keeps that priming state in the authenticated session. An exact OSI lookup uses the cached
-per-underlying search and one `secdef/info` request. It does not request the strike list. Empty
-post-prime strikes and incomplete bid/ask/delta snapshots throw instead of looking like a valid
-chain with no candidates.
+keeps that priming state in the authenticated session. The client serializes the complete priming
+transaction with all other security-definition searches. An exact OSI lookup runs its search and
+one `secdef/info` request in the same serialized transaction. The client caches an identical exact
+lookup, but a different lookup primes the session again. Empty post-prime strikes and incomplete
+bid/ask/delta snapshots throw instead of looking like a valid chain with no candidates.
 Request shaping is resilient by design: option discovery normalizes the requested symbol,
 applies bounded batching for secondary-definition and market-data calls, and retries read-only
 requests on transient `429` responses with capped exponential backoff (including `Retry-After`
@@ -292,8 +293,10 @@ structured response in `BrokerErrorDetail.details`; transport exceptions are ret
 Every authenticated request runs through one priority scheduler per `IbkrClient`. The default
 limits allow at most ten requests globally and one exploratory security-definition request at a
 time. Order preview, status, warning, cancellation, and immediate-trade requests take priority
-over queued discovery. Multi-month derivative discovery also primes each month serially, while an
-exact expiry/strike/right request expands only that requested contract.
+over queued discovery. Multi-month derivative discovery also primes each month serially. A
+session-level transaction guard keeps each stateful security-definition search with its dependent
+strike or definition request. An exact expiry/strike/right request expands only that requested
+contract.
 
 A 429 pauses the shared queue behind one `Retry-After`-aware exponential backoff with jitter;
 individual queued reads do not start independent retry loops. Exhausted throttling throws
