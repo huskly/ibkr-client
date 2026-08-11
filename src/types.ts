@@ -803,11 +803,64 @@ export interface OptionMarketQuote extends OptionContract {
   timestamp: string | null;
 }
 
+/** IBKR security types that a price-history contract can report. */
+export type PriceHistorySecurityType =
+  "STK" | "IND" | "OPT" | "FUT" | "FOP" | "CASH" | "CFD" | "WAR" | "FUND" | "BOND" | "CMDTY";
+
+/** An explicit IBKR contract selector for a price-history request. */
+export interface PriceHistoryContractSelector {
+  conid: number;
+  /** Optional IBKR security type, such as `STK` or `IND`. */
+  assetClass?: PriceHistorySecurityType;
+  /** Optional exact exchange, such as `NASDAQ` or `CBOE`. */
+  exchange?: string;
+}
+
+/** Validated IBKR contract metadata used for a price-history request. */
+export interface PriceHistoryContract {
+  conid: number;
+  symbol: string;
+  securityType: PriceHistorySecurityType;
+  exchange: string;
+}
+
+/** Safe contract evidence returned with an ambiguous resolution error. */
+export interface PriceHistoryContractCandidate {
+  conid: number;
+  symbol: string;
+  securityType: PriceHistorySecurityType;
+  exchange: string | null;
+}
+
 export interface PriceHistoryRequest {
   symbol: string;
+  /** Use an explicit conid when a symbol has more than one contract. */
+  contract?: PriceHistoryContractSelector;
   days?: number;
   startDate?: number;
   endDate?: number;
+}
+
+/** Safe metadata emitted immediately before an IBKR price-history request. */
+export interface PriceHistoryTelemetry {
+  event: "PRICE_HISTORY_REQUEST";
+  requestedSymbol: string;
+  resolvedConid: number;
+  securityType: string;
+  exchange: string;
+  period: string;
+  barSize: string;
+}
+
+/** Price-history bars together with the exact broker request context. */
+export interface PriceHistoryResult {
+  bars: PriceHistoryBar[];
+  contract: PriceHistoryContract;
+  request: {
+    requestedSymbol: string;
+    period: string;
+    barSize: string;
+  };
 }
 
 export interface OptionQuoteRequest {

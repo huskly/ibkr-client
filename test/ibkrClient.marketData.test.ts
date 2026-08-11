@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   IbkrBrokerResponseError,
   IbkrClient,
+  IbkrPriceHistoryContractError,
   type IbkrClientOptions,
 } from "../src/ibkr/ibkrClient.js";
 import { IbkrRequestSchedulerError } from "../src/ibkr/requestScheduler.js";
@@ -519,13 +520,29 @@ void test("conid details ignore a secdef entry that names a different conid", as
   assert.equal(await client.getOptionContract(906570511), null);
 });
 
-void test("price history resolves the contract and normalizes OHLCV", async () => {
+void test("price history validates the contract and returns the exact request context", async () => {
   const client = new FakeIbkrClient((input) => {
-    if (input.path === "trsrv/stocks") {
-      return { MSTR: [{ assetClass: "STK", contracts: [{ conid: 272110, exchange: "NASDAQ" }] }] };
+    if (input.path === "iserver/secdef/search") {
+      return [
+        { conid: 272110, symbol: "MSTR", sections: [{ secType: "STK", exchange: "NASDAQ" }] },
+      ];
+    }
+    if (input.path === "iserver/contract/272110/info") {
+      return {
+        con_id: "272110",
+        local_symbol: "MSTR",
+        instrument_type: "STK",
+        exchange: "NASDAQ",
+      };
     }
     if (input.path === "iserver/marketdata/history") {
-      assert.equal(input.params?.["period"], "220d");
+      assert.deepEqual(input.params, {
+        conid: "272110",
+        exchange: "NASDAQ",
+        period: "220d",
+        bar: "1d",
+        outsideRth: true,
+      });
       return {
         volumeFactor: 100,
         data: [{ t: 1, o: 100, h: 110, l: 90, c: 105, v: 12 }],
@@ -533,12 +550,327 @@ void test("price history resolves the contract and normalizes OHLCV", async () =
     }
     throw new Error(`Unexpected request: ${input.path}`);
   });
-  assert.deepEqual(await client.getPriceHistory({ symbol: "MSTR", days: 220 }), [
-    { datetime: 1, open: 100, high: 110, low: 90, close: 105, volume: 1200 },
-  ]);
+  assert.deepEqual(await client.getPriceHistory({ symbol: "MSTR", days: 220 }), {
+    bars: [{ datetime: 1, open: 100, high: 110, low: 90, close: 105, volume: 1200 }],
+    contract: { conid: 272110, symbol: "MSTR", securityType: "STK", exchange: "NASDAQ" },
+    request: { requestedSymbol: "MSTR", period: "220d", barSize: "1d" },
+  });
 });
 
-void test("known option resolution uses one direct secdef request and caches it", async () => {
+void test("SPX history ignores unrelated security types and sends CBOE index context", async () => {
+  const telemetry: unknown[] = [];
+  const client = new FakeIbkrClient(
+    (input) => {
+      if (input.path === "iserver/secdef/search") {
+        return [
+          { conid: 999, symbol: "SPX", sections: [{ secType: "FUT", exchange: "CME" }] },
+          { conid: 998, symbol: "SPXW", sections: [{ secType: "IND", exchange: "CBOE" }] },
+          { conid: 416904, symbol: "SPX", sections: [{ secType: "IND", exchange: "CBOE" }] },
+          { conid: 997, symbol: "SPX", sections: [{ secType: "OPT", exchange: "SMART" }] },
+        ];
+      }
+      if (input.path === "iserver/contract/416904/info") {
+        return {
+          con_id: 416904,
+          local_symbol: "SPX",
+          instrument_type: "IND",
+          exchange: "CBOE",
+        };
+      }
+      if (input.path === "iserver/marketdata/history") {
+        assert.equal(input.params?.["conid"], "416904");
+        assert.equal(input.params?.["exchange"], "CBOE");
+        return { data: [] };
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    },
+    { onPriceHistoryTelemetry: (event) => telemetry.push(event) }
+  );
+
+  const result = await client.getPriceHistory({ symbol: "spx", days: 220 });
+  assert.deepEqual(result.contract, {
+    conid: 416904,
+    symbol: "SPX",
+    securityType: "IND",
+    exchange: "CBOE",
+  });
+  assert.deepEqual(telemetry, [
+    {
+      event: "PRICE_HISTORY_REQUEST",
+      requestedSymbol: "SPX",
+      resolvedConid: 416904,
+      securityType: "IND",
+      exchange: "CBOE",
+      period: "220d",
+      barSize: "1d",
+    },
+  ]);
+  assert.equal(JSON.stringify(telemetry).includes("account"), false);
+  assert.equal(JSON.stringify(telemetry).includes("http"), false);
+  assert.equal(JSON.stringify(telemetry).includes("token"), false);
+});
+
+void test("plain-symbol history refuses ambiguous exact contracts before metadata or history", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [
+        { conid: 416904, symbol: "SPX", sections: [{ secType: "IND", exchange: "CBOE" }] },
+        { conid: 123456, symbol: "SPX", sections: [{ secType: "IND", exchange: "NYSE" }] },
+      ];
+    }
+    throw new Error(`Ambiguous resolution must stop before request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () => client.getPriceHistory({ symbol: "SPX", days: 220 }),
+    (error: unknown) =>
+      error instanceof IbkrPriceHistoryContractError &&
+      error.code === "CONTRACT_AMBIGUOUS" &&
+      error.candidates.length === 2
+  );
+  assert.deepEqual(
+    client.calls.map(({ path }) => path),
+    ["iserver/secdef/search"]
+  );
+});
+
+void test("an explicit history conid bypasses symbol search and validates optional identity", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/contract/416904/info") {
+      return {
+        con_id: "416904",
+        local_symbol: "SPX",
+        instrument_type: "IND",
+        exchange: "CBOE",
+      };
+    }
+    if (input.path === "iserver/marketdata/history") return { data: [] };
+    throw new Error(`Explicit resolution must not search: ${input.path}`);
+  });
+
+  await client.getPriceHistory({
+    symbol: "SPX",
+    contract: { conid: 416904, assetClass: "IND", exchange: "cboe" },
+    days: 5,
+  });
+  assert.equal(
+    client.calls.some(({ path }) => path === "iserver/secdef/search"),
+    false
+  );
+});
+
+void test("explicit history identity mismatch is distinct and fails before history", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/contract/416904/info") {
+      return {
+        con_id: "416904",
+        local_symbol: "SPX",
+        instrument_type: "IND",
+        exchange: "CBOE",
+      };
+    }
+    throw new Error(`Mismatched identity must stop before history: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () =>
+      client.getPriceHistory({
+        symbol: "SPX",
+        contract: { conid: 416904, assetClass: "STK", exchange: "CBOE" },
+        days: 5,
+      }),
+    (error: unknown) =>
+      error instanceof IbkrPriceHistoryContractError && error.code === "CONTRACT_MISMATCH"
+  );
+});
+
+void test("history keeps entitlement and invalid-contract broker rejections distinct", async () => {
+  for (const brokerError of [
+    { error: "No market data permissions for CBOE IND", code: 1019 },
+    { error: "Invalid contract identifier", code: 321 },
+  ]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/contract/416904/info") {
+        return {
+          con_id: "416904",
+          local_symbol: "SPX",
+          instrument_type: "IND",
+          exchange: "CBOE",
+        };
+      }
+      if (input.path === "iserver/marketdata/history") return brokerError;
+      throw new Error(`Unexpected request: ${input.path}`);
+    });
+    await assert.rejects(
+      () =>
+        client.getPriceHistory({
+          symbol: "SPX",
+          contract: { conid: 416904 },
+          days: 220,
+        }),
+      (error: unknown) =>
+        error instanceof IbkrBrokerResponseError &&
+        error.detail.message === brokerError.error &&
+        error.detail.code === String(brokerError.code) &&
+        error.detail.details === brokerError
+    );
+  }
+});
+
+void test("an invalid explicit conid preserves the contract-info broker rejection", async () => {
+  const brokerError = { error: "Invalid contract identifier", code: 321 };
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/contract/999999/info") return brokerError;
+    throw new Error(`Invalid contract must stop before history: ${input.path}`);
+  });
+  await assert.rejects(
+    () =>
+      client.getPriceHistory({
+        symbol: "SPX",
+        contract: { conid: 999999 },
+        days: 5,
+      }),
+    (error: unknown) =>
+      error instanceof IbkrBrokerResponseError &&
+      error.detail.message === brokerError.error &&
+      error.detail.code === String(brokerError.code) &&
+      error.detail.details === brokerError
+  );
+});
+
+void test("history search cannot interleave with derivative search-to-strikes priming", async () => {
+  let releaseDerivativeSearch: (() => void) | undefined;
+  const derivativeSearchCanFinish = new Promise<void>((resolve) => {
+    releaseDerivativeSearch = resolve;
+  });
+  let markDerivativeSearchStarted: (() => void) | undefined;
+  const derivativeSearchStarted = new Promise<void>((resolve) => {
+    markDerivativeSearchStarted = resolve;
+  });
+  let primedSymbol: string | undefined;
+  const client = new FakeIbkrClient(async (input) => {
+    if (input.path === "iserver/secdef/search") {
+      const symbol = String(input.params?.["symbol"]);
+      if (symbol === "NDX") {
+        markDerivativeSearchStarted?.();
+        await derivativeSearchCanFinish;
+        primedSymbol = symbol;
+        return [{ conid: 416843, symbol, sections: [{ secType: "OPT", exchange: "SMART" }] }];
+      }
+      assert.equal(symbol, "SPX");
+      primedSymbol = symbol;
+      return [{ conid: 416904, symbol, sections: [{ secType: "IND", exchange: "CBOE" }] }];
+    }
+    if (input.path === "iserver/secdef/strikes") {
+      return primedSymbol === "NDX" ? { call: [20000], put: [] } : { call: [], put: [] };
+    }
+    if (input.path === "iserver/secdef/info") {
+      return [
+        {
+          conid: 9001,
+          symbol: "NDX",
+          secType: "OPT",
+          maturityDate: "20260821",
+          right: "C",
+          strike: 20000,
+          exchange: "SMART",
+          tradingClass: "NDX",
+          multiplier: "100",
+        },
+      ];
+    }
+    if (input.path === "iserver/contract/416904/info") {
+      return {
+        con_id: 416904,
+        local_symbol: "SPX",
+        instrument_type: "IND",
+        exchange: "CBOE",
+      };
+    }
+    if (input.path === "iserver/marketdata/history") return { data: [] };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const derivative = client.getDerivativeContracts({
+    underlying: "NDX",
+    assetClass: "OPT",
+    expiration: "2026-08-21",
+  });
+  await derivativeSearchStarted;
+  const history = client.getPriceHistory({ symbol: "SPX", days: 5 });
+  releaseDerivativeSearch?.();
+
+  const [contracts, result] = await Promise.all([derivative, history]);
+  assert.equal(contracts[0]?.conid, 9001);
+  assert.equal(result.contract.conid, 416904);
+  assert.deepEqual(
+    client.calls
+      .filter(({ path }) => path === "iserver/secdef/search" || path === "iserver/secdef/strikes")
+      .map(({ path, params }) => `${path}:${String(params?.["symbol"] ?? "")}`),
+    ["iserver/secdef/search:NDX", "iserver/secdef/strikes:", "iserver/secdef/search:SPX"]
+  );
+});
+
+void test("history rejects malformed and non-finite provider data", async () => {
+  for (const history of [
+    {},
+    { data: [{ t: 1, o: 1, h: 1, l: 1, c: Number.NaN, v: 1 }] },
+    { volumeFactor: Number.POSITIVE_INFINITY, data: [] },
+  ]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/contract/416904/info") {
+        return {
+          con_id: "416904",
+          local_symbol: "SPX",
+          instrument_type: "IND",
+          exchange: "CBOE",
+        };
+      }
+      if (input.path === "iserver/marketdata/history") return history;
+      throw new Error(`Unexpected request: ${input.path}`);
+    });
+    await assert.rejects(
+      () =>
+        client.getPriceHistory({
+          symbol: "SPX",
+          contract: { conid: 416904 },
+          days: 5,
+        }),
+      /malformed|non-finite/
+    );
+  }
+});
+
+void test("history rejects overflow in normalized volume", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/contract/416904/info") {
+      return {
+        con_id: 416904,
+        local_symbol: "SPX",
+        instrument_type: "IND",
+        exchange: "CBOE",
+      };
+    }
+    if (input.path === "iserver/marketdata/history") {
+      return {
+        volumeFactor: 2,
+        data: [{ t: 1, o: 1, h: 1, l: 1, c: 1, v: Number.MAX_VALUE }],
+      };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+  await assert.rejects(
+    () =>
+      client.getPriceHistory({
+        symbol: "SPX",
+        contract: { conid: 416904 },
+        days: 5,
+      }),
+    /non-finite normalized history volume/
+  );
+});
+
+void test("known option resolution caches exact requests and reprimes each distinct lookup", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/secdef/search") {
       return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
@@ -584,7 +916,11 @@ void test("known option resolution uses one direct secdef request and caches it"
   assert.equal(first?.conid, 102);
   assert.equal(second?.conid, 102);
   assert.equal(third?.conid, 103);
-  assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/search").length, 1);
+  assert.equal(
+    client.calls.filter((call) => call.path === "iserver/secdef/search").length,
+    2,
+    "each distinct direct definition lookup must refresh session priming"
+  );
   assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/info").length, 2);
   assert.equal(client.calls.filter((call) => call.path === "iserver/secdef/strikes").length, 0);
 });
