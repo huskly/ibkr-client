@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { IbkrClient, type IbkrClientOptions } from "../src/ibkr/ibkrClient.js";
+import {
+  IbkrBrokerResponseError,
+  IbkrClient,
+  type IbkrClientOptions,
+} from "../src/ibkr/ibkrClient.js";
 import { IbkrRequestSchedulerError } from "../src/ibkr/requestScheduler.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
@@ -856,6 +860,95 @@ void test("unresolvable non-stock symbol fails closed without a snapshot", async
   const quotes = await client.getQuotes([{ symbol: "NOPE" }]);
   assert.deepEqual(quotes, {});
   assert.equal(snapshots, 0);
+});
+
+void test("secdef/search error object rejects quotes with a typed broker error", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") return {};
+    if (input.path === "iserver/secdef/search") {
+      assert.equal(input.params?.["symbol"], "$VIX");
+      return { error: "No security definition found for symbol" };
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return [];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () => client.getQuotes([{ symbol: "$VIX" }]),
+    (error: unknown) => {
+      assert.ok(error instanceof IbkrBrokerResponseError);
+      assert.equal(error.message, "No security definition found for symbol");
+      assert.equal(error.detail.message, "No security definition found for symbol");
+      assert.deepEqual(error.detail.details, {
+        error: "No security definition found for symbol",
+      });
+      assert.notEqual(error instanceof TypeError, true);
+      return true;
+    }
+  );
+  assert.equal(snapshots, 0);
+});
+
+void test("secdef/search error object rejects price history with a typed broker error", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") return {};
+    if (input.path === "iserver/secdef/search") {
+      return { error: "Invalid symbol syntax" };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () => client.getPriceHistory({ symbol: "$VIX", days: 5 }),
+    (error: unknown) => {
+      assert.ok(error instanceof IbkrBrokerResponseError);
+      assert.match(error.message, /Invalid symbol syntax/);
+      assert.notEqual(error instanceof TypeError, true);
+      return true;
+    }
+  );
+});
+
+void test("secdef/search malformed payload fails closed for quotes", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") return {};
+    if (input.path === "iserver/secdef/search") return { unexpected: true };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () => client.getQuotes([{ symbol: "VIX" }]),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /malformed secdef\/search response/);
+      assert.equal(error instanceof IbkrBrokerResponseError, false);
+      assert.notEqual(error instanceof TypeError, true);
+      return true;
+    }
+  );
+});
+
+void test("secdef/search error object without text still throws a typed broker error", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") return {};
+    if (input.path === "iserver/secdef/search") return { error: "" };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () => client.getQuotes([{ symbol: "$VIX" }]),
+    (error: unknown) => {
+      assert.ok(error instanceof IbkrBrokerResponseError);
+      assert.equal(error.message, "IBKR rejected the security-definition search");
+      assert.deepEqual(error.detail.details, { error: "" });
+      assert.notEqual(error instanceof TypeError, true);
+      return true;
+    }
+  );
 });
 
 void test("option quotes carry market-data availability and snapshot timestamp", async () => {
