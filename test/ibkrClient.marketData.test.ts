@@ -932,6 +932,25 @@ void test("secdef/search malformed payload fails closed for quotes", async () =>
   );
 });
 
+void test("secdef/search error object without text still throws a typed broker error", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") return {};
+    if (input.path === "iserver/secdef/search") return { error: "" };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () => client.getQuotes([{ symbol: "$VIX" }]),
+    (error: unknown) => {
+      assert.ok(error instanceof IbkrBrokerResponseError);
+      assert.equal(error.message, "IBKR rejected the security-definition search");
+      assert.deepEqual(error.detail.details, { error: "" });
+      assert.notEqual(error instanceof TypeError, true);
+      return true;
+    }
+  );
+});
+
 void test("option quotes carry market-data availability and snapshot timestamp", async () => {
   const cases = [
     {

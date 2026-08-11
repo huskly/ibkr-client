@@ -2926,14 +2926,14 @@ export class IbkrClient
       response["error"] !== undefined &&
       response["error"] !== null
     ) {
-      if (this.isMeaningfulBrokerError(response["error"], response)) {
-        const detail = this.normalizeBrokerError(
-          response["error"],
-          response,
-          "IBKR rejected the security-definition search"
-        );
-        throw new IbkrBrokerResponseError(detail.message, detail);
-      }
+      // Any non-null `error` field is the documented IBKR error-object shape for this
+      // endpoint. Do not reclassify it as a malformed payload when the message is empty.
+      const detail = this.normalizeBrokerError(
+        response["error"],
+        response,
+        "IBKR rejected the security-definition search"
+      );
+      throw new IbkrBrokerResponseError(detail.message, detail);
     }
     throw new Error("IBKR returned a malformed secdef/search response");
   }
