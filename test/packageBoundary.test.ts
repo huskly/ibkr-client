@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { IbkrPriceHistoryContractError } from "../src/index.js";
 import type {
   AccountBalances,
   BrokerClient,
   BrokerQuoteOptions,
   BrokerQuoteRequest,
+  PriceHistoryContractCandidate,
+  PriceHistoryContractSelector,
+  PriceHistoryResult,
+  PriceHistorySecurityType,
+  PriceHistoryTelemetry,
 } from "../src/index.js";
 
 interface PackageManifest {
@@ -13,6 +19,29 @@ interface PackageManifest {
   dependencies?: Record<string, string>;
   scripts?: Record<string, string>;
 }
+
+void test("public price-history types expose contract context and typed failures", () => {
+  const securityType: PriceHistorySecurityType = "IND";
+  const candidate: PriceHistoryContractCandidate = {
+    conid: 416904,
+    symbol: "SPX",
+    securityType,
+    exchange: null,
+  };
+  const selector: PriceHistoryContractSelector = {
+    conid: 416904,
+    assetClass: "IND",
+    exchange: "CBOE",
+  };
+  const result = undefined as PriceHistoryResult | undefined;
+  const telemetry = undefined as PriceHistoryTelemetry | undefined;
+  const error = new IbkrPriceHistoryContractError("ambiguous", "CONTRACT_AMBIGUOUS");
+  assert.equal(selector.conid, 416904);
+  assert.equal(candidate.exchange, null);
+  assert.equal(result?.contract.exchange ?? null, null);
+  assert.equal(telemetry?.barSize ?? null, null);
+  assert.equal(error.code, "CONTRACT_AMBIGUOUS");
+});
 
 void test("public account balance types expose margin snapshots", () => {
   const balance = undefined as AccountBalances | undefined;

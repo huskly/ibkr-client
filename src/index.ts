@@ -1,5 +1,9 @@
 /** Package entry point — the broker-neutral types and the IBKR client. */
-export { IbkrClient, IbkrBrokerResponseError } from "./ibkr/ibkrClient.js";
+export {
+  IbkrClient,
+  IbkrBrokerResponseError,
+  IbkrPriceHistoryContractError,
+} from "./ibkr/ibkrClient.js";
 export type { IbkrClientOptions } from "./ibkr/ibkrClient.js";
 export { IbkrRequestSchedulerError } from "./ibkr/requestScheduler.js";
 export type {
@@ -90,7 +94,13 @@ export type {
   OptionQuoteRequest,
   OptionRight,
   PriceHistoryBar,
+  PriceHistoryContract,
+  PriceHistoryContractCandidate,
+  PriceHistoryContractSelector,
+  PriceHistorySecurityType,
   PriceHistoryRequest,
+  PriceHistoryResult,
+  PriceHistoryTelemetry,
 } from "./types.js";
 export { formatOsiOptionSymbol, parseOsiOptionSymbol } from "./ibkr/optionContract.js";
 export { normalizeDerivativeDataAvailability } from "./ibkr/derivativeContract.js";

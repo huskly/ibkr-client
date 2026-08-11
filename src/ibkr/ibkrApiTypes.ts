@@ -243,6 +243,14 @@ export interface IbkrTrade {
   trade_time_r?: number;
 }
 
+/** `iserver/contract/{conid}/info` response fields used to validate history identity. */
+export interface IbkrContractInfo {
+  con_id?: string | number;
+  local_symbol?: string;
+  instrument_type?: string;
+  exchange?: string;
+}
+
 /** One OHLCV bar from `iserver/marketdata/history`. */
 export interface IbkrMarketDataHistoryBar {
   o?: number;

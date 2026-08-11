@@ -92,7 +92,27 @@ validated at runtime. Its broker-neutral account API includes:
 
 The reusable `IbkrClient` also exposes typed, read-only strategy data:
 
-- `getPriceHistory(...)` returns normalized OHLCV bars.
+- `getPriceHistory(...)` returns normalized OHLCV bars and the validated IBKR contract context.
+  A symbol-only request accepts one exact `STK` or `IND` contract. The method rejects an ambiguous
+  result. Use `contract.conid` to select a contract. You can also set `contract.assetClass` and
+  `contract.exchange` as validation constraints. The history request includes the validated
+  exchange. IBKR uses the primary exchange when the exchange parameter is absent.
+
+```ts
+const history = await client.getPriceHistory({
+  symbol: "SPX",
+  contract: { conid: 416904, assetClass: "IND", exchange: "CBOE" },
+  days: 220,
+});
+console.log(history.contract, history.request, history.bars);
+```
+
+Set `onPriceHistoryTelemetry` in `IbkrClient` options to receive safe request metadata. The event
+contains the requested symbol, resolved conid, security type, exchange, period, and bar size. The
+client does not put account data, credentials, or URLs in this event. IBKR entitlement errors and
+invalid-contract errors remain broker errors. The client does not return empty or shorter history
+for these errors.
+
 - `getOptionExpiries(...)` discovers weekly and monthly maturities across month buckets.
 - `getOptionChain(...)` returns an exact-expiry chain with canonical OSI symbols, conids,
   bid/ask/mid prices, delta, session volume, and open interest.
@@ -312,8 +332,31 @@ const [balances, history, expiries] = await Promise.all([
 const expiry = expiries[0];
 if (!expiry) throw new Error(`No listed expiries for ${symbol} in ${from}..${to}`);
 const chain = await client.getOptionChain(symbol, expiry);
-console.log({ equityRead: Number.isFinite(balances.netLiquidation), historyBars: history.length,
+console.log({ equityRead: Number.isFinite(balances.netLiquidation), historyBars: history.bars.length,
   expiry, contracts: chain.length, first: chain[0]?.symbol });
+NODE
+```
+
+### Live SPX history drill
+
+Run this read-only drill in a session that has CBOE index market-data permission. The drill is not
+part of the automated test suite.
+
+```bash
+node --input-type=module <<'NODE'
+import { IbkrClient, buildOauthConfig } from "./dist/index.js";
+
+const client = new IbkrClient(buildOauthConfig(), {
+  onPriceHistoryTelemetry: (event) => console.log(event),
+});
+await client.init();
+const result = await client.getPriceHistory({
+  symbol: "SPX",
+  contract: { conid: 416904, assetClass: "IND", exchange: "CBOE" },
+  days: 220,
+});
+if (result.bars.length === 0) throw new Error("IBKR returned no SPX history bars");
+console.log({ contract: result.contract, bars: result.bars.length });
 NODE
 ```
 

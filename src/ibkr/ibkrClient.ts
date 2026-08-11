@@ -63,14 +63,19 @@ import type {
   OptionQuoteRequest,
   OptionRight,
   OrderWarning,
-  PriceHistoryBar,
+  PriceHistoryContract,
+  PriceHistoryContractCandidate,
   PriceHistoryRequest,
+  PriceHistorySecurityType,
+  PriceHistoryResult,
+  PriceHistoryTelemetry,
   TradingDiagnostics,
 } from "../types.js";
 import { ASSET_CLASS_LABELS, toNullableNumber, toNumber } from "../helpers.js";
 import type {
   IbkrAuthStatus,
   IbkrBrokerageAccountsResponse,
+  IbkrContractInfo,
   IbkrLiveOrder,
   IbkrLiveOrdersResponse,
   IbkrOrderSubmissionResponse,
@@ -124,6 +129,13 @@ interface QuoteContract {
   symbol: string;
   conid: number;
   description?: string;
+  exchange?: string;
+}
+
+interface PriceHistoryCandidate {
+  conid: number;
+  symbol: string;
+  securityType: PriceHistorySecurityType;
   exchange?: string;
 }
 
@@ -246,6 +258,32 @@ function isUnknownRecord(input: unknown): input is Readonly<Record<string, unkno
   return typeof input === "object" && input !== null && !Array.isArray(input);
 }
 
+const PRICE_HISTORY_SECURITY_TYPES = new Set<string>([
+  "STK",
+  "IND",
+  "OPT",
+  "FUT",
+  "FOP",
+  "CASH",
+  "CFD",
+  "WAR",
+  "FUND",
+  "BOND",
+  "CMDTY",
+]);
+
+function isPriceHistorySecurityType(value: string): value is PriceHistorySecurityType {
+  return PRICE_HISTORY_SECURITY_TYPES.has(value);
+}
+
+function isFiniteHistoryBar(
+  bar: IbkrMarketDataHistoryBar
+): bar is Required<IbkrMarketDataHistoryBar> {
+  return [bar.t, bar.o, bar.h, bar.l, bar.c, bar.v].every(
+    (value) => typeof value === "number" && Number.isFinite(value)
+  );
+}
+
 function isHeadersLike(input: unknown): input is { get(name: string): string | null } {
   return (
     typeof input === "object" &&
@@ -334,6 +372,8 @@ export interface IbkrClientOptions {
     "now" | "sleep" | "random" | "classifyError" | "onTelemetry"
   >;
   onRequestTelemetry?: (event: IbkrRequestTelemetry) => void;
+  /** Receive safe contract and request metadata before each price-history request. */
+  onPriceHistoryTelemetry?: (event: PriceHistoryTelemetry) => void;
 }
 
 /**
@@ -349,6 +389,19 @@ export class IbkrBrokerResponseError extends Error {
   ) {
     super(message, options);
     this.name = "IbkrBrokerResponseError";
+  }
+}
+
+/** Typed contract-resolution failure raised before a price-history broker request. */
+export class IbkrPriceHistoryContractError extends Error {
+  constructor(
+    message: string,
+    readonly code:
+      "CONTRACT_NOT_FOUND" | "CONTRACT_AMBIGUOUS" | "CONTRACT_INVALID" | "CONTRACT_MISMATCH",
+    readonly candidates: readonly PriceHistoryContractCandidate[] = []
+  ) {
+    super(message);
+    this.name = "IbkrPriceHistoryContractError";
   }
 }
 
@@ -373,9 +426,11 @@ export class IbkrClient
   private readonly optionContractResolution = new Map<string, Promise<OptionContract | null>>();
   private readonly derivativeDiscovery = new Map<string, Promise<DerivativeContract[]>>();
   private readonly requestScheduler: IbkrRequestScheduler;
+  private readonly onPriceHistoryTelemetry: (event: PriceHistoryTelemetry) => void;
 
   constructor(config: IbkrOauth1Config, options: IbkrClientOptions = {}) {
     this.raw = new RawIbkrClientCtor(config);
+    this.onPriceHistoryTelemetry = options.onPriceHistoryTelemetry ?? (() => undefined);
     this.requestScheduler = new IbkrRequestScheduler({
       ...options.requestScheduler,
       now: () => this.now(),
@@ -3723,23 +3778,48 @@ export class IbkrClient
     };
   }
 
-  /** Return normalized daily price history without consulting a vendor-owned clock. */
-  async getPriceHistory(input: PriceHistoryRequest): Promise<PriceHistoryBar[]> {
-    const contract = await this.resolveQuoteContract(input.symbol);
-    if (!contract) throw new Error(`IBKR could not resolve market-data contract: ${input.symbol}`);
+  /** Return daily price history with the exact validated IBKR request context. */
+  async getPriceHistory(input: PriceHistoryRequest): Promise<PriceHistoryResult> {
+    const requestedSymbol = input.symbol.trim().toUpperCase();
+    if (!requestedSymbol) {
+      throw new IbkrPriceHistoryContractError(
+        "Price history requires a symbol",
+        "CONTRACT_INVALID"
+      );
+    }
     const days = this.historyDays(input);
-    const history = await this.fetchQuoteHistory(contract.conid, `${String(days)}d`, false);
-    const volumeFactor = history?.volumeFactor ?? 1;
-    return (history?.data ?? []).map((bar) => {
-      if (
-        bar.t === undefined ||
-        bar.o === undefined ||
-        bar.h === undefined ||
-        bar.l === undefined ||
-        bar.c === undefined ||
-        bar.v === undefined
-      ) {
-        throw new Error(`IBKR returned an incomplete history bar for ${input.symbol}`);
+    const period = `${String(days)}d`;
+    const contract = await this.resolvePriceHistoryContract(requestedSymbol, input.contract);
+    const barSize = "1d";
+    const telemetry: PriceHistoryTelemetry = {
+      event: "PRICE_HISTORY_REQUEST",
+      requestedSymbol,
+      resolvedConid: contract.conid,
+      securityType: contract.securityType,
+      exchange: contract.exchange,
+      period,
+      barSize,
+    };
+    this.onPriceHistoryTelemetry(telemetry);
+    const history = await this.fetchQuoteHistory(
+      contract.conid,
+      period,
+      false,
+      contract.exchange,
+      barSize
+    );
+    if (history === undefined) {
+      throw new Error("IBKR price-history response was unexpectedly unavailable");
+    }
+    const volumeFactor = history.volumeFactor ?? 1;
+    if (!Number.isFinite(volumeFactor)) {
+      throw new Error(`IBKR returned a non-finite history volume factor for ${requestedSymbol}`);
+    }
+    const bars = (history.data ?? []).map((bar) => {
+      if (!isFiniteHistoryBar(bar)) {
+        throw new Error(
+          `IBKR returned an incomplete or non-finite history bar for ${requestedSymbol}`
+        );
       }
       return {
         datetime: bar.t,
@@ -3750,6 +3830,163 @@ export class IbkrClient
         volume: bar.v * volumeFactor,
       };
     });
+    return {
+      bars,
+      contract,
+      request: { requestedSymbol, period, barSize },
+    };
+  }
+
+  private async resolvePriceHistoryContract(
+    requestedSymbol: string,
+    selector: PriceHistoryRequest["contract"]
+  ): Promise<PriceHistoryContract> {
+    if (selector !== undefined) {
+      if (!Number.isSafeInteger(selector.conid) || selector.conid <= 0) {
+        throw new IbkrPriceHistoryContractError(
+          `Invalid IBKR price-history conid: ${String(selector.conid)}`,
+          "CONTRACT_INVALID"
+        );
+      }
+      const expectedSecurityType = selector.assetClass?.trim().toUpperCase();
+      if (expectedSecurityType !== undefined && !isPriceHistorySecurityType(expectedSecurityType)) {
+        throw new IbkrPriceHistoryContractError(
+          `Invalid IBKR price-history asset class: ${expectedSecurityType}`,
+          "CONTRACT_INVALID"
+        );
+      }
+      return this.validatePriceHistoryContract(requestedSymbol, selector.conid, {
+        ...(expectedSecurityType === undefined ? {} : { securityType: expectedSecurityType }),
+        ...(selector.exchange === undefined
+          ? {}
+          : { exchange: selector.exchange.trim().toUpperCase() }),
+      });
+    }
+
+    const search = this.parseSecdefSearchResponse(
+      await this.req<unknown>({
+        path: "iserver/secdef/search",
+        params: { symbol: requestedSymbol },
+      })
+    );
+    const candidates = search.flatMap((item): PriceHistoryCandidate[] => {
+      const symbol = item.symbol?.trim().toUpperCase();
+      const conid = Number(item.conid);
+      if (
+        symbol !== requestedSymbol ||
+        !Number.isSafeInteger(conid) ||
+        conid <= 0 ||
+        !Array.isArray(item.sections)
+      ) {
+        return [];
+      }
+      return item.sections.flatMap((section): PriceHistoryCandidate[] => {
+        const securityType = section.secType?.trim().toUpperCase();
+        if (securityType !== "STK" && securityType !== "IND") return [];
+        const exchange = section.exchange?.trim().toUpperCase();
+        return [
+          {
+            conid,
+            symbol,
+            securityType,
+            ...(exchange ? { exchange } : {}),
+          },
+        ];
+      });
+    });
+    const uniqueCandidates = [
+      ...new Map(
+        [...candidates]
+          .sort((left, right) => (left.exchange ?? "").localeCompare(right.exchange ?? ""))
+          .map((candidate) => [[candidate.conid, candidate.securityType].join(":"), candidate])
+      ).values(),
+    ];
+    if (uniqueCandidates.length === 0) {
+      throw new IbkrPriceHistoryContractError(
+        `IBKR returned no STK or IND contract for ${requestedSymbol}`,
+        "CONTRACT_NOT_FOUND"
+      );
+    }
+    if (uniqueCandidates.length !== 1) {
+      const safeCandidates = uniqueCandidates.map((candidate) => ({
+        conid: candidate.conid,
+        symbol: candidate.symbol,
+        securityType: candidate.securityType,
+        exchange: candidate.exchange ?? null,
+      }));
+      throw new IbkrPriceHistoryContractError(
+        `IBKR price-history contract is ambiguous for ${requestedSymbol}; specify contract.conid`,
+        "CONTRACT_AMBIGUOUS",
+        safeCandidates
+      );
+    }
+    const candidate = uniqueCandidates[0];
+    if (candidate === undefined) {
+      throw new Error("IBKR price-history resolution lost its selected contract");
+    }
+    return this.validatePriceHistoryContract(requestedSymbol, candidate.conid, {
+      securityType: candidate.securityType,
+    });
+  }
+
+  private async validatePriceHistoryContract(
+    requestedSymbol: string,
+    conid: number,
+    expected: { securityType?: PriceHistorySecurityType; exchange?: string }
+  ): Promise<PriceHistoryContract> {
+    const response = await this.req<unknown>({
+      path: `iserver/contract/${String(conid)}/info`,
+    });
+    if (
+      isUnknownRecord(response) &&
+      response["error"] !== undefined &&
+      response["error"] !== null
+    ) {
+      const detail = this.normalizeBrokerError(
+        response["error"],
+        response,
+        "IBKR rejected the contract metadata request"
+      );
+      throw new IbkrBrokerResponseError(detail.message, detail);
+    }
+    if (!isUnknownRecord(response)) {
+      throw new IbkrPriceHistoryContractError(
+        `IBKR returned malformed contract metadata for conid ${String(conid)}`,
+        "CONTRACT_INVALID"
+      );
+    }
+    const info = response as IbkrContractInfo;
+    const returnedConid = Number(info.con_id);
+    const symbol = info.local_symbol?.trim().toUpperCase();
+    const securityType = info.instrument_type?.trim().toUpperCase();
+    const exchange = info.exchange?.trim().toUpperCase();
+    if (
+      returnedConid !== conid ||
+      symbol === undefined ||
+      !symbol ||
+      securityType === undefined ||
+      !isPriceHistorySecurityType(securityType) ||
+      exchange === undefined ||
+      !exchange
+    ) {
+      throw new IbkrPriceHistoryContractError(
+        `IBKR returned incomplete contract metadata for conid ${String(conid)}`,
+        "CONTRACT_INVALID"
+      );
+    }
+    const contract = { conid, symbol, securityType, exchange };
+    if (
+      symbol !== requestedSymbol ||
+      (expected.securityType !== undefined && expected.securityType !== securityType) ||
+      (expected.exchange !== undefined && expected.exchange !== exchange)
+    ) {
+      throw new IbkrPriceHistoryContractError(
+        `IBKR contract ${String(conid)} does not match the requested price-history identity`,
+        "CONTRACT_MISMATCH",
+        [contract]
+      );
+    }
+    return contract;
   }
 
   /** Discover listed derivative series over an inclusive calendar range. */
@@ -4477,18 +4714,37 @@ export class IbkrClient
   private async fetchQuoteHistory(
     conid: number,
     period = "5d",
-    suppressErrors = true
+    suppressErrors = true,
+    exchange?: string,
+    bar = "1d"
   ): Promise<IbkrMarketDataHistoryResponse | undefined> {
     try {
-      return await this.req<IbkrMarketDataHistoryResponse>({
+      const response = await this.req<unknown>({
         path: "iserver/marketdata/history",
         params: {
           conid: String(conid),
+          ...(exchange === undefined ? {} : { exchange }),
           period,
-          bar: "1d",
+          bar,
           outsideRth: true,
         },
       });
+      if (
+        isUnknownRecord(response) &&
+        response["error"] !== undefined &&
+        response["error"] !== null
+      ) {
+        const detail = this.normalizeBrokerError(
+          response["error"],
+          response,
+          "IBKR rejected the market-data history request"
+        );
+        throw new IbkrBrokerResponseError(detail.message, detail);
+      }
+      if (!isUnknownRecord(response) || !Array.isArray(response["data"])) {
+        throw new Error("IBKR returned a malformed market-data history response");
+      }
+      return response;
     } catch (error) {
       if (!suppressErrors) throw error;
       return undefined;
