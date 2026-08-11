@@ -63,6 +63,7 @@ import type {
   OptionQuoteRequest,
   OptionRight,
   OrderWarning,
+  PriceHistoryBar,
   PriceHistoryContract,
   PriceHistoryContractCandidate,
   PriceHistoryRequest,
@@ -428,6 +429,21 @@ export class IbkrPriceHistoryContractError extends Error {
   }
 }
 
+/** A daily history request for which IBKR did not return the full requested interval. */
+export class IbkrInsufficientHistoryError extends Error {
+  constructor(
+    readonly symbol: string,
+    readonly requestedStart: number,
+    readonly requestedEnd: number,
+    readonly availableStart: number | null,
+    readonly availableEnd: number | null,
+    options?: ErrorOptions
+  ) {
+    super(`IBKR returned insufficient daily history for ${symbol}`, options);
+    this.name = "IbkrInsufficientHistoryError";
+  }
+}
+
 /**
  * Typed IBKR Web API client implementing the broker-neutral {@link BrokerClient}.
  * Wraps the `ibkr-client` npm package, which performs the OAuth 1.0a
@@ -451,10 +467,12 @@ export class IbkrClient
   private readonly requestNow: () => number;
   private secdefPrimingTail: Promise<void> = Promise.resolve();
   private readonly onPriceHistoryTelemetry: (event: PriceHistoryTelemetry) => void;
+  private readonly onRequestTelemetry: (event: IbkrRequestTelemetry) => void;
 
   constructor(config: IbkrOauth1Config, options: IbkrClientOptions = {}) {
     this.raw = new RawIbkrClientCtor(config);
     this.onPriceHistoryTelemetry = options.onPriceHistoryTelemetry ?? (() => undefined);
+    this.onRequestTelemetry = options.onRequestTelemetry ?? (() => undefined);
     const schedulerOptions = options.requestScheduler;
     this.requestNow = schedulerOptions?.now ?? (() => this.now());
     this.requestScheduler = new IbkrRequestScheduler({
@@ -3824,7 +3842,7 @@ export class IbkrClient
     };
   }
 
-  /** Return daily price history with the exact validated IBKR request context. */
+  /** Return complete daily history with the exact validated IBKR request context. */
   async getPriceHistory(input: PriceHistoryRequest): Promise<PriceHistoryResult> {
     const requestedSymbol = input.symbol.trim().toUpperCase();
     if (!requestedSymbol) {
@@ -3833,59 +3851,26 @@ export class IbkrClient
         "CONTRACT_INVALID"
       );
     }
-    const days = this.historyDays(input);
-    const period = `${String(days)}d`;
+    const interval = this.historyInterval(input);
+    const period = `${String(interval.days)}d`;
     const contract = await this.resolvePriceHistoryContract(requestedSymbol, input.contract);
-    const barSize = "1d";
-    const telemetry: PriceHistoryTelemetry = {
-      event: "PRICE_HISTORY_REQUEST",
-      requestedSymbol,
-      resolvedConid: contract.conid,
-      securityType: contract.securityType,
-      exchange: contract.exchange,
+    const request = {
       period,
-      barSize,
+      ...(input.endDate === undefined ? {} : { startTime: this.historyStartTime(interval.end) }),
     };
-    this.onPriceHistoryTelemetry(telemetry);
-    const history = await this.fetchQuoteHistory(
-      contract.conid,
-      period,
-      false,
-      contract.exchange,
-      barSize
-    );
-    if (history === undefined) {
-      throw new Error("IBKR price-history response was unexpectedly unavailable");
+    let bars: PriceHistoryBar[];
+    try {
+      const history = await this.requestPriceHistory(contract, requestedSymbol, request);
+      bars = this.normalizeHistoryResponse(requestedSymbol, history, interval);
+      this.assertHistoryCoverage(requestedSymbol, bars, interval);
+    } catch (error) {
+      if (!this.isChartDataUnavailable(error)) throw error;
+      bars = await this.recoverDailyHistory(contract, requestedSymbol, interval, error);
     }
-    const volumeFactor = history.volumeFactor ?? 1;
-    if (!Number.isFinite(volumeFactor)) {
-      throw new Error(`IBKR returned a non-finite history volume factor for ${requestedSymbol}`);
-    }
-    const bars = (history.data ?? []).map((bar) => {
-      if (!isFiniteHistoryBar(bar)) {
-        throw new Error(
-          `IBKR returned an incomplete or non-finite history bar for ${requestedSymbol}`
-        );
-      }
-      const volume = bar.v * volumeFactor;
-      if (!Number.isFinite(volume)) {
-        throw new Error(
-          `IBKR returned a non-finite normalized history volume for ${requestedSymbol}`
-        );
-      }
-      return {
-        datetime: bar.t,
-        open: bar.o,
-        high: bar.h,
-        low: bar.l,
-        close: bar.c,
-        volume,
-      };
-    });
     return {
       bars,
       contract,
-      request: { requestedSymbol, period, barSize },
+      request: { requestedSymbol, period, barSize: "1d" },
     };
   }
 
@@ -4763,19 +4748,345 @@ export class IbkrClient
     return result;
   }
 
-  private historyDays(input: PriceHistoryRequest): number {
+  private historyInterval(input: PriceHistoryRequest): {
+    start: number;
+    end: number;
+    days: number;
+  } {
     if (input.days !== undefined) {
       if (!Number.isFinite(input.days) || input.days <= 0) {
         throw new Error(`History days must be positive: ${String(input.days)}`);
       }
-      return Math.ceil(input.days);
+      const days = Math.ceil(input.days);
+      const endDay = this.utcDayStart(this.now());
+      return { start: endDay - (days - 1) * DAY_MS, end: endDay + DAY_MS - 1, days };
     }
-    if (input.startDate === undefined || input.endDate === undefined) {
-      throw new Error("Price history requires days or both startDate and endDate");
+    if (!Number.isFinite(input.startDate) || !Number.isFinite(input.endDate)) {
+      throw new Error("Price history boundaries must be finite epoch milliseconds");
     }
-    const duration = input.endDate - input.startDate;
-    if (duration < 0) throw new Error("Price history endDate must not precede startDate");
-    return Math.max(1, Math.ceil(duration / 86_400_000) + 1);
+    if (input.endDate < input.startDate) {
+      throw new Error("Price history endDate must not precede startDate");
+    }
+    const start = this.utcDayStart(input.startDate);
+    const endDay = this.utcDayStart(input.endDate);
+    return { start, end: endDay + DAY_MS - 1, days: (endDay - start) / DAY_MS + 1 };
+  }
+
+  private async requestPriceHistory(
+    contract: PriceHistoryContract,
+    requestedSymbol: string,
+    request: { period: string; startTime?: string }
+  ): Promise<IbkrMarketDataHistoryResponse> {
+    this.onPriceHistoryTelemetry({
+      event: "PRICE_HISTORY_REQUEST",
+      requestedSymbol,
+      resolvedConid: contract.conid,
+      securityType: contract.securityType,
+      exchange: contract.exchange,
+      period: request.period,
+      barSize: "1d",
+    });
+    const history = await this.fetchQuoteHistory(
+      contract.conid,
+      request.period,
+      false,
+      contract.exchange,
+      "1d",
+      request.startTime
+    );
+    if (history === undefined) {
+      throw new Error("IBKR price-history response was unexpectedly unavailable");
+    }
+    return history;
+  }
+
+  private async recoverDailyHistory(
+    contract: PriceHistoryContract,
+    symbol: string,
+    interval: { start: number; end: number; days: number },
+    initialCause: unknown
+  ): Promise<PriceHistoryBar[]> {
+    const observed: PriceHistoryBar[][] = [];
+    let cause = initialCause;
+    if (interval.days <= 365) {
+      this.onRequestTelemetry({
+        event: "HISTORY_PERIOD_FALLBACK",
+        endpoint: "iserver/marketdata",
+        attempt: 1,
+        delayMs: 0,
+      });
+      let standardBars: PriceHistoryBar[] | undefined;
+      try {
+        const history = await this.requestPriceHistory(contract, symbol, {
+          period: "1y",
+          startTime: this.historyStartTime(interval.end),
+        });
+        standardBars = this.normalizeHistoryResponse(symbol, history, interval);
+        this.assertHistoryCoverage(symbol, standardBars, interval);
+        return standardBars;
+      } catch (error) {
+        if (standardBars !== undefined) observed.push(standardBars);
+        if (
+          !this.isChartDataUnavailable(error) &&
+          !(error instanceof IbkrInsufficientHistoryError)
+        ) {
+          throw error;
+        }
+        cause = error;
+      }
+    }
+
+    const windows = this.dailyHistoryWindows(symbol, interval, cause);
+    const completed: { bars: PriceHistoryBar[]; start: number; end: number }[] = [];
+    for (const [index, window] of windows.entries()) {
+      this.onRequestTelemetry({
+        event: "HISTORY_WINDOW_FALLBACK",
+        endpoint: "iserver/marketdata",
+        attempt: index + 1,
+        delayMs: 0,
+      });
+      let bars: PriceHistoryBar[];
+      try {
+        const history = await this.requestPriceHistory(contract, symbol, {
+          period: `${String(window.days)}d`,
+          startTime: this.historyStartTime(window.end),
+        });
+        bars = this.normalizeHistoryResponse(symbol, history, window);
+      } catch (error) {
+        if (!this.isChartDataUnavailable(error)) throw error;
+        this.throwInsufficientHistory(
+          symbol,
+          interval,
+          [...observed, ...completed.map(({ bars }) => bars)],
+          error
+        );
+      }
+      try {
+        this.assertHistoryCoverage(symbol, bars, window);
+      } catch (error) {
+        if (!(error instanceof IbkrInsufficientHistoryError)) throw error;
+        this.throwInsufficientHistory(
+          symbol,
+          interval,
+          [...observed, ...completed.map(({ bars: completedBars }) => completedBars), bars],
+          error
+        );
+      }
+      completed.push({ bars, start: window.start, end: window.end });
+    }
+    this.assertHistoryWindowContinuity(symbol, interval, completed);
+    const result = this.mergeHistoryBars(
+      symbol,
+      completed.map(({ bars }) => bars)
+    );
+    this.assertHistoryCoverage(symbol, result, interval);
+    return result;
+  }
+
+  private dailyHistoryWindows(
+    symbol: string,
+    interval: { start: number; end: number },
+    cause: unknown
+  ): {
+    start: number;
+    end: number;
+    days: number;
+  }[] {
+    const maximumPeriodDays = 90;
+    const overlapDays = 7;
+    const windows: { start: number; end: number; days: number }[] = [];
+    let end = interval.end;
+    for (;;) {
+      const endDay = this.utcDayStart(end);
+      const start = Math.max(interval.start, endDay - (maximumPeriodDays - 1) * DAY_MS);
+      windows.push({ start, end, days: (endDay - start) / DAY_MS + 1 });
+      if (start === interval.start) return windows;
+      if (windows.length >= 12) {
+        throw new IbkrInsufficientHistoryError(symbol, interval.start, interval.end, null, null, {
+          cause,
+        });
+      }
+      end = start + overlapDays * DAY_MS - 1;
+    }
+  }
+
+  private normalizeHistoryResponse(
+    symbol: string,
+    history: IbkrMarketDataHistoryResponse,
+    interval: { start: number; end: number }
+  ): PriceHistoryBar[] {
+    const volumeFactor = history.volumeFactor ?? 1;
+    if (!Number.isFinite(volumeFactor)) {
+      throw new Error(`IBKR returned a non-finite history volume factor for ${symbol}`);
+    }
+    const bars: PriceHistoryBar[] = [];
+    for (const bar of history.data ?? []) {
+      if (!isFiniteHistoryBar(bar)) {
+        throw new Error(`IBKR returned an incomplete or non-finite history bar for ${symbol}`);
+      }
+      const normalized = {
+        datetime: bar.t,
+        open: bar.o,
+        high: bar.h,
+        low: bar.l,
+        close: bar.c,
+        volume: bar.v * volumeFactor,
+      };
+      if (!Number.isFinite(normalized.volume)) {
+        throw new Error(`IBKR returned a non-finite normalized history volume for ${symbol}`);
+      }
+      if (bar.t < interval.start || bar.t > interval.end) continue;
+      bars.push(normalized);
+    }
+    return this.mergeHistoryBars(symbol, [bars]);
+  }
+
+  private mergeHistoryBars(
+    symbol: string,
+    groups: readonly (readonly PriceHistoryBar[])[]
+  ): PriceHistoryBar[] {
+    const merged = new Map<number, PriceHistoryBar>();
+    for (const bar of groups.flat()) {
+      const existing = merged.get(bar.datetime);
+      if (existing !== undefined) {
+        if (
+          existing.open !== bar.open ||
+          existing.high !== bar.high ||
+          existing.low !== bar.low ||
+          existing.close !== bar.close ||
+          existing.volume !== bar.volume
+        ) {
+          throw new Error(
+            `IBKR returned conflicting history bars for ${symbol} at ${String(bar.datetime)}`
+          );
+        }
+        continue;
+      }
+      merged.set(bar.datetime, bar);
+    }
+    return [...merged.values()].sort((left, right) => left.datetime - right.datetime);
+  }
+
+  private assertHistoryCoverage(
+    symbol: string,
+    bars: readonly PriceHistoryBar[],
+    interval: { start: number; end: number }
+  ): void {
+    const availableStart = bars[0]?.datetime ?? null;
+    const availableEnd = bars[bars.length - 1]?.datetime ?? null;
+    const tolerance = Math.min(7 * DAY_MS, interval.end - interval.start);
+    if (
+      availableStart === null ||
+      availableEnd === null ||
+      availableStart > interval.start + tolerance ||
+      availableEnd < interval.end - tolerance
+    ) {
+      throw new IbkrInsufficientHistoryError(
+        symbol,
+        interval.start,
+        interval.end,
+        availableStart,
+        availableEnd
+      );
+    }
+  }
+
+  private assertHistoryWindowContinuity(
+    symbol: string,
+    interval: { start: number; end: number },
+    windows: readonly { bars: readonly PriceHistoryBar[]; start: number; end: number }[]
+  ): void {
+    const chronological = [...windows].sort((left, right) => left.start - right.start);
+    for (let index = 1; index < chronological.length; index += 1) {
+      const older = chronological[index - 1];
+      const newer = chronological[index];
+      if (older === undefined || newer === undefined) continue;
+      const olderEnd = older.bars[older.bars.length - 1]?.datetime;
+      const newerStart = newer.bars[0]?.datetime;
+      if (olderEnd === undefined || newerStart === undefined || olderEnd < newerStart) {
+        this.throwInsufficientHistory(
+          symbol,
+          interval,
+          chronological.map(({ bars }) => [...bars]),
+          new Error("IBKR returned discontinuous daily history windows")
+        );
+      }
+    }
+  }
+
+  private throwInsufficientHistory(
+    symbol: string,
+    interval: { start: number; end: number },
+    groups: readonly (readonly PriceHistoryBar[])[],
+    cause: unknown
+  ): never {
+    const bars = this.mergeHistoryBars(symbol, groups);
+    throw new IbkrInsufficientHistoryError(
+      symbol,
+      interval.start,
+      interval.end,
+      bars[0]?.datetime ?? null,
+      bars[bars.length - 1]?.datetime ?? null,
+      { cause }
+    );
+  }
+
+  private utcDayStart(epochMilliseconds: number): number {
+    const date = new Date(epochMilliseconds);
+    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  }
+
+  private historyStartTime(epochMilliseconds: number): string {
+    const iso = new Date(epochMilliseconds).toISOString();
+    return `${iso.slice(0, 10).replaceAll("-", "")}-${iso.slice(11, 19)}`;
+  }
+
+  private isChartDataUnavailable(error: unknown): boolean {
+    const brokerDetail = error instanceof IbkrBrokerResponseError ? error.detail : undefined;
+    const status = brokerDetail?.statusCode ?? this.httpStatusFromError(error);
+    if (status !== 500) return false;
+    const transportResponse =
+      typeof error === "object" && error !== null
+        ? (error as { response?: unknown }).response
+        : undefined;
+    const responseData =
+      typeof transportResponse === "object" && transportResponse !== null
+        ? (transportResponse as { data?: unknown }).data
+        : undefined;
+    // Normalized HTTP failures keep the raw payload under `response.body`.
+    const structuredBody = error instanceof IbkrHttpError ? error.response.body : undefined;
+    const body =
+      typeof error === "object" && error !== null ? (error as { body?: unknown }).body : undefined;
+    const payload = brokerDetail?.details ?? responseData ?? structuredBody ?? body;
+    const decoded = (() => {
+      if (typeof payload !== "string") return payload;
+      try {
+        return JSON.parse(payload) as unknown;
+      } catch {
+        return undefined;
+      }
+    })();
+    if (!isUnknownRecord(decoded)) return false;
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(decoded);
+    } catch {
+      return false;
+    }
+    if (
+      /auth|entitl|permission|subscription|invalid.{0,20}(?:contract|conid)|ambiguous.{0,20}contract|security definition/i.test(
+        serialized
+      )
+    ) {
+      return false;
+    }
+    const diagnosticValues = [decoded["error"], decoded["message"], decoded["text"]].filter(
+      (value): value is string => typeof value === "string" && value.trim() !== ""
+    );
+    return (
+      diagnosticValues.length > 0 &&
+      diagnosticValues.every((value) => value.trim().toLowerCase() === "chart data unavailable")
+    );
   }
 
   private async fetchQuoteHistory(
@@ -4783,7 +5094,8 @@ export class IbkrClient
     period = "5d",
     suppressErrors = true,
     exchange?: string,
-    bar = "1d"
+    bar = "1d",
+    startTime?: string
   ): Promise<IbkrMarketDataHistoryResponse | undefined> {
     try {
       const response = await this.historyRequest<unknown>({
@@ -4794,6 +5106,7 @@ export class IbkrClient
           period,
           bar,
           outsideRth: true,
+          ...(startTime === undefined ? {} : { startTime }),
         },
       });
       if (

@@ -4,6 +4,7 @@ import {
   IbkrBrokerResponseError,
   IbkrClient,
   IbkrHttpError,
+  IbkrInsufficientHistoryError,
   IbkrPriceHistoryContractError,
   type IbkrClientOptions,
 } from "../src/ibkr/ibkrClient.js";
@@ -16,6 +17,8 @@ interface RequestInput {
   params?: Record<string, string | number | boolean | null | undefined>;
   data?: object;
 }
+
+const TEST_NOW = Date.UTC(2026, 7, 31);
 
 const config: IbkrOauth1Config = {
   accessTokenSecret: "test",
@@ -44,6 +47,10 @@ class FakeIbkrClient extends IbkrClient {
 
   protected override wait(_ms: number): Promise<void> {
     return Promise.resolve();
+  }
+
+  protected override now(): number {
+    return TEST_NOW;
   }
 }
 
@@ -76,6 +83,57 @@ function rateLimitedError(retryAfter?: string): RateLimitedError {
     ...(retryAfter ? { headers: { "Retry-After": retryAfter } } : {}),
   };
   return error;
+}
+
+function completeDailyHistory(days: number): unknown {
+  return {
+    data: [
+      { t: TEST_NOW - (days - 1) * 86_400_000, o: 1, h: 2, l: 0, c: 1, v: 1 },
+      { t: TEST_NOW, o: 2, h: 3, l: 1, c: 2, v: 2 },
+    ],
+  };
+}
+
+interface HttpResponseError extends Error {
+  status: number;
+  response: { status: number; data: unknown };
+}
+
+function httpResponseError(status: number, data: unknown): HttpResponseError {
+  const error = new Error(`Response status ${String(status)}`) as HttpResponseError;
+  error.status = status;
+  error.response = { status, data };
+  return error;
+}
+
+function historyContractInfo(input: RequestInput): unknown | undefined {
+  if (input.path === "iserver/contract/416904/info") {
+    return {
+      con_id: 416904,
+      local_symbol: "SPX",
+      instrument_type: "IND",
+      exchange: "CBOE",
+    };
+  }
+  return undefined;
+}
+
+function historyWindow(input: RequestInput): { start: number; end: number } {
+  const rawEnd = String(input.params?.["startTime"]);
+  const end = Date.UTC(
+    Number(rawEnd.slice(0, 4)),
+    Number(rawEnd.slice(4, 6)) - 1,
+    Number(rawEnd.slice(6, 8))
+  );
+  const periodDays = Number.parseInt(String(input.params?.["period"]), 10);
+  return { start: end - (periodDays - 1) * 86_400_000, end };
+}
+
+function bar(
+  t: number,
+  value = 1
+): { t: number; o: number; h: number; l: number; c: number; v: number } {
+  return { t, o: value, h: value + 1, l: value - 1, c: value, v: value };
 }
 
 function discoveryResponse(input: RequestInput): unknown {
@@ -559,16 +617,292 @@ void test("price history validates the contract and returns the exact request co
       });
       return {
         volumeFactor: 100,
-        data: [{ t: 1, o: 100, h: 110, l: 90, c: 105, v: 12 }],
+        data: [
+          { t: TEST_NOW - 219 * 86_400_000, o: 90, h: 100, l: 80, c: 95, v: 10 },
+          { t: TEST_NOW, o: 100, h: 110, l: 90, c: 105, v: 12 },
+        ],
       };
     }
     throw new Error(`Unexpected request: ${input.path}`);
   });
   assert.deepEqual(await client.getPriceHistory({ symbol: "MSTR", days: 220 }), {
-    bars: [{ datetime: 1, open: 100, high: 110, low: 90, close: 105, volume: 1200 }],
+    bars: [
+      {
+        datetime: TEST_NOW - 219 * 86_400_000,
+        open: 90,
+        high: 100,
+        low: 80,
+        close: 95,
+        volume: 1000,
+      },
+      { datetime: TEST_NOW, open: 100, high: 110, low: 90, close: 105, volume: 1200 },
+    ],
     contract: { conid: 272110, symbol: "MSTR", securityType: "STK", exchange: "NASDAQ" },
     request: { requestedSymbol: "MSTR", period: "220d", barSize: "1d" },
   });
+});
+
+void test("daily history retries Chart data unavailable and uses a covering standard period", async () => {
+  const requestTelemetry: string[] = [];
+  let historyCalls = 0;
+  const start = TEST_NOW - 219 * 86_400_000;
+  const client = new FakeIbkrClient(
+    (input) => {
+      const contract = historyContractInfo(input);
+      if (contract !== undefined) return contract;
+      if (input.path !== "iserver/marketdata/history") throw new Error("Unexpected request");
+      historyCalls += 1;
+      if (historyCalls <= 4) {
+        assert.equal(input.params?.["period"], "220d");
+        throw httpResponseError(500, { error: "Chart data unavailable" });
+      }
+      assert.equal(input.params?.["period"], "1y");
+      return { data: [bar(start), bar(TEST_NOW)] };
+    },
+    { onRequestTelemetry: ({ event }) => requestTelemetry.push(event) }
+  );
+
+  const result = await client.getPriceHistory({
+    symbol: "SPX",
+    contract: { conid: 416904 },
+    days: 220,
+  });
+  assert.deepEqual(
+    result.bars.map(({ datetime }) => datetime),
+    [start, TEST_NOW]
+  );
+  assert.equal(historyCalls, 5);
+  assert.deepEqual(requestTelemetry, [
+    "SERVER_RETRY",
+    "SERVER_RETRY",
+    "SERVER_RETRY",
+    "HISTORY_PERIOD_FALLBACK",
+  ]);
+});
+
+void test("daily history does not recover authentication or entitlement transport errors", async () => {
+  for (const [status, body, expectedCalls] of [
+    [401, { error: "Authentication required" }, 1],
+    [403, { error: "Market data entitlement required" }, 1],
+    // A 5xx keeps the bounded scheduler retries, but never the history recovery fallback.
+    [500, { error: "Ambiguous contract" }, 4],
+  ] as const) {
+    let historyCalls = 0;
+    const requestTelemetry: string[] = [];
+    const client = new FakeIbkrClient(
+      (input) => {
+        const contract = historyContractInfo(input);
+        if (contract !== undefined) return contract;
+        historyCalls += 1;
+        throw httpResponseError(status, body);
+      },
+      { onRequestTelemetry: ({ event }) => requestTelemetry.push(event) }
+    );
+    await assert.rejects(
+      () => client.getPriceHistory({ symbol: "SPX", contract: { conid: 416904 }, days: 220 }),
+      (error: unknown) => {
+        assert.ok(error instanceof IbkrHttpError);
+        assert.equal(error.status, status);
+        return true;
+      }
+    );
+    assert.equal(historyCalls, expectedCalls);
+    assert.deepEqual(
+      requestTelemetry.filter((event) => event.startsWith("HISTORY_")),
+      []
+    );
+  }
+});
+
+void test("window recovery merges matching overlap bars in chronological order", async () => {
+  const start = TEST_NOW - 399 * 86_400_000;
+  let historyCalls = 0;
+  let previousStart: number | undefined;
+  const client = new FakeIbkrClient((input) => {
+    const contract = historyContractInfo(input);
+    if (contract !== undefined) return contract;
+    if (input.path !== "iserver/marketdata/history") throw new Error("Unexpected request");
+    historyCalls += 1;
+    if (historyCalls <= 4) throw httpResponseError(500, { error: "Chart data unavailable" });
+    const window = historyWindow(input);
+    const data = [bar(window.start), bar(window.end)];
+    if (previousStart !== undefined) data.push(bar(previousStart));
+    previousStart = window.start;
+    return { data };
+  });
+
+  const result = await client.getPriceHistory({
+    symbol: "SPX",
+    contract: { conid: 416904 },
+    startDate: start,
+    endDate: TEST_NOW,
+  });
+  const times = result.bars.map(({ datetime }) => datetime);
+  assert.deepEqual(times, [...new Set(times)]);
+  assert.deepEqual(
+    times,
+    [...times].sort((left, right) => left - right)
+  );
+  assert.equal(times[0], start);
+  assert.equal(times.at(-1), TEST_NOW);
+});
+
+void test("days history keeps the first calendar-day bar when request time is later", async () => {
+  class TimedHistoryClient extends FakeIbkrClient {
+    protected override now(): number {
+      return TEST_NOW + 18 * 60 * 60 * 1000;
+    }
+  }
+  const first = TEST_NOW - 4 * 86_400_000;
+  const client = new TimedHistoryClient((input) => {
+    const contract = historyContractInfo(input);
+    if (contract !== undefined) return contract;
+    if (input.path === "iserver/marketdata/history") {
+      return { data: [bar(first), bar(TEST_NOW)] };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const result = await client.getPriceHistory({
+    symbol: "SPX",
+    contract: { conid: 416904 },
+    days: 5,
+  });
+  assert.deepEqual(
+    result.bars.map(({ datetime }) => datetime),
+    [first, TEST_NOW]
+  );
+});
+
+void test("history coverage accepts closed and non-Monday-to-Friday boundary dates", async () => {
+  const start = Date.UTC(2026, 11, 25);
+  const end = Date.UTC(2027, 0, 24);
+  const firstAvailableSession = start + 2 * 86_400_000;
+  const lastAvailableSession = end - 2 * 86_400_000;
+  const client = new FakeIbkrClient((input) => {
+    const contract = historyContractInfo(input);
+    if (contract !== undefined) return contract;
+    if (input.path === "iserver/marketdata/history") {
+      return { data: [bar(firstAvailableSession), bar(lastAvailableSession)] };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const result = await client.getPriceHistory({
+    symbol: "SPX",
+    contract: { conid: 416904 },
+    startDate: start,
+    endDate: end,
+  });
+  assert.deepEqual(
+    result.bars.map(({ datetime }) => datetime),
+    [firstAvailableSession, lastAvailableSession]
+  );
+});
+
+void test("window recovery rejects a successful truncated middle window", async () => {
+  const start = TEST_NOW - 399 * 86_400_000;
+  let historyCalls = 0;
+  let windowCalls = 0;
+  const client = new FakeIbkrClient((input) => {
+    const contract = historyContractInfo(input);
+    if (contract !== undefined) return contract;
+    if (input.path !== "iserver/marketdata/history") throw new Error("Unexpected request");
+    historyCalls += 1;
+    if (historyCalls <= 4) throw httpResponseError(500, { error: "Chart data unavailable" });
+    windowCalls += 1;
+    const window = historyWindow(input);
+    if (windowCalls === 2) {
+      return { data: [bar(window.start + (window.end - window.start) / 2)] };
+    }
+    return { data: [bar(window.start), bar(window.end)] };
+  });
+
+  await assert.rejects(
+    () =>
+      client.getPriceHistory({
+        symbol: "SPX",
+        contract: { conid: 416904 },
+        startDate: start,
+        endDate: TEST_NOW,
+      }),
+    (error: unknown) => error instanceof IbkrInsufficientHistoryError
+  );
+  assert.equal(windowCalls, 2);
+});
+
+void test("a later failed window retains completed-window boundary evidence", async () => {
+  const start = TEST_NOW - 399 * 86_400_000;
+  let historyCalls = 0;
+  let firstWindow: { start: number; end: number } | undefined;
+  const client = new FakeIbkrClient((input) => {
+    const contract = historyContractInfo(input);
+    if (contract !== undefined) return contract;
+    if (input.path !== "iserver/marketdata/history") throw new Error("Unexpected request");
+    historyCalls += 1;
+    if (historyCalls <= 4) throw httpResponseError(500, { error: "Chart data unavailable" });
+    const window = historyWindow(input);
+    if (firstWindow === undefined) {
+      firstWindow = window;
+      return { data: [bar(window.start), bar(window.end)] };
+    }
+    throw httpResponseError(500, { error: "Chart data unavailable" });
+  });
+
+  await assert.rejects(
+    () =>
+      client.getPriceHistory({
+        symbol: "SPX",
+        contract: { conid: 416904 },
+        startDate: start,
+        endDate: TEST_NOW,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof IbkrInsufficientHistoryError);
+      assert.notEqual(firstWindow, undefined);
+      assert.equal(error.availableStart, firstWindow?.start);
+      assert.equal(error.availableEnd, firstWindow?.end);
+      return true;
+    }
+  );
+});
+
+void test("overlapping recovery windows reject conflicting normalized duplicate bars", async () => {
+  const start = TEST_NOW - 399 * 86_400_000;
+  let historyCalls = 0;
+  let windowCalls = 0;
+  let duplicateTime: number | undefined;
+  const client = new FakeIbkrClient((input) => {
+    const contract = historyContractInfo(input);
+    if (contract !== undefined) return contract;
+    if (input.path !== "iserver/marketdata/history") throw new Error("Unexpected request");
+    historyCalls += 1;
+    if (historyCalls <= 4) throw httpResponseError(500, { error: "Chart data unavailable" });
+    windowCalls += 1;
+    const window = historyWindow(input);
+    const data = [bar(window.start), bar(window.end)];
+    if (windowCalls === 1) {
+      duplicateTime = window.start + 3 * 86_400_000;
+      data.push(bar(duplicateTime));
+      return { volumeFactor: 1, data };
+    }
+    if (windowCalls === 2 && duplicateTime !== undefined) {
+      data.push(bar(duplicateTime));
+      return { volumeFactor: 2, data };
+    }
+    return { volumeFactor: 1, data };
+  });
+
+  await assert.rejects(
+    () =>
+      client.getPriceHistory({
+        symbol: "SPX",
+        contract: { conid: 416904 },
+        startDate: start,
+        endDate: TEST_NOW,
+      }),
+    /conflicting history bars/
+  );
 });
 
 void test("SPX history ignores unrelated security types and sends CBOE index context", async () => {
@@ -594,7 +928,7 @@ void test("SPX history ignores unrelated security types and sends CBOE index con
       if (input.path === "iserver/marketdata/history") {
         assert.equal(input.params?.["conid"], "416904");
         assert.equal(input.params?.["exchange"], "CBOE");
-        return { data: [] };
+        return completeDailyHistory(220);
       }
       throw new Error(`Unexpected request: ${input.path}`);
     },
@@ -658,7 +992,7 @@ void test("an explicit history conid bypasses symbol search and validates option
         exchange: "CBOE",
       };
     }
-    if (input.path === "iserver/marketdata/history") return { data: [] };
+    if (input.path === "iserver/marketdata/history") return completeDailyHistory(5);
     throw new Error(`Explicit resolution must not search: ${input.path}`);
   });
 
@@ -801,7 +1135,7 @@ void test("history search cannot interleave with derivative search-to-strikes pr
         exchange: "CBOE",
       };
     }
-    if (input.path === "iserver/marketdata/history") return { data: [] };
+    if (input.path === "iserver/marketdata/history") return completeDailyHistory(5);
     throw new Error(`Unexpected request: ${input.path}`);
   });
 
@@ -901,7 +1235,12 @@ void test("price history retries one structured 500 and emits safe telemetry", a
       if (input.path === "iserver/marketdata/history") {
         historyCalls += 1;
         if (historyCalls === 1) throw new Error("Response status 500: Chart data unavailable");
-        return { data: [{ t: 1, o: 1, h: 2, l: 0.5, c: 1.5, v: 10 }] };
+        return {
+          data: [
+            { t: TEST_NOW - 4 * 86_400_000, o: 1, h: 2, l: 0.5, c: 1.5, v: 10 },
+            { t: TEST_NOW, o: 1, h: 2, l: 0.5, c: 1.6, v: 12 },
+          ],
+        };
       }
       throw new Error(`Unexpected request: ${input.path}`);
     },
@@ -1674,6 +2013,9 @@ void test("safe POST reads remain retryable after a 429", async () => {
     },
     {
       requestScheduler: {
+        // The shared backoff wait recomputes the remaining delay from the clock, so an
+        // injected clock keeps the observed sleep exact instead of one tick short.
+        now: () => TEST_NOW,
         jitterRatio: 0,
         sleep: async (ms) => {
           sleeps.push(ms);
@@ -1756,7 +2098,7 @@ void test("price-history 5xx honors Retry-After above the local backoff cap", as
             },
           });
         }
-        return { data: [] };
+        return completeDailyHistory(5);
       }
       throw new Error(`Unexpected request: ${input.path}`);
     },

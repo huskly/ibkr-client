@@ -3,14 +3,17 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   IbkrHttpError,
+  IbkrInsufficientHistoryError,
   IbkrPriceHistoryContractError,
   type AccountBalances,
   type BrokerClient,
   type BrokerQuoteOptions,
   type BrokerQuoteRequest,
   type IbkrHttpErrorResponse,
+  type IbkrRequestTelemetry,
   type PriceHistoryContractCandidate,
   type PriceHistoryContractSelector,
+  type PriceHistoryRequest,
   type PriceHistoryResult,
   type PriceHistorySecurityType,
   type PriceHistoryTelemetry,
@@ -43,6 +46,20 @@ void test("public price-history types expose contract context and typed failures
   assert.equal(result?.contract.exchange ?? null, null);
   assert.equal(telemetry?.barSize ?? null, null);
   assert.equal(error.code, "CONTRACT_AMBIGUOUS");
+});
+
+void test("public price-history recovery exposes typed boundary evidence", () => {
+  const request: PriceHistoryRequest = { symbol: "SPX", days: 220 };
+  const telemetry: IbkrRequestTelemetry = {
+    event: "HISTORY_WINDOW_FALLBACK",
+    endpoint: "iserver/marketdata",
+    attempt: 1,
+    delayMs: 0,
+  };
+  const error = new IbkrInsufficientHistoryError("SPX", 1, 2, null, null);
+  assert.equal(request.days, 220);
+  assert.equal(telemetry.event, "HISTORY_WINDOW_FALLBACK");
+  assert.equal(error.availableStart, null);
 });
 
 void test("public account balance types expose margin snapshots", () => {

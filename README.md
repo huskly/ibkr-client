@@ -109,9 +109,24 @@ console.log(history.contract, history.request, history.bars);
 
 Set `onPriceHistoryTelemetry` in `IbkrClient` options to receive safe request metadata. The event
 contains the requested symbol, resolved conid, security type, exchange, period, and bar size. The
-client does not put account data, credentials, or URLs in this event. IBKR entitlement errors and
-invalid-contract errors remain broker errors. The client does not return empty or shorter history
-for these errors.
+client does not put account data, credentials, or URLs in this event.
+
+Give a positive `days` value, or give `startDate` and `endDate` as epoch milliseconds. The client
+uses inclusive UTC calendar dates for daily-bar filtering. The shared request scheduler makes the
+only transport retries: it retries a price-history 5xx response with bounded backoff. The client
+does not add a second retry loop. If the structured HTTP 500 `Chart data unavailable` error stays
+after those retries, the client requests one covering `1y` period or at most 12 overlapping 90-day
+windows. Each window must have data in the seven calendar days at both edges. Adjacent windows must
+have overlapping data ranges. This rule does not assume a Monday-to-Friday trading week or require
+data on an exchange holiday. Bars are in time order and duplicate timestamps are removed.
+Conflicting duplicates fail closed.
+
+The client throws `IbkrInsufficientHistoryError` if the response does not cover the interval. The
+error contains the requested interval and all available boundaries from completed windows.
+`onRequestTelemetry` reports the `SERVER_RETRY`, `HISTORY_PERIOD_FALLBACK`, and
+`HISTORY_WINDOW_FALLBACK` event, attempt, and delay. These events do not contain the contract or
+interval. Authentication, entitlement, invalid contract, and ambiguous contract errors do not start
+recovery.
 
 - `getOptionExpiries(...)` discovers weekly and monthly maturities across month buckets.
 - `getOptionChain(...)` returns an exact-expiry chain with canonical OSI symbols, conids,
