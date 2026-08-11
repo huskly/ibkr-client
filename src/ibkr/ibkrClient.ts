@@ -4257,29 +4257,33 @@ export class IbkrClient
         return [];
       }
       const sections = item["sections"];
-      if (
-        !Array.isArray(sections) ||
-        !sections.some(
-          (section) =>
-            isUnknownRecord(section) &&
-            typeof section["secType"] === "string" &&
-            section["secType"].trim().toUpperCase() === "OPT"
-        )
-      ) {
-        return [];
-      }
+      if (!Array.isArray(sections)) return [];
+      const optionSections = sections.flatMap((section) => {
+        if (!isUnknownRecord(section)) return [];
+        const secType = section["secType"];
+        if (typeof secType !== "string" || secType.trim().toUpperCase() !== "OPT") return [];
+        const exchange = section["exchange"];
+        return [{ exchange: typeof exchange === "string" ? exchange : null }];
+      });
+      if (!optionSections.length) return [];
+      const supportsSmart = optionSections.some(
+        ({ exchange }) =>
+          exchange?.split(";").some((name) => name.trim().toUpperCase() === "SMART") ?? false
+      );
       const conid = Number(item["conid"]);
-      return Number.isSafeInteger(conid) && conid > 0 ? [{ conid, symbol }] : [];
+      return Number.isSafeInteger(conid) && conid > 0 ? [{ conid, symbol, supportsSmart }] : [];
     });
     const unique = [
       ...new Map(candidates.map((candidate) => [candidate.conid, candidate])).values(),
     ];
-    if (unique.length !== 1) {
+    const smart = unique.filter((candidate) => candidate.supportsSmart);
+    const eligible = smart.length > 0 ? smart : unique;
+    if (eligible.length !== 1) {
       throw new Error(
-        `IBKR option underlying identity is ${unique.length ? "ambiguous" : "missing"} for ${symbol}`
+        `IBKR option underlying identity is ${eligible.length ? "ambiguous" : "missing"} for ${symbol}`
       );
     }
-    const [underlying] = unique;
+    const [underlying] = eligible;
     if (underlying === undefined)
       throw new Error(`IBKR lost the selected underlying for ${symbol}`);
     return underlying;
