@@ -336,6 +336,22 @@ export interface IbkrClientOptions {
 }
 
 /**
+ * Typed broker rejection for documented IBKR error-object payloads outside order
+ * submission result envelopes. Callers can catch this class to read the retained
+ * {@link BrokerErrorDetail} without parsing free-form message text.
+ */
+export class IbkrBrokerResponseError extends Error {
+  constructor(
+    message: string,
+    readonly detail: BrokerErrorDetail,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = "IbkrBrokerResponseError";
+  }
+}
+
+/**
  * Typed IBKR Web API client implementing the broker-neutral {@link BrokerClient}.
  * Wraps the `ibkr-client` npm package, which performs the OAuth 1.0a
  * live-session-token handshake. Ports the data access from the Python PoC
@@ -2866,7 +2882,8 @@ export class IbkrClient
 
   private normalizeBrokerError(
     error: unknown,
-    response: Readonly<Record<string, unknown>>
+    response: Readonly<Record<string, unknown>>,
+    defaultMessage = "IBKR rejected the order"
   ): BrokerErrorDetail {
     const nested = typeof error === "object" && error !== null ? error : undefined;
     const nestedMessage = nested ? (nested as { message?: unknown }).message : undefined;
@@ -2879,7 +2896,7 @@ export class IbkrClient
       (typeof responseMessage === "string" && responseMessage.trim()) ||
       (typeof responseText === "string" && responseText.trim()) ||
       (typeof responseWarningMessage === "string" && responseWarningMessage.trim()) ||
-      "IBKR rejected the order";
+      defaultMessage;
     const nestedCode = nested ? (nested as { code?: unknown }).code : undefined;
     const responseCode = response["code"];
     const codeValue = nestedCode ?? responseCode;
@@ -2892,6 +2909,33 @@ export class IbkrClient
         typeof statusValue === "number" && Number.isFinite(statusValue) ? statusValue : null,
       details: response,
     };
+  }
+
+  /**
+   * Validate `iserver/secdef/search` at one shared boundary.
+   * Accept the documented success array, convert the documented error object into a typed
+   * broker error, and fail closed on any other shape. Never treat an error object as an empty
+   * successful search.
+   */
+  private parseSecdefSearchResponse(response: unknown): IbkrSecdefSearchResult[] {
+    if (Array.isArray(response)) {
+      return response as IbkrSecdefSearchResult[];
+    }
+    if (
+      isUnknownRecord(response) &&
+      response["error"] !== undefined &&
+      response["error"] !== null
+    ) {
+      if (this.isMeaningfulBrokerError(response["error"], response)) {
+        const detail = this.normalizeBrokerError(
+          response["error"],
+          response,
+          "IBKR rejected the security-definition search"
+        );
+        throw new IbkrBrokerResponseError(detail.message, detail);
+      }
+    }
+    throw new Error("IBKR returned a malformed secdef/search response");
   }
 
   private isMeaningfulBrokerError(
@@ -3648,10 +3692,12 @@ export class IbkrClient
     }
     // `trsrv/stocks` is equity/ETF-only. Fall back to security-definition search so
     // non-stock roots (indexes like VIX, futures, etc.) still resolve to a conid.
-    const search = await this.req<IbkrSecdefSearchResult[]>({
-      path: "iserver/secdef/search",
-      params: { symbol: symbol.trim().toUpperCase() },
-    });
+    const search = this.parseSecdefSearchResponse(
+      await this.req<unknown>({
+        path: "iserver/secdef/search",
+        params: { symbol: symbol.trim().toUpperCase() },
+      })
+    );
     const candidate = search.find(
       (item) =>
         item.conid !== undefined &&
@@ -4079,10 +4125,12 @@ export class IbkrClient
   ): Promise<DerivativeContract[]> {
     // IBKR keeps this priming state in the authenticated session. Strikes may be
     // empty when search has not run first, even with otherwise identical params.
-    const search = await this.req<IbkrSecdefSearchResult[]>({
-      path: "iserver/secdef/search",
-      params: { symbol: underlying, ...(assetClass === "FOP" ? { secType: "FUT" } : {}) },
-    });
+    const search = this.parseSecdefSearchResponse(
+      await this.req<unknown>({
+        path: "iserver/secdef/search",
+        params: { symbol: underlying, ...(assetClass === "FOP" ? { secType: "FUT" } : {}) },
+      })
+    );
     const candidates = search.filter(
       (candidate) =>
         candidate.conid !== undefined &&
@@ -4243,13 +4291,12 @@ export class IbkrClient
   private async loadOptionUnderlying(symbol: string): Promise<OptionUnderlying> {
     // This search is load-bearing: IBKR silently returns empty definitions unless the current
     // session has first searched the underlying.
-    const search = await this.req<unknown>({
-      path: "iserver/secdef/search",
-      params: { symbol },
-    });
-    if (!Array.isArray(search)) {
-      throw new Error(`IBKR returned malformed option underlying results for ${symbol}`);
-    }
+    const search = this.parseSecdefSearchResponse(
+      await this.req<unknown>({
+        path: "iserver/secdef/search",
+        params: { symbol },
+      })
+    );
     const candidates = search.flatMap((item) => {
       if (!isUnknownRecord(item)) return [];
       const candidateSymbol = item["symbol"];

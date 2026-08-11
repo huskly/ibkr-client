@@ -74,7 +74,11 @@ validated at runtime. Its broker-neutral account API includes:
 - `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes. Quote requests accept
   a symbol and an optional broker ID. A broker ID reads that exact contract without symbol
   discovery. A request without one can also resolve a complete OSI option symbol without loading
-  its option chain.
+  its option chain. Non-stock roots such as indexes fall back to `iserver/secdef/search` when
+  `trsrv/stocks` is empty. That search validates the HTTP payload at one shared boundary: a
+  success array continues, IBKR's documented error object throws `IbkrBrokerResponseError` with the
+  retained broker detail, and any other shape fails closed as a malformed response. An error object
+  is never treated as an empty successful search.
 - `fetchTransactionHistory()` for normalized portfolio transactions.
 - `fetchOrders()` for normalized live orders, including aggregate `WORKING`
   matching across IBKR's active order states.
@@ -110,6 +114,8 @@ derivative operations to the smaller account-oriented `BrokerClient`:
 Both `OPT` and `FOP` use the stateful `secdef/search` -> `secdef/strikes` -> `secdef/info`
 sequence. FOP discovery derives a unique exchange such as CME from the search result when the
 caller does not provide one. Index-option callers can select a venue explicitly, such as SMART.
+Every `secdef/search` consumer shares the same response validation: success arrays, typed broker
+errors for documented error objects, and fail-closed malformed-response errors.
 
 ```ts
 const nq = await client.resolveDerivativeContract({

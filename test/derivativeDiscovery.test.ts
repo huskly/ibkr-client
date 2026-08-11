@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { IbkrClient } from "../src/ibkr/ibkrClient.js";
+import { IbkrBrokerResponseError, IbkrClient } from "../src/ibkr/ibkrClient.js";
 import { normalizeDerivativeDataAvailability } from "../src/ibkr/derivativeContract.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
@@ -425,4 +425,84 @@ void test("FOP reference quotes follow the broker-linked futures conid", async (
   });
   assert.equal(client.calls[0]?.params?.["conids"], "892767774");
   assert.ok(client.calls.every((call) => !call.path.includes("/orders")));
+});
+
+void test("secdef/search error object rejects derivative discovery with a typed broker error", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return { error: "No security definition found for symbol" };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () =>
+      client.resolveDerivativeContract({
+        assetClass: "FOP",
+        underlying: "$NQ",
+        expiration: "2026-08-21",
+        strike: 26600,
+        right: "P",
+        tradingClass: "QN3",
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof IbkrBrokerResponseError);
+      assert.equal(error.message, "No security definition found for symbol");
+      assert.notEqual(error instanceof TypeError, true);
+      return true;
+    }
+  );
+  assert.deepEqual(
+    client.calls.map(({ path }) => path),
+    ["iserver/secdef/search"]
+  );
+});
+
+void test("secdef/search malformed payload fails closed for derivative discovery", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") return { unexpected: true };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () =>
+      client.getDerivativeContracts({
+        assetClass: "FOP",
+        underlying: "NQ",
+        expiration: "2026-08-21",
+        right: "P",
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /malformed secdef\/search response/);
+      assert.equal(error instanceof IbkrBrokerResponseError, false);
+      assert.notEqual(error instanceof TypeError, true);
+      return true;
+    }
+  );
+});
+
+void test("secdef/search error object rejects option underlying discovery with a typed broker error", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return { error: "No security definition found for symbol" };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () =>
+      client.getOptionQuote({
+        symbol: "$MSTR",
+        expiry: "2026-08-21",
+        strike: 215,
+        right: "C",
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof IbkrBrokerResponseError);
+      assert.equal(error.message, "No security definition found for symbol");
+      assert.notEqual(error instanceof TypeError, true);
+      return true;
+    }
+  );
 });
