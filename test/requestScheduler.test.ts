@@ -194,3 +194,132 @@ void test("scheduler rejects retry settings that are not bounded", () => {
   );
   assert.throws(() => new IbkrRequestScheduler({ jitterRatio: 1.1 }), /retry limits/);
 });
+
+void test("explicit Retry-After is not clamped by the local exponential cap", async () => {
+  const sleeps: number[] = [];
+  let attempts = 0;
+  const scheduler = new IbkrRequestScheduler({
+    maxRetries: 1,
+    retryBaseDelayMs: 100,
+    retryMaxDelayMs: 500,
+    jitterRatio: 0,
+    now: () => 0,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+    classifyError: () => ({ kind: "THROTTLED", retryAfterMs: 60_000 }),
+  });
+
+  assert.equal(
+    await scheduler.schedule({ endpoint: "read", priority: "STANDARD" }, async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("throttled");
+      return "ok";
+    }),
+    "ok"
+  );
+  assert.deepEqual(sleeps, [60_000]);
+});
+
+void test("a sleeping server retry fails behind a circuit opened by another request", async () => {
+  const retrySleep = deferred();
+  let historyAttempts = 0;
+  const scheduler = new IbkrRequestScheduler({
+    maxConcurrent: 1,
+    now: () => 0,
+    sleep: () => retrySleep.promise,
+    classifyError: (error) => {
+      if (error instanceof Error && error.message === "server") return { kind: "SERVER_ERROR" };
+      if (error instanceof Error && error.message === "blocked") {
+        return { kind: "TEMPORARILY_BLOCKED" };
+      }
+      return { kind: "OTHER" };
+    },
+  });
+
+  const history = scheduler.schedule(
+    {
+      endpoint: "iserver/marketdata",
+      priority: "STANDARD",
+      retryServerErrors: true,
+    },
+    async () => {
+      historyAttempts += 1;
+      if (historyAttempts === 1) throw new Error("server");
+      return "must not send";
+    }
+  );
+  const blocked = scheduler.schedule({ endpoint: "secdef/search", priority: "DISCOVERY" }, () =>
+    Promise.reject(new Error("blocked"))
+  );
+
+  await assert.rejects(blocked, /temporarily blocked/);
+  retrySleep.resolve();
+  await assert.rejects(
+    history,
+    (error: unknown) =>
+      error instanceof IbkrRequestSchedulerError && error.code === "IBKR_TEMPORARILY_BLOCKED"
+  );
+  assert.equal(historyAttempts, 1);
+});
+
+void test("telemetry callback failures cannot strand a server retry", async () => {
+  let attempts = 0;
+  const scheduler = new IbkrRequestScheduler({
+    maxRetries: 1,
+    sleep: async () => undefined,
+    classifyError: () => ({ kind: "SERVER_ERROR" }),
+    onTelemetry: () => {
+      throw new Error("observer failed");
+    },
+  });
+
+  const request = scheduler.schedule(
+    {
+      endpoint: "iserver/marketdata",
+      priority: "STANDARD",
+      retryServerErrors: true,
+    },
+    async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("server");
+      return "ok";
+    }
+  );
+  const result = await Promise.race([
+    request,
+    new Promise<string>((resolve) => setTimeout(() => resolve("stranded"), 25)),
+  ]);
+  assert.equal(result, "ok");
+  assert.equal(attempts, 2);
+});
+
+void test("rejected asynchronous telemetry cannot create an unhandled retry failure", async () => {
+  let attempts = 0;
+  const scheduler = new IbkrRequestScheduler({
+    maxRetries: 1,
+    sleep: async () => undefined,
+    classifyError: () => ({ kind: "SERVER_ERROR" }),
+    onTelemetry: async () => {
+      throw new Error("async observer failed");
+    },
+  });
+
+  assert.equal(
+    await scheduler.schedule(
+      {
+        endpoint: "iserver/marketdata",
+        priority: "STANDARD",
+        retryServerErrors: true,
+      },
+      async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("server");
+        return "ok";
+      }
+    ),
+    "ok"
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 2);
+});

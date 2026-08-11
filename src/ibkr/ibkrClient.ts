@@ -243,7 +243,8 @@ function parseRetryAfter(raw: unknown, now: number): number | undefined {
   if (!asString) return undefined;
 
   const numeric = Number(asString);
-  if (Number.isFinite(numeric) && numeric > 0) return Math.ceil(numeric * 1000);
+  const numericMs = Math.ceil(numeric * 1000);
+  if (Number.isSafeInteger(numericMs) && numericMs > 0) return numericMs;
 
   const date = Date.parse(asString);
   if (!Number.isNaN(date)) {
@@ -366,6 +367,8 @@ interface IbkrRequestInput {
   data?: object;
 }
 
+type IbkrRequestRetryPolicy = "SAFE_READ" | "PRICE_HISTORY" | "SINGLE_ATTEMPT";
+
 export interface IbkrClientOptions {
   requestScheduler?: Omit<IbkrRequestSchedulerOptions, "classifyError" | "onTelemetry">;
   onRequestTelemetry?: (event: IbkrRequestTelemetry) => void;
@@ -445,6 +448,7 @@ export class IbkrClient
   private readonly optionContractResolution = new Map<string, Promise<OptionContract | null>>();
   private readonly derivativeDiscovery = new Map<string, Promise<DerivativeContract[]>>();
   private readonly requestScheduler: IbkrRequestScheduler;
+  private readonly requestNow: () => number;
   private secdefPrimingTail: Promise<void> = Promise.resolve();
   private readonly onPriceHistoryTelemetry: (event: PriceHistoryTelemetry) => void;
 
@@ -452,9 +456,10 @@ export class IbkrClient
     this.raw = new RawIbkrClientCtor(config);
     this.onPriceHistoryTelemetry = options.onPriceHistoryTelemetry ?? (() => undefined);
     const schedulerOptions = options.requestScheduler;
+    this.requestNow = schedulerOptions?.now ?? (() => this.now());
     this.requestScheduler = new IbkrRequestScheduler({
       ...schedulerOptions,
-      now: schedulerOptions?.now ?? (() => this.now()),
+      now: this.requestNow,
       sleep: schedulerOptions?.sleep ?? ((ms) => this.wait(ms)),
       random: schedulerOptions?.random ?? (() => this.random()),
       classifyError: (error) => this.classifyRequestError(error),
@@ -467,7 +472,11 @@ export class IbkrClient
   /** Obtain the live session token (idempotent — safe to await repeatedly). */
   init(): Promise<void> {
     this.initPromise ??= (async () => {
-      await this.raw.init();
+      try {
+        await this.raw.init();
+      } catch (error) {
+        throw this.normalizeHttpError(error);
+      }
       // IBKR is slow right after init; give the session a moment to settle.
       await this.wait(1000);
     })();
@@ -523,7 +532,7 @@ export class IbkrClient
       path: "iserver/marketdata/snapshot",
       params: { conids, fields: "6509" },
     });
-    const response = await this.req<IbkrWhatIfResponse>({
+    const response = await this.singleAttemptRequest<IbkrWhatIfResponse>({
       path: `iserver/account/${request.accountId}/orders/whatif`,
       method: "POST",
       data: {
@@ -3721,7 +3730,7 @@ export class IbkrClient
     if (brokerageAccounts.accounts && !brokerageAccounts.accounts.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available for trading/order queries.`);
     }
-    const switchedAccount = await this.req<IbkrSwitchAccountResponse>({
+    const switchedAccount = await this.singleAttemptRequest<IbkrSwitchAccountResponse>({
       path: "iserver/account",
       method: "POST",
       data: { acctId: accountId },
@@ -5232,28 +5241,27 @@ export class IbkrClient
   }
 
   protected req<T>(input: IbkrRequestInput): Promise<T> {
-    return this.scheduledRequest(input, this.isIdempotentRequest(input), false);
+    return this.scheduledRequest(input, "SAFE_READ");
   }
 
   private historyRequest<T>(input: IbkrRequestInput): Promise<T> {
-    return this.scheduledRequest(input, true, true);
+    return this.scheduledRequest(input, "PRICE_HISTORY");
   }
 
   private singleAttemptRequest<T>(input: IbkrRequestInput): Promise<T> {
-    return this.scheduledRequest(input, false, false);
+    return this.scheduledRequest(input, "SINGLE_ATTEMPT");
   }
 
   private scheduledRequest<T>(
     input: IbkrRequestInput,
-    retryable: boolean,
-    retryServerErrors: boolean
+    retryPolicy: IbkrRequestRetryPolicy
   ): Promise<T> {
     return this.requestScheduler.schedule(
       {
         endpoint: this.requestEndpoint(input.path),
         priority: this.requestPriority(input.path),
-        retryable,
-        retryServerErrors,
+        retryable: retryPolicy !== "SINGLE_ATTEMPT",
+        retryServerErrors: retryPolicy === "PRICE_HISTORY",
       },
       async () => {
         try {
@@ -5263,10 +5271,6 @@ export class IbkrClient
         }
       }
     );
-  }
-
-  private isIdempotentRequest(input: IbkrRequestInput): boolean {
-    return (input.method ?? "GET").toUpperCase() === "GET";
   }
 
   private requestPriority(path: string): IbkrRequestPriority {
@@ -5311,7 +5315,10 @@ export class IbkrClient
         : { kind: "THROTTLED", retryAfterMs };
     }
     if (status !== undefined && status >= 500 && status <= 599) {
-      return { kind: "SERVER_ERROR" };
+      const retryAfterMs = this.retryAfterFromError(error);
+      return retryAfterMs === undefined
+        ? { kind: "SERVER_ERROR" }
+        : { kind: "SERVER_ERROR", retryAfterMs };
     }
     return { kind: "OTHER" };
   }
@@ -5404,7 +5411,7 @@ export class IbkrClient
       error instanceof IbkrHttpError ? (error.response.retryAfter ?? undefined) : undefined;
     return parseRetryAfter(
       structuredRetryAfter ?? this.retryAfterHeaderFromError(error),
-      this.now()
+      this.requestNow()
     );
   }
 

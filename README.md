@@ -304,16 +304,20 @@ Individual queued reads do not start independent retry loops. Exhausted throttli
 bounded circuit, rejects queued work, and throws code `IBKR_TEMPORARILY_BLOCKED` without a retry.
 
 A price-history read retries a 5xx response with bounded exponential backoff and jitter. No other
-request retries a 5xx response. HTTP errors use `IbkrHttpError`. Its `status`, `statusCode`, and
-`response` fields keep the final numeric status, a bounded response body, and the safe
-`Retry-After` value when it is available. Callers do not have to parse the error message. Order
-placement, warning replies, cancellation, account selection, and
+request retries a 5xx response. An explicit `Retry-After` value replaces the local backoff delay
+and is not reduced to the local exponential-backoff limit. Safe reads can retry a 429 even when the
+IBKR endpoint uses POST. Order placement, warning replies, cancellation, account selection, and
 all other writes have one HTTP attempt, including for 429 and 5xx responses.
+
+Public HTTP failures, including initialization failures, use `IbkrHttpError`. Its `status`,
+`statusCode`, and `response` fields keep the final numeric status, a bounded response body, and the
+safe `Retry-After` value when it is available. Callers do not have to parse the error message.
 
 `IbkrClient` accepts optional scheduler limits and an `onRequestTelemetry` callback. Scheduler
 options also accept `now`, `sleep`, and `random` functions for controlled runtimes and tests.
 Telemetry for each retry contains only a sanitized endpoint category, event, attempt, and delay. It
-does not contain account IDs, order IDs, credentials, request payloads, or full URLs.
+does not contain account IDs, order IDs, credentials, request payloads, or full URLs. A telemetry
+observer failure does not change request scheduling or request settlement.
 
 ### Authorized read-only smoke test
 
