@@ -268,19 +268,6 @@ export interface IbkrSecdefSearchResult {
   sections?: { secType?: string; months?: string; exchange?: string }[];
 }
 
-/**
- * Documented error-object shape for `iserver/secdef/search` when IBKR cannot process the
- * request. Success answers are arrays; this object is not an empty search result.
- */
-export interface IbkrSecdefSearchErrorResponse {
-  error?: unknown;
-  code?: string | number;
-  message?: string;
-  text?: string;
-  statusCode?: number;
-  [key: string]: unknown;
-}
-
 export interface IbkrSecdefStrikesResponse {
   call?: number[];
   put?: number[];
