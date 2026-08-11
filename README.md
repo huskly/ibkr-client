@@ -112,19 +112,21 @@ contains the requested symbol, resolved conid, security type, exchange, period, 
 client does not put account data, credentials, or URLs in this event.
 
 Give a positive `days` value, or give `startDate` and `endDate` as epoch milliseconds. The client
-uses inclusive UTC calendar dates for daily-bar filtering. If IBKR returns the structured HTTP 500
-`Chart data unavailable` error, the client retries the same read two times. It then requests one
-covering `1y` period or at most 12 overlapping 90-day windows. Each window must have data in the
-seven calendar days at both edges. Adjacent windows must have overlapping data ranges. This rule
-  does not
-assume a Monday-to-Friday trading week or require data on an exchange holiday. Bars are in time
-order and duplicate timestamps are removed. Conflicting duplicates fail closed.
+uses inclusive UTC calendar dates for daily-bar filtering. The shared request scheduler makes the
+only transport retries: it retries a price-history 5xx response with bounded backoff. The client
+does not add a second retry loop. If the structured HTTP 500 `Chart data unavailable` error stays
+after those retries, the client requests one covering `1y` period or at most 12 overlapping 90-day
+windows. Each window must have data in the seven calendar days at both edges. Adjacent windows must
+have overlapping data ranges. This rule does not assume a Monday-to-Friday trading week or require
+data on an exchange holiday. Bars are in time order and duplicate timestamps are removed.
+Conflicting duplicates fail closed.
 
 The client throws `IbkrInsufficientHistoryError` if the response does not cover the interval. The
 error contains the requested interval and all available boundaries from completed windows.
-`onRequestTelemetry` reports the retry and fallback event, attempt, and delay. These events do not
-contain the contract or interval. Authentication, entitlement, invalid contract, and ambiguous
-contract errors do not start recovery.
+`onRequestTelemetry` reports the `SERVER_RETRY`, `HISTORY_PERIOD_FALLBACK`, and
+`HISTORY_WINDOW_FALLBACK` event, attempt, and delay. These events do not contain the contract or
+interval. Authentication, entitlement, invalid contract, and ambiguous contract errors do not start
+recovery.
 
 - `getOptionExpiries(...)` discovers weekly and monthly maturities across month buckets.
 - `getOptionChain(...)` returns an exact-expiry chain with canonical OSI symbols, conids,
@@ -311,13 +313,26 @@ session-level transaction guard keeps each stateful security-definition search w
 strike or definition request. An exact expiry/strike/right request expands only that requested
 contract.
 
-A 429 pauses the shared queue behind one `Retry-After`-aware exponential backoff with jitter;
-individual queued reads do not start independent retry loops. Exhausted throttling throws
+A 429 pauses the shared queue behind one `Retry-After`-aware exponential backoff with jitter.
+Individual queued reads do not start independent retry loops. Exhausted throttling throws
 `IbkrRequestSchedulerError` with code `IBKR_THROTTLED`. A broker temporary-block response opens a
-bounded circuit, rejects queued work, and throws code `IBKR_TEMPORARILY_BLOCKED` without retrying.
-`IbkrClient` accepts optional scheduler limits and an `onRequestTelemetry` callback. Telemetry
-contains only a sanitized endpoint category, event, attempt, and delay—never account IDs, order
-IDs, credentials, or request payloads.
+bounded circuit, rejects queued work, and throws code `IBKR_TEMPORARILY_BLOCKED` without a retry.
+
+A price-history read retries a 5xx response with bounded exponential backoff and jitter. No other
+request retries a 5xx response. An explicit `Retry-After` value replaces the local backoff delay
+and is not reduced to the local exponential-backoff limit. Safe reads can retry a 429 even when the
+IBKR endpoint uses POST. Order placement, warning replies, cancellation, account selection, and
+all other writes have one HTTP attempt, including for 429 and 5xx responses.
+
+Public HTTP failures, including initialization failures, use `IbkrHttpError`. Its `status`,
+`statusCode`, and `response` fields keep the final numeric status, a bounded response body, and the
+safe `Retry-After` value when it is available. Callers do not have to parse the error message.
+
+`IbkrClient` accepts optional scheduler limits and an `onRequestTelemetry` callback. Scheduler
+options also accept `now`, `sleep`, and `random` functions for controlled runtimes and tests.
+Telemetry for each retry contains only a sanitized endpoint category, event, attempt, and delay. It
+does not contain account IDs, order IDs, credentials, request payloads, or full URLs. A telemetry
+observer failure does not change request scheduling or request settlement.
 
 ### Authorized read-only smoke test
 

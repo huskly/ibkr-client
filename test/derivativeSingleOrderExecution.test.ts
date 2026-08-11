@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { IbkrClient } from "../src/ibkr/ibkrClient.js";
+import { IbkrClient, IbkrHttpError } from "../src/ibkr/ibkrClient.js";
 import type {
   DerivativeContingentChildOrderRequest,
   DerivativeContingentParentOrderRequest,
@@ -495,7 +495,10 @@ void test("placement transport errors are never retried for single orders", asyn
   await assert.rejects(
     () => client.submitDerivativeSingleOrder(singleOrderRequest()),
     (error) => {
-      assert.equal(error, transportError);
+      assert.ok(error instanceof IbkrHttpError);
+      assert.equal(error.status, 503);
+      assert.equal(error.response.body, "");
+      assert.equal(error.cause, transportError);
       return true;
     }
   );

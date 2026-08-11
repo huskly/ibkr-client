@@ -239,16 +239,17 @@ function extractOsiPositionSymbol(contractDescription: string): string | undefin
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-function parseRetryAfter(raw: unknown): number | undefined {
+function parseRetryAfter(raw: unknown, now: number): number | undefined {
   const asString = typeof raw === "string" ? raw.trim() : undefined;
   if (!asString) return undefined;
 
   const numeric = Number(asString);
-  if (Number.isFinite(numeric) && numeric > 0) return Math.ceil(numeric * 1000);
+  const numericMs = Math.ceil(numeric * 1000);
+  if (Number.isSafeInteger(numericMs) && numericMs > 0) return numericMs;
 
   const date = Date.parse(asString);
   if (!Number.isNaN(date)) {
-    const ms = Math.max(0, date - Date.now());
+    const ms = Math.max(0, date - now);
     if (ms > 0) return ms;
   }
 
@@ -367,14 +368,36 @@ interface IbkrRequestInput {
   data?: object;
 }
 
+type IbkrRequestRetryPolicy = "SAFE_READ" | "PRICE_HISTORY" | "SINGLE_ATTEMPT";
+
 export interface IbkrClientOptions {
-  requestScheduler?: Omit<
-    IbkrRequestSchedulerOptions,
-    "now" | "sleep" | "random" | "classifyError" | "onTelemetry"
-  >;
+  requestScheduler?: Omit<IbkrRequestSchedulerOptions, "classifyError" | "onTelemetry">;
   onRequestTelemetry?: (event: IbkrRequestTelemetry) => void;
   /** Receive safe contract and request metadata before each price-history request. */
   onPriceHistoryTelemetry?: (event: PriceHistoryTelemetry) => void;
+}
+
+/** Safe HTTP response evidence retained when the raw transport rejects a request. */
+export interface IbkrHttpErrorResponse {
+  status: number;
+  body: string;
+  retryAfter: string | null;
+}
+
+/** A typed HTTP failure from the IBKR transport. */
+export class IbkrHttpError extends Error {
+  readonly statusCode: number;
+
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly response: IbkrHttpErrorResponse,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = "IbkrHttpError";
+    this.statusCode = status;
+  }
 }
 
 /**
@@ -441,6 +464,7 @@ export class IbkrClient
   private readonly optionContractResolution = new Map<string, Promise<OptionContract | null>>();
   private readonly derivativeDiscovery = new Map<string, Promise<DerivativeContract[]>>();
   private readonly requestScheduler: IbkrRequestScheduler;
+  private readonly requestNow: () => number;
   private secdefPrimingTail: Promise<void> = Promise.resolve();
   private readonly onPriceHistoryTelemetry: (event: PriceHistoryTelemetry) => void;
   private readonly onRequestTelemetry: (event: IbkrRequestTelemetry) => void;
@@ -449,11 +473,13 @@ export class IbkrClient
     this.raw = new RawIbkrClientCtor(config);
     this.onPriceHistoryTelemetry = options.onPriceHistoryTelemetry ?? (() => undefined);
     this.onRequestTelemetry = options.onRequestTelemetry ?? (() => undefined);
+    const schedulerOptions = options.requestScheduler;
+    this.requestNow = schedulerOptions?.now ?? (() => this.now());
     this.requestScheduler = new IbkrRequestScheduler({
-      ...options.requestScheduler,
-      now: () => this.now(),
-      sleep: (ms) => this.wait(ms),
-      random: () => this.random(),
+      ...schedulerOptions,
+      now: this.requestNow,
+      sleep: schedulerOptions?.sleep ?? ((ms) => this.wait(ms)),
+      random: schedulerOptions?.random ?? (() => this.random()),
       classifyError: (error) => this.classifyRequestError(error),
       ...(options.onRequestTelemetry === undefined
         ? {}
@@ -464,7 +490,11 @@ export class IbkrClient
   /** Obtain the live session token (idempotent — safe to await repeatedly). */
   init(): Promise<void> {
     this.initPromise ??= (async () => {
-      await this.raw.init();
+      try {
+        await this.raw.init();
+      } catch (error) {
+        throw this.normalizeHttpError(error);
+      }
       // IBKR is slow right after init; give the session a moment to settle.
       await this.wait(1000);
     })();
@@ -520,7 +550,7 @@ export class IbkrClient
       path: "iserver/marketdata/snapshot",
       params: { conids, fields: "6509" },
     });
-    const response = await this.req<IbkrWhatIfResponse>({
+    const response = await this.singleAttemptRequest<IbkrWhatIfResponse>({
       path: `iserver/account/${request.accountId}/orders/whatif`,
       method: "POST",
       data: {
@@ -3718,7 +3748,7 @@ export class IbkrClient
     if (brokerageAccounts.accounts && !brokerageAccounts.accounts.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available for trading/order queries.`);
     }
-    const switchedAccount = await this.req<IbkrSwitchAccountResponse>({
+    const switchedAccount = await this.singleAttemptRequest<IbkrSwitchAccountResponse>({
       path: "iserver/account",
       method: "POST",
       data: { acctId: accountId },
@@ -3830,7 +3860,7 @@ export class IbkrClient
     };
     let bars: PriceHistoryBar[];
     try {
-      const history = await this.requestHistoryWithChartRetries(contract, requestedSymbol, request);
+      const history = await this.requestPriceHistory(contract, requestedSymbol, request);
       bars = this.normalizeHistoryResponse(requestedSymbol, history, interval);
       this.assertHistoryCoverage(requestedSymbol, bars, interval);
     } catch (error) {
@@ -4742,29 +4772,6 @@ export class IbkrClient
     return { start, end: endDay + DAY_MS - 1, days: (endDay - start) / DAY_MS + 1 };
   }
 
-  private async requestHistoryWithChartRetries(
-    contract: PriceHistoryContract,
-    requestedSymbol: string,
-    request: { period: string; startTime?: string }
-  ): Promise<IbkrMarketDataHistoryResponse> {
-    const maximumAttempts = 3;
-    for (let attempt = 1; ; attempt += 1) {
-      try {
-        return await this.requestPriceHistory(contract, requestedSymbol, request);
-      } catch (error) {
-        if (!this.isChartDataUnavailable(error) || attempt >= maximumAttempts) throw error;
-        const delayMs = 250 * 2 ** (attempt - 1);
-        this.onRequestTelemetry({
-          event: "HISTORY_RETRY",
-          endpoint: "iserver/marketdata",
-          attempt,
-          delayMs,
-        });
-        await this.wait(delayMs);
-      }
-    }
-  }
-
   private async requestPriceHistory(
     contract: PriceHistoryContract,
     requestedSymbol: string,
@@ -4810,7 +4817,7 @@ export class IbkrClient
       });
       let standardBars: PriceHistoryBar[] | undefined;
       try {
-        const history = await this.requestHistoryWithChartRetries(contract, symbol, {
+        const history = await this.requestPriceHistory(contract, symbol, {
           period: "1y",
           startTime: this.historyStartTime(interval.end),
         });
@@ -4840,7 +4847,7 @@ export class IbkrClient
       });
       let bars: PriceHistoryBar[];
       try {
-        const history = await this.requestHistoryWithChartRetries(contract, symbol, {
+        const history = await this.requestPriceHistory(contract, symbol, {
           period: `${String(window.days)}d`,
           startTime: this.historyStartTime(window.end),
         });
@@ -5046,9 +5053,11 @@ export class IbkrClient
       typeof transportResponse === "object" && transportResponse !== null
         ? (transportResponse as { data?: unknown }).data
         : undefined;
+    // Normalized HTTP failures keep the raw payload under `response.body`.
+    const structuredBody = error instanceof IbkrHttpError ? error.response.body : undefined;
     const body =
       typeof error === "object" && error !== null ? (error as { body?: unknown }).body : undefined;
-    const payload = brokerDetail?.details ?? responseData ?? body;
+    const payload = brokerDetail?.details ?? responseData ?? structuredBody ?? body;
     const decoded = (() => {
       if (typeof payload !== "string") return payload;
       try {
@@ -5089,7 +5098,7 @@ export class IbkrClient
     startTime?: string
   ): Promise<IbkrMarketDataHistoryResponse | undefined> {
     try {
-      const response = await this.req<unknown>({
+      const response = await this.historyRequest<unknown>({
         path: "iserver/marketdata/history",
         params: {
           conid: String(conid),
@@ -5537,25 +5546,43 @@ export class IbkrClient
 
   /** Typed wrapper around the raw client's untyped `request()`. */
   protected async sendRequest<T>(input: IbkrRequestInput): Promise<T> {
-    return (await this.raw.request(input)) as T;
+    try {
+      return (await this.raw.request(input)) as T;
+    } catch (error) {
+      throw this.normalizeHttpError(error);
+    }
   }
 
   protected req<T>(input: IbkrRequestInput): Promise<T> {
-    return this.scheduledRequest(input, true);
+    return this.scheduledRequest(input, "SAFE_READ");
+  }
+
+  private historyRequest<T>(input: IbkrRequestInput): Promise<T> {
+    return this.scheduledRequest(input, "PRICE_HISTORY");
   }
 
   private singleAttemptRequest<T>(input: IbkrRequestInput): Promise<T> {
-    return this.scheduledRequest(input, false);
+    return this.scheduledRequest(input, "SINGLE_ATTEMPT");
   }
 
-  private scheduledRequest<T>(input: IbkrRequestInput, retryable: boolean): Promise<T> {
+  private scheduledRequest<T>(
+    input: IbkrRequestInput,
+    retryPolicy: IbkrRequestRetryPolicy
+  ): Promise<T> {
     return this.requestScheduler.schedule(
       {
         endpoint: this.requestEndpoint(input.path),
         priority: this.requestPriority(input.path),
-        retryable,
+        retryable: retryPolicy !== "SINGLE_ATTEMPT",
+        retryServerErrors: retryPolicy === "PRICE_HISTORY",
       },
-      () => this.sendRequest<T>(input)
+      async () => {
+        try {
+          return await this.sendRequest<T>(input);
+        } catch (error) {
+          throw this.normalizeHttpError(error);
+        }
+      }
     );
   }
 
@@ -5593,11 +5620,18 @@ export class IbkrClient
     ) {
       return { kind: "TEMPORARILY_BLOCKED" };
     }
-    if (this.httpStatusFromError(error) === 429) {
+    const status = this.httpStatusFromError(error);
+    if (status === 429) {
       const retryAfterMs = this.retryAfterFromError(error);
       return retryAfterMs === undefined
         ? { kind: "THROTTLED" }
         : { kind: "THROTTLED", retryAfterMs };
+    }
+    if (status !== undefined && status >= 500 && status <= 599) {
+      const retryAfterMs = this.retryAfterFromError(error);
+      return retryAfterMs === undefined
+        ? { kind: "SERVER_ERROR" }
+        : { kind: "SERVER_ERROR", retryAfterMs };
     }
     return { kind: "OTHER" };
   }
@@ -5624,6 +5658,46 @@ export class IbkrClient
       .join(" ");
   }
 
+  private normalizeHttpError(error: unknown): unknown {
+    if (error instanceof IbkrHttpError) return error;
+    const status = this.httpStatusFromError(error);
+    if (status === undefined) return error;
+    const body = this.httpResponseBody(error);
+    const retryAfter = this.retryAfterHeaderFromError(error) ?? null;
+    const message =
+      body !== ""
+        ? `IBKR HTTP ${String(status)}: ${body}`
+        : error instanceof Error
+          ? error.message.slice(0, 4_096)
+          : `IBKR HTTP ${String(status)}`;
+    return new IbkrHttpError(message, status, { status, body, retryAfter }, { cause: error });
+  }
+
+  private httpResponseBody(error: unknown): string {
+    if (typeof error !== "object" || error === null) return "";
+    const response = (error as { response?: unknown }).response;
+    const responseData =
+      typeof response === "object" && response !== null
+        ? ((response as { data?: unknown; body?: unknown }).data ??
+          (response as { body?: unknown }).body)
+        : undefined;
+    const directBody = (error as { body?: unknown }).body;
+    const message = (error as { message?: unknown }).message;
+    const rawBody = responseData ?? directBody ?? this.bodyFromRawTransportMessage(message);
+    if (typeof rawBody === "string") return rawBody.slice(0, 4_096);
+    if (rawBody === undefined) return "";
+    try {
+      return JSON.stringify(rawBody).slice(0, 4_096);
+    } catch {
+      return "";
+    }
+  }
+
+  private bodyFromRawTransportMessage(message: unknown): string | undefined {
+    if (typeof message !== "string") return undefined;
+    return /^Response status \d{3}: ([\s\S]*)$/.exec(message)?.[1];
+  }
+
   private httpStatusFromError(error: unknown): number | undefined {
     if (typeof error !== "object" || error === null) return undefined;
     const response = (error as { response?: unknown }).response;
@@ -5632,20 +5706,29 @@ export class IbkrClient
     const directStatusCode = this.numberFromUnknown((error as { statusCode?: unknown }).statusCode);
     if (directStatusCode !== undefined) return directStatusCode;
     if (typeof response === "object" && response !== null) {
-      return this.numberFromUnknown(
+      const responseStatus = this.numberFromUnknown(
         (response as { status?: unknown }).status ??
           (response as { statusCode?: unknown }).statusCode
       );
+      if (responseStatus !== undefined) return responseStatus;
     }
     const message = (error as { message?: unknown }).message;
-    if (typeof message === "string") {
-      const match = /\b429\b/.exec(message);
-      if (match) return 429;
-    }
-    return undefined;
+    if (typeof message !== "string") return undefined;
+    const rawStatus = /^Response status (\d{3}):/.exec(message)?.[1];
+    return rawStatus === undefined ? undefined : this.numberFromUnknown(rawStatus);
   }
 
   private retryAfterFromError(error: unknown): number | undefined {
+    if (typeof error !== "object" || error === null) return undefined;
+    const structuredRetryAfter =
+      error instanceof IbkrHttpError ? (error.response.retryAfter ?? undefined) : undefined;
+    return parseRetryAfter(
+      structuredRetryAfter ?? this.retryAfterHeaderFromError(error),
+      this.requestNow()
+    );
+  }
+
+  private retryAfterHeaderFromError(error: unknown): string | undefined {
     if (typeof error !== "object" || error === null) return undefined;
     const response = (error as { response?: unknown }).response;
     const responseHeaders =
@@ -5653,10 +5736,10 @@ export class IbkrClient
         ? response.headers
         : undefined;
     const directHeaders = (error as { headers?: unknown }).headers;
-    const retryAfterRaw =
+    return (
       this.headerValue(responseHeaders, "Retry-After") ??
-      this.headerValue(directHeaders, "Retry-After");
-    return parseRetryAfter(retryAfterRaw);
+      this.headerValue(directHeaders, "Retry-After")
+    );
   }
 
   private numberFromUnknown(value: unknown): number | undefined {
