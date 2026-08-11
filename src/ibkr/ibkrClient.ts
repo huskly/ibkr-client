@@ -16,6 +16,7 @@ import type {
   BrokerOrdersOptions,
   BrokerPosition,
   BrokerQuote,
+  BrokerQuoteOptions,
   BrokerQuoteRequest,
   BrokerTransaction,
   BrokerTransactionHistory,
@@ -1751,7 +1752,10 @@ export class IbkrClient
     };
   }
 
-  async getQuotes(requests: readonly BrokerQuoteRequest[]): Promise<Record<string, BrokerQuote>> {
+  async getQuotes(
+    requests: readonly BrokerQuoteRequest[],
+    options: BrokerQuoteOptions = {}
+  ): Promise<Record<string, BrokerQuote>> {
     const unique = new Map<string, BrokerQuoteRequest>();
     for (const request of requests) {
       if (!request.symbol.trim()) throw new Error("A quote request symbol is required");
@@ -1780,12 +1784,14 @@ export class IbkrClient
       })
     );
     return this.fetchQuotes(
-      contracts.filter((contract): contract is QuoteContract => contract !== undefined)
+      contracts.filter((contract): contract is QuoteContract => contract !== undefined),
+      options.includeHistory ?? true
     );
   }
 
   private async fetchQuotes(
-    contracts: readonly QuoteContract[]
+    contracts: readonly QuoteContract[],
+    includeHistory: boolean
   ): Promise<Record<string, BrokerQuote>> {
     if (!contracts.length) return {};
 
@@ -1806,9 +1812,9 @@ export class IbkrClient
         )
         .map((snapshot) => [snapshot.conid, snapshot])
     );
-    const histories = await Promise.all(
-      contracts.map((contract) => this.fetchQuoteHistory(contract.conid))
-    );
+    const histories = includeHistory
+      ? await Promise.all(contracts.map((contract) => this.fetchQuoteHistory(contract.conid)))
+      : contracts.map(() => undefined);
     const quotes: Record<string, BrokerQuote> = {};
 
     for (const [index, contract] of contracts.entries()) {

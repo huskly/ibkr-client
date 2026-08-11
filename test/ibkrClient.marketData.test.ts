@@ -765,6 +765,104 @@ void test("OSI getQuotes resolves the option conid before requesting a snapshot"
   );
 });
 
+void test("getQuotes uses price history by default", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return snapshots === 1 ? [] : [{ conid: 123, "31": "C100.50", "84": "100", "86": "101" }];
+    }
+    if (input.path === "iserver/marketdata/history") {
+      assert.equal(input.params?.["conid"], "123");
+      return {
+        text: "History description",
+        data: [
+          { t: 1, o: 98, h: 101, l: 97, c: 99, v: 400 },
+          { t: 2, o: 104, h: 106, l: 103, c: 105, v: 500 },
+        ],
+      };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const quotes = await client.getQuotes([{ symbol: "TEST", brokerId: "123" }]);
+
+  assert.deepEqual(quotes["TEST"], {
+    symbol: "TEST",
+    availability: "unavailable",
+    timestamp: null,
+    reference: { description: "History description" },
+    quote: {
+      lastPrice: 105,
+      bidPrice: 100,
+      askPrice: 101,
+      closePrice: 99,
+      highPrice: 106,
+      lowPrice: 103,
+      openPrice: 104,
+      netChange: 6,
+      netPercentChange: (6 / 99) * 100,
+      totalVolume: 500,
+    },
+  });
+});
+
+void test("getQuotes can return snapshots without price-history requests", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path !== "iserver/marketdata/snapshot") {
+      throw new Error(`Snapshot-only quotes must not request ${input.path}`);
+    }
+    snapshots += 1;
+    return snapshots === 1
+      ? []
+      : [
+          {
+            conid: 123,
+            "31": "C100.50",
+            "55": "TEST",
+            "70": "102",
+            "71": "98",
+            "82": "+1.5",
+            "83": "+1.51%",
+            "84": "100",
+            "86": "101",
+            "7762": "700",
+            "6509": "DpB",
+            _updated: 1787000000000,
+          },
+        ];
+  });
+
+  const quotes = await client.getQuotes([{ symbol: "TEST", brokerId: "123" }], {
+    includeHistory: false,
+  });
+
+  assert.equal(snapshots, 2, "snapshot warm-up and data reads stay enabled");
+  assert.deepEqual(quotes["TEST"], {
+    symbol: "TEST",
+    availability: "delayed",
+    timestamp: "2026-08-17T20:53:20.000Z",
+    reference: {},
+    quote: {
+      lastPrice: 100.5,
+      bidPrice: 100,
+      askPrice: 101,
+      highPrice: 102,
+      lowPrice: 98,
+      netChange: 1.5,
+      netPercentChange: 1.51,
+      totalVolume: 700,
+    },
+  });
+  assert.equal(quotes["TEST"]?.quote.closePrice, undefined);
+  assert.equal(quotes["TEST"]?.quote.openPrice, undefined);
+  assert.equal(
+    client.calls.some((call) => call.path === "iserver/marketdata/history"),
+    false
+  );
+});
+
 void test("known broker ids quote held options without symbol rediscovery", async () => {
   let snapshots = 0;
   const client = new FakeIbkrClient((input) => {
