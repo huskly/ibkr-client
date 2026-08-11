@@ -3,6 +3,7 @@ export {
   IbkrClient,
   IbkrBrokerResponseError,
   IbkrPriceHistoryContractError,
+  IbkrInsufficientHistoryError,
 } from "./ibkr/ibkrClient.js";
 export type { IbkrClientOptions } from "./ibkr/ibkrClient.js";
 export { IbkrRequestSchedulerError } from "./ibkr/requestScheduler.js";

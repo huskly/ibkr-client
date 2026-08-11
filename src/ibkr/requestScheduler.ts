@@ -6,7 +6,12 @@ export type IbkrRequestErrorClassification =
   | { kind: "OTHER" };
 
 export interface IbkrRequestTelemetry {
-  event: "THROTTLED" | "CIRCUIT_OPEN";
+  event:
+    | "THROTTLED"
+    | "CIRCUIT_OPEN"
+    | "HISTORY_RETRY"
+    | "HISTORY_PERIOD_FALLBACK"
+    | "HISTORY_WINDOW_FALLBACK";
   endpoint: string;
   attempt: number;
   delayMs: number;

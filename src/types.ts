@@ -832,14 +832,14 @@ export interface PriceHistoryContractCandidate {
   exchange: string | null;
 }
 
-export interface PriceHistoryRequest {
+export type PriceHistoryRequest = {
   symbol: string;
   /** Use an explicit conid when a symbol has more than one contract. */
   contract?: PriceHistoryContractSelector;
-  days?: number;
-  startDate?: number;
-  endDate?: number;
-}
+} & (
+  | { days: number; startDate?: never; endDate?: never }
+  | { days?: never; startDate: number; endDate: number }
+);
 
 /** Safe metadata emitted immediately before an IBKR price-history request. */
 export interface PriceHistoryTelemetry {
