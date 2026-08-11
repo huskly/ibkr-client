@@ -169,6 +169,12 @@ export interface BrokerQuoteRequest {
   brokerId?: string;
 }
 
+/** Controls the provider data that {@link BrokerClient.getQuotes} requests. */
+export interface BrokerQuoteOptions {
+  /** Add daily price history to the market-data snapshot. Defaults to true. */
+  includeHistory?: boolean;
+}
+
 export interface BrokerQuote {
   symbol: string;
   reference: BrokerQuoteReference;
@@ -821,7 +827,10 @@ export interface BrokerClient {
   getAccountId(): Promise<string>;
   getAccountBalances(): Promise<AccountBalances>;
   getPositions(symbol?: string): Promise<BrokerPosition[]>;
-  getQuotes(requests: readonly BrokerQuoteRequest[]): Promise<Record<string, BrokerQuote>>;
+  getQuotes(
+    requests: readonly BrokerQuoteRequest[],
+    options?: BrokerQuoteOptions
+  ): Promise<Record<string, BrokerQuote>>;
   searchInstruments(
     symbol: string,
     projection?: BrokerInstrumentSearchProjection

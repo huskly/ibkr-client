@@ -74,11 +74,16 @@ validated at runtime. Its broker-neutral account API includes:
 - `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes. Quote requests accept
   a symbol and an optional broker ID. A broker ID reads that exact contract without symbol
   discovery. A request without one can also resolve a complete OSI option symbol without loading
-  its option chain. Non-stock roots such as indexes fall back to `iserver/secdef/search` when
-  `trsrv/stocks` is empty. That search validates the HTTP payload at one shared boundary: a
-  success array continues, IBKR's documented error object throws `IbkrBrokerResponseError` with the
-  retained broker detail, and any other shape fails closed as a malformed response. An error object
-  is never treated as an empty successful search.
+  its option chain. By default, `getQuotes()` adds five days of price history to each snapshot. Pass
+  `{ includeHistory: false }` as the second argument to get snapshot data without a request to
+  `iserver/marketdata/history`. Snapshot warm-up, market-data availability, and timestamps do not
+  change. Without history, `reference.description`, `quote.lastPrice`, `quote.highPrice`,
+  `quote.lowPrice`, `quote.netChange`, `quote.netPercentChange`, and `quote.totalVolume` are present
+  only if contract or snapshot data supplies them. `quote.closePrice` and `quote.openPrice` are not
+  present. Non-stock roots such as indexes use `iserver/secdef/search` if `trsrv/stocks` is empty.
+  That search validates the HTTP payload at one shared boundary. A success array continues. An IBKR
+  error object throws `IbkrBrokerResponseError` and keeps the broker detail. Any other shape fails
+  closed as a malformed response. An error object is never an empty successful search.
 - `fetchTransactionHistory()` for normalized portfolio transactions.
 - `fetchOrders()` for normalized live orders, including aggregate `WORKING`
   matching across IBKR's active order states.
