@@ -46,16 +46,55 @@ void test("scheduler bounds discovery concurrency and prioritizes execution read
   assert.equal(scheduler.metrics.maximumDiscoveryConcurrent, 1);
 });
 
-void test("read-only secdef info uses its own bounded lane and keeps execution priority", async () => {
+void test("default secdef pacing prevents starts that are too close together", async () => {
+  let now = 0;
+  const starts: number[] = [];
+  const scheduler = new IbkrRequestScheduler({
+    maxConcurrent: 4,
+    now: () => now,
+    sleep: async (ms) => {
+      await Promise.resolve();
+      now += ms;
+    },
+  });
+
+  const definitions = Array.from({ length: 4 }, (_value, index) =>
+    scheduler.schedule(
+      { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+      async () => {
+        const previousStart = starts.at(-1);
+        if (previousStart !== undefined && now - previousStart < 250) {
+          throw new Error("429: starts were too close together");
+        }
+        starts.push(now);
+        return index;
+      }
+    )
+  );
+
+  assert.deepEqual(await Promise.all(definitions), [0, 1, 2, 3]);
+  assert.deepEqual(starts, [0, 250, 500, 750]);
+  assert.equal(scheduler.metrics.maximumSecdefInfoConcurrent, 1);
+});
+
+void test("configured secdef lane enforces concurrency and minimum start spacing", async () => {
   const gates = Array.from({ length: 7 }, () => deferred());
   let active = 0;
   let maximum = 0;
   let calls = 0;
+  let now = 0;
+  const starts: number[] = [];
   const order: string[] = [];
   const scheduler = new IbkrRequestScheduler({
     maxConcurrent: 4,
     maxDiscoveryConcurrent: 1,
     maxSecdefInfoConcurrent: 3,
+    secdefInfoMinStartIntervalMs: 100,
+    now: () => now,
+    sleep: async (ms) => {
+      await Promise.resolve();
+      now += ms;
+    },
   });
 
   const definitions = gates.map((gate, index) =>
@@ -65,6 +104,7 @@ void test("read-only secdef info uses its own bounded lane and keeps execution p
         calls += 1;
         active += 1;
         maximum = Math.max(maximum, active);
+        starts.push(now);
         order.push(`info-${String(index)}-start`);
         await gate.promise;
         active -= 1;
@@ -74,6 +114,7 @@ void test("read-only secdef info uses its own bounded lane and keeps execution p
   );
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(calls, 3);
+  assert.deepEqual(starts, [0, 100, 200]);
   const execution = scheduler.schedule(
     { endpoint: "order/status", priority: "EXECUTION" },
     async () => {
@@ -91,23 +132,30 @@ void test("read-only secdef info uses its own bounded lane and keeps execution p
   assert.equal(scheduler.metrics.maximumSecdefInfoConcurrent, 3);
 });
 
-void test("one 429 pauses a concurrent secdef batch behind one coordinated backoff", async () => {
+void test("one secdef throttle coordinates endpoint backoff without blocking execution", async () => {
   const backoff = deferred();
   const sleeps: number[] = [];
-  const attempts = [0, 0, 0, 0, 0];
+  let now = 0;
+  const attempts = [0, 0, 0];
+  const order: string[] = [];
+  const telemetry: unknown[] = [];
   const scheduler = new IbkrRequestScheduler({
     maxConcurrent: 3,
-    maxSecdefInfoConcurrent: 3,
-    now: () => 0,
+    maxSecdefInfoConcurrent: 1,
+    secdefInfoMinStartIntervalMs: 100,
+    now: () => now,
     sleep: (ms) => {
       sleeps.push(ms);
-      return backoff.promise;
+      return backoff.promise.then(() => {
+        now += ms;
+      });
     },
-    random: () => 0.5,
+    random: () => 0,
     classifyError: (error) =>
       error instanceof Error && error.message === "429"
         ? { kind: "THROTTLED", retryAfterMs: 1_000 }
         : { kind: "OTHER" },
+    onTelemetry: (event) => telemetry.push(event),
   });
 
   const definitions = attempts.map((_attempt, index) =>
@@ -115,19 +163,173 @@ void test("one 429 pauses a concurrent secdef batch behind one coordinated backo
       { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
       async () => {
         attempts[index] = (attempts[index] ?? 0) + 1;
+        order.push(`info-${String(index)}`);
         if (index === 0 && attempts[index] === 1) throw new Error("429");
         return index;
       }
     )
   );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(attempts, [1, 0, 0]);
+  const execution = scheduler.schedule(
+    { endpoint: "account/order/status", priority: "EXECUTION" },
+    async () => {
+      order.push("execution");
+      return "execution";
+    }
+  );
+  assert.equal(await execution, "execution");
+  assert.deepEqual(attempts, [1, 0, 0], "queued definitions share the endpoint wait");
+  assert.deepEqual(sleeps, [1_000]);
+  assert.deepEqual(telemetry, [
+    {
+      event: "THROTTLED",
+      endpoint: "secdef/info",
+      attempt: 1,
+      delayMs: 1_000,
+      effectiveMinStartIntervalMs: 1_000,
+    },
+    {
+      event: "SECDEF_INFO_PACING",
+      endpoint: "secdef/info",
+      attempt: 0,
+      delayMs: 1_000,
+      effectiveMinStartIntervalMs: 1_000,
+    },
+  ]);
+
+  backoff.resolve();
+  assert.deepEqual(await Promise.all(definitions), [0, 1, 2]);
+  assert.deepEqual(attempts, [2, 1, 1], "the retry count is unchanged and only 429 is retried");
+  assert.equal(order[1], "execution");
+});
+
+void test("a secdef throttle paces queued work when retries are disabled", async () => {
+  const pacingWait = deferred();
+  const sleeps: number[] = [];
+  let now = 0;
+  let queuedCalls = 0;
+  const scheduler = new IbkrRequestScheduler({
+    maxConcurrent: 2,
+    maxRetries: 0,
+    secdefInfoMinStartIntervalMs: 100,
+    jitterRatio: 0,
+    now: () => now,
+    sleep: (ms) => {
+      sleeps.push(ms);
+      return pacingWait.promise.then(() => {
+        now += ms;
+      });
+    },
+    classifyError: () => ({ kind: "THROTTLED", retryAfterMs: 60_000 }),
+  });
+
+  const throttled = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => {
+      throw new Error("throttled");
+    }
+  );
+  const queued = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => {
+      queuedCalls += 1;
+      return "queued";
+    }
+  );
+
+  await assert.rejects(
+    throttled,
+    (error: unknown) =>
+      error instanceof IbkrRequestSchedulerError &&
+      error.code === "IBKR_THROTTLED" &&
+      error.retryAfterMs === 60_000
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(queuedCalls, 0);
+  pacingWait.resolve();
+  assert.equal(await queued, "queued");
+  assert.deepEqual(sleeps, [60_000]);
+});
+
+void test("a final secdef throttle extends endpoint pacing before exhaustion", async () => {
+  const waits: Array<{ delayMs: number; gate: ReturnType<typeof deferred> }> = [];
+  let now = 0;
+  let throttledAttempts = 0;
+  let queuedCalls = 0;
+  const scheduler = new IbkrRequestScheduler({
+    maxConcurrent: 2,
+    maxRetries: 1,
+    secdefInfoMinStartIntervalMs: 50,
+    jitterRatio: 0,
+    now: () => now,
+    sleep: (delayMs) => {
+      const gate = deferred();
+      waits.push({ delayMs, gate });
+      return gate.promise.then(() => {
+        now += delayMs;
+      });
+    },
+    classifyError: () => ({
+      kind: "THROTTLED",
+      retryAfterMs: throttledAttempts === 1 ? 100 : 1_000,
+    }),
+  });
+
+  const throttled = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => {
+      throttledAttempts += 1;
+      throw new Error("throttled");
+    }
+  );
+  const queued = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => {
+      queuedCalls += 1;
+      return "queued";
+    }
+  );
 
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(attempts, [1, 1, 1, 0, 0]);
-  assert.deepEqual(sleeps, [1_050]);
-  backoff.resolve();
-  assert.deepEqual(await Promise.all(definitions), [0, 1, 2, 3, 4]);
-  assert.deepEqual(attempts, [2, 1, 1, 1, 1], "only the throttled definition is retried");
-  assert.equal(sleeps.length, 1);
+  assert.equal(waits[0]?.delayMs, 100);
+  waits[0]?.gate.resolve();
+  await assert.rejects(throttled, IbkrRequestSchedulerError);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(queuedCalls, 0);
+  assert.equal(waits[1]?.delayMs, 1_000);
+  waits[1]?.gate.resolve();
+  assert.equal(await queued, "queued");
+  assert.equal(throttledAttempts, 2);
+});
+
+void test("a rejected secdef pacing sleep rejects queued definitions once", async () => {
+  const sleepError = new Error("pacing sleep failed");
+  const strandedSleep = deferred();
+  let sleepCalls = 0;
+  const scheduler = new IbkrRequestScheduler({
+    secdefInfoMinStartIntervalMs: 250,
+    now: () => 0,
+    sleep: () => {
+      sleepCalls += 1;
+      return sleepCalls === 1 ? Promise.reject(sleepError) : strandedSleep.promise;
+    },
+  });
+
+  const first = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => "first"
+  );
+  const queued = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => "must not run"
+  );
+
+  assert.equal(await first, "first");
+  await assert.rejects(queued, (error: unknown) => error === sleepError);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sleepCalls, 1);
 });
 
 void test("temporary block opens a bounded circuit and rejects queued discovery", async () => {
@@ -233,6 +435,10 @@ void test("scheduler rejects retry settings that are not bounded", () => {
     /retry limits/
   );
   assert.throws(() => new IbkrRequestScheduler({ jitterRatio: 1.1 }), /retry limits/);
+  assert.throws(
+    () => new IbkrRequestScheduler({ secdefInfoMinStartIntervalMs: -1 }),
+    /pacing limits/
+  );
 });
 
 void test("explicit Retry-After is not clamped by the local exponential cap", async () => {

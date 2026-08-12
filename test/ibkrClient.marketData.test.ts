@@ -37,7 +37,13 @@ class FakeIbkrClient extends IbkrClient {
     private readonly responder: (input: RequestInput, calls: RequestInput[]) => unknown,
     options: IbkrClientOptions = {}
   ) {
-    super(config, options);
+    super(config, {
+      ...options,
+      requestScheduler: {
+        secdefInfoMinStartIntervalMs: 0,
+        ...options.requestScheduler,
+      },
+    });
   }
 
   protected override sendRequest<T>(input: RequestInput): Promise<T> {
@@ -227,7 +233,7 @@ void test("option discovery primes search, preserves weekly/monthly expiries, an
   );
 });
 
-void test("multi-month option discovery bounds secdef/info concurrency", async () => {
+void test("multi-month option discovery uses conservative secdef/info concurrency", async () => {
   let activeInfo = 0;
   let maxActiveInfo = 0;
   const observedInfo: string[] = [];
@@ -287,7 +293,7 @@ void test("multi-month option discovery bounds secdef/info concurrency", async (
 
   const expiries = await client.getOptionExpiries("MSTR", "C", "2026-07-01", "2026-09-30");
   assert.deepEqual(expiries, ["2026-07-14", "2026-08-14", "2026-09-14"]);
-  assert.equal(maxActiveInfo, 4, "the conservative default secdef/info limit is four");
+  assert.equal(maxActiveInfo, 1, "the conservative default secdef/info limit is one");
   assert.equal(observedInfo.length, 27, "each strike has exactly one definition request");
 
   const order = ["JUL26", "AUG26", "SEP26"].map((month) =>

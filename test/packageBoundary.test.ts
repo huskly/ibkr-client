@@ -11,6 +11,7 @@ import {
   type BrokerQuoteRequest,
   type IbkrClient,
   type IbkrHttpErrorResponse,
+  type IbkrRequestSchedulerOptions,
   type IbkrRequestTelemetry,
   type OptionChainSnapshot,
   type OptionDiscoveryTelemetry,
@@ -80,6 +81,19 @@ void test("public price-history recovery exposes typed boundary evidence", () =>
   assert.equal(request.days, 220);
   assert.equal(telemetry.event, "HISTORY_WINDOW_FALLBACK");
   assert.equal(error.availableStart, null);
+});
+
+void test("public request pacing types expose safe effective rate data", () => {
+  const options: IbkrRequestSchedulerOptions = { secdefInfoMinStartIntervalMs: 250 };
+  const telemetry: IbkrRequestTelemetry = {
+    event: "SECDEF_INFO_PACING",
+    endpoint: "secdef/info",
+    attempt: 0,
+    delayMs: 250,
+    effectiveMinStartIntervalMs: 250,
+  };
+  assert.equal(options.secdefInfoMinStartIntervalMs, 250);
+  assert.equal(telemetry.effectiveMinStartIntervalMs, 250);
 });
 
 void test("public option telemetry exposes safe phase counts", () => {

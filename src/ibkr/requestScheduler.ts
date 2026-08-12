@@ -11,19 +11,24 @@ export interface IbkrRequestTelemetry {
     | "THROTTLED"
     | "SERVER_RETRY"
     | "CIRCUIT_OPEN"
+    | "SECDEF_INFO_PACING"
     | "HISTORY_PERIOD_FALLBACK"
     | "HISTORY_WINDOW_FALLBACK";
   endpoint: string;
   attempt: number;
   delayMs: number;
+  /** Current minimum interval for `secdef/info` starts, when applicable. */
+  effectiveMinStartIntervalMs?: number;
 }
 
 export interface IbkrRequestSchedulerOptions {
   maxConcurrent?: number;
   /** Maximum concurrent session-mutating discovery requests. Defaults to 1. */
   maxDiscoveryConcurrent?: number;
-  /** Maximum concurrent read-only `secdef/info` requests. Defaults to 4. */
+  /** Maximum concurrent read-only `secdef/info` requests. Defaults to 1. */
   maxSecdefInfoConcurrent?: number;
+  /** Minimum interval between `secdef/info` request starts. Defaults to 250 ms. */
+  secdefInfoMinStartIntervalMs?: number;
   maxRetries?: number;
   retryBaseDelayMs?: number;
   retryMaxDelayMs?: number;
@@ -93,6 +98,7 @@ export class IbkrRequestScheduler {
   private readonly maxConcurrent: number;
   private readonly maxDiscoveryConcurrent: number;
   private readonly maxSecdefInfoConcurrent: number;
+  private effectiveSecdefInfoMinStartIntervalMs: number;
   private readonly maxRetries: number;
   private readonly retryBaseDelayMs: number;
   private readonly retryMaxDelayMs: number;
@@ -110,13 +116,15 @@ export class IbkrRequestScheduler {
   private activeSecdefInfo = 0;
   private backoffUntil = 0;
   private backoffPromise: Promise<void> | undefined;
+  private secdefInfoNextStartAt = 0;
+  private secdefInfoPacingPromise: Promise<void> | undefined;
   private circuitOpenUntil = 0;
 
   constructor(options: IbkrRequestSchedulerOptions = {}) {
     this.maxConcurrent = options.maxConcurrent ?? 10;
     this.maxDiscoveryConcurrent = options.maxDiscoveryConcurrent ?? 1;
-    this.maxSecdefInfoConcurrent =
-      options.maxSecdefInfoConcurrent ?? Math.min(4, this.maxConcurrent);
+    this.maxSecdefInfoConcurrent = options.maxSecdefInfoConcurrent ?? 1;
+    this.effectiveSecdefInfoMinStartIntervalMs = options.secdefInfoMinStartIntervalMs ?? 250;
     this.maxRetries = options.maxRetries ?? 3;
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? 250;
     this.retryMaxDelayMs = options.retryMaxDelayMs ?? 5_000;
@@ -138,6 +146,12 @@ export class IbkrRequestScheduler {
       this.maxSecdefInfoConcurrent > this.maxConcurrent
     ) {
       throw new Error("Invalid IBKR request concurrency limits");
+    }
+    if (
+      !Number.isSafeInteger(this.effectiveSecdefInfoMinStartIntervalMs) ||
+      this.effectiveSecdefInfoMinStartIntervalMs < 0
+    ) {
+      throw new Error("Invalid IBKR request pacing limits");
     }
     if (
       !Number.isSafeInteger(this.maxRetries) ||
@@ -191,11 +205,15 @@ export class IbkrRequestScheduler {
     }
     while (this.active < this.maxConcurrent) {
       const index = this.nextJobIndex();
-      if (index < 0) return;
+      if (index < 0) {
+        this.ensureSecdefInfoPacingWait();
+        return;
+      }
       const [job] = this.queue.splice(index, 1);
       if (job === undefined) return;
       this.run(job);
     }
+    this.ensureSecdefInfoPacingWait();
   }
 
   private nextJobIndex(): number {
@@ -204,7 +222,8 @@ export class IbkrRequestScheduler {
       if (
         job.priority === "DISCOVERY" &&
         (job.secdefInfo
-          ? this.activeSecdefInfo >= this.maxSecdefInfoConcurrent
+          ? this.activeSecdefInfo >= this.maxSecdefInfoConcurrent ||
+            this.secdefInfoNextStartAt > this.now()
           : this.activeDiscovery >= this.maxDiscoveryConcurrent)
       ) {
         continue;
@@ -227,6 +246,9 @@ export class IbkrRequestScheduler {
   }
 
   private run(job: ScheduledJob): void {
+    if (job.secdefInfo) {
+      this.secdefInfoNextStartAt = this.now() + this.effectiveSecdefInfoMinStartIntervalMs;
+    }
     this.active += 1;
     if (job.priority === "DISCOVERY") {
       if (job.secdefInfo) this.activeSecdefInfo += 1;
@@ -296,6 +318,21 @@ export class IbkrRequestScheduler {
       job.reject(error);
       return;
     }
+    const delayMs = this.retryDelay(job.attempts, classification.retryAfterMs);
+    if (job.secdefInfo) {
+      this.effectiveSecdefInfoMinStartIntervalMs = Math.max(
+        this.effectiveSecdefInfoMinStartIntervalMs,
+        delayMs
+      );
+      this.secdefInfoNextStartAt = Math.max(this.secdefInfoNextStartAt, this.now() + delayMs);
+      this.emitTelemetry({
+        event: "THROTTLED",
+        endpoint: job.endpoint,
+        attempt: job.attempts + 1,
+        delayMs,
+        effectiveMinStartIntervalMs: this.effectiveSecdefInfoMinStartIntervalMs,
+      });
+    }
     if (!job.retryable || job.attempts >= this.maxRetries) {
       job.reject(
         new IbkrRequestSchedulerError(
@@ -308,16 +345,17 @@ export class IbkrRequestScheduler {
       );
       return;
     }
-    const delayMs = this.retryDelay(job.attempts, classification.retryAfterMs);
     job.attempts += 1;
-    this.backoffUntil = Math.max(this.backoffUntil, this.now() + delayMs);
+    if (!job.secdefInfo) {
+      this.backoffUntil = Math.max(this.backoffUntil, this.now() + delayMs);
+      this.emitTelemetry({
+        event: "THROTTLED",
+        endpoint: job.endpoint,
+        attempt: job.attempts,
+        delayMs,
+      });
+    }
     this.queue.push(job);
-    this.emitTelemetry({
-      event: "THROTTLED",
-      endpoint: job.endpoint,
-      attempt: job.attempts,
-      delayMs,
-    });
   }
 
   private retryDelay(attempt: number, retryAfterMs?: number): number {
@@ -351,6 +389,37 @@ export class IbkrRequestScheduler {
       this.backoffPromise = undefined;
       this.drain();
     });
+  }
+
+  private ensureSecdefInfoPacingWait(): void {
+    if (this.secdefInfoPacingPromise !== undefined) return;
+    if (this.activeSecdefInfo >= this.maxSecdefInfoConcurrent) return;
+    if (!this.queue.some((job) => job.secdefInfo)) return;
+    const target = this.secdefInfoNextStartAt;
+    const delayMs = target - this.now();
+    if (delayMs <= 0) return;
+    this.emitTelemetry({
+      event: "SECDEF_INFO_PACING",
+      endpoint: "secdef/info",
+      attempt: 0,
+      delayMs,
+      effectiveMinStartIntervalMs: this.effectiveSecdefInfoMinStartIntervalMs,
+    });
+    this.secdefInfoPacingPromise = this.sleep(delayMs).then(
+      () => {
+        this.secdefInfoPacingPromise = undefined;
+        this.drain();
+      },
+      (error: unknown) => {
+        this.secdefInfoPacingPromise = undefined;
+        const queued = this.queue.splice(0);
+        for (const job of queued) {
+          if (job.secdefInfo) job.reject(error);
+          else this.queue.push(job);
+        }
+        this.drain();
+      }
+    );
   }
 
   private openCircuit(job: ScheduledJob, cause: unknown): void {
