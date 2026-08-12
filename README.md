@@ -129,9 +129,15 @@ interval. Authentication, entitlement, invalid contract, and ambiguous contract 
 recovery.
 
 - `getOptionExpiries(...)` discovers weekly and monthly maturities across month buckets.
-- `getOptionChain(...)` returns an exact-expiry chain with canonical OSI symbols, conids,
-  bid/ask/mid prices, delta, session volume, and open interest.
-- `getOptionQuote(...)` resolves and prices one exact contract with the same market-data shape.
+- `getOptionChain(...)` is the strict strategy-ready path. It returns only exact-expiry contracts
+  that have bid, ask, and delta values. It fails if no contract has all three values.
+- `getOptionChainSnapshot(symbol, expiry, right)` returns every qualified contract for one exact
+  expiry and option side. It preserves canonical OSI symbols and conids. Missing bid, ask, mid,
+  delta, volume, open interest, availability, and timestamp values are `null`. The result includes
+  qualified, returned, malformed-definition, and missing-field counts. These diagnostics contain no
+  account IDs or credentials. If a warmed snapshot stays sparse, the method returns the fields that
+  IBKR supplied and keeps the other fields as `null`.
+- `getOptionQuote(...)` resolves and prices one exact contract with the strict market-data shape.
   It serializes the session search with one exact security-definition request. It caches an
   identical exact request and does not load the complete option chain. When an exact ticker has listings in more than one market, option
   discovery selects the one listing with `SMART` option routing. It rejects the result if `SMART`
