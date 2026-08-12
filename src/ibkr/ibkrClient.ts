@@ -4627,17 +4627,24 @@ export class IbkrClient
       return this.loadOptionContracts(normalized, month, right, options.signal);
     }
     const key = `${normalized}:${month}:${right ?? "*"}`;
-    let pending = this.optionDiscovery.get(key);
-    if (!pending && right !== undefined) {
+    const cached = this.optionDiscovery.get(key);
+    if (cached !== undefined) return cached;
+
+    let discovery: Promise<OptionDiscoveryResult> | undefined;
+    if (right !== undefined) {
       const complete = this.optionDiscovery.get(`${normalized}:${month}:*`);
       if (complete !== undefined) {
-        pending = complete.then((result) => ({
+        discovery = complete.then((result) => ({
           contracts: result.contracts.filter((contract) => contract.right === right),
           malformedDefinitionCount: result.malformedDefinitionCount,
         }));
       }
     }
-    pending ??= this.loadOptionContracts(normalized, month, right);
+    discovery ??= this.loadOptionContracts(normalized, month, right);
+    const pending = discovery.catch((error: unknown) => {
+      if (this.optionDiscovery.get(key) === pending) this.optionDiscovery.delete(key);
+      throw error;
+    });
     this.optionDiscovery.set(key, pending);
     return pending;
   }

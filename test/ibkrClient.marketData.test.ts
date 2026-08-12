@@ -233,6 +233,89 @@ void test("option discovery primes search, preserves weekly/monthly expiries, an
   );
 });
 
+void test("failed option discovery is retried and preserves the original typed error", async () => {
+  const failure = new IbkrBrokerResponseError("temporary broker failure", {
+    message: "temporary broker failure",
+    code: "TEMPORARY",
+    statusCode: null,
+    details: {},
+  });
+  let searchCalls = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      searchCalls += 1;
+      if (searchCalls === 1) throw failure;
+    }
+    return discoveryResponse(input);
+  });
+
+  await assert.rejects(
+    () => client.getOptionExpiries("MSTR", "C", "2026-08-01", "2026-08-31"),
+    (error: unknown) => error === failure
+  );
+  assert.deepEqual(await client.getOptionExpiries("MSTR", "C", "2026-08-01", "2026-08-31"), [
+    "2026-08-14",
+    "2026-08-21",
+  ]);
+  assert.equal(searchCalls, 2, "the later call starts a new broker discovery");
+});
+
+void test("concurrent option discoveries coalesce and successful results stay cached", async () => {
+  let resolveSearch: ((value: unknown) => void) | undefined;
+  const search = new Promise<unknown>((resolve) => {
+    resolveSearch = resolve;
+  });
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") return search;
+    return discoveryResponse(input);
+  });
+
+  const first = client.getOptionExpiries("MSTR", "C", "2026-08-01", "2026-08-31");
+  const second = client.getOptionExpiries("mstr", "C", "2026-08-01", "2026-08-31");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/search").length, 1);
+
+  resolveSearch?.([{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }]);
+  assert.deepEqual(await Promise.all([first, second]), [
+    ["2026-08-14", "2026-08-21"],
+    ["2026-08-14", "2026-08-21"],
+  ]);
+  assert.deepEqual(await client.getOptionExpiries("MSTR", "C", "2026-08-01", "2026-08-31"), [
+    "2026-08-14",
+    "2026-08-21",
+  ]);
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/search").length, 1);
+});
+
+void test("failed option discovery cannot delete a newer cache replacement", async () => {
+  let rejectSearch: ((error: unknown) => void) | undefined;
+  const search = new Promise<unknown>((_resolve, reject) => {
+    rejectSearch = reject;
+  });
+  const failure = new IbkrBrokerResponseError("first discovery failed", {
+    message: "first discovery failed",
+    code: "TEMPORARY",
+    statusCode: null,
+    details: {},
+  });
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") return search;
+    return discoveryResponse(input);
+  });
+  const internals = client as unknown as {
+    optionDiscovery: Map<string, Promise<unknown>>;
+    discoverOptions(symbol: string, month: string, right: "C"): Promise<unknown>;
+  };
+
+  const first = internals.discoverOptions("MSTR", "AUG26", "C");
+  const replacement = Promise.resolve({ contracts: [], malformedDefinitionCount: 0 });
+  internals.optionDiscovery.set("MSTR:AUG26:C", replacement);
+  rejectSearch?.(failure);
+
+  await assert.rejects(first, (error: unknown) => error === failure);
+  assert.equal(internals.optionDiscovery.get("MSTR:AUG26:C"), replacement);
+});
+
 void test("multi-month option discovery uses conservative secdef/info concurrency", async () => {
   let activeInfo = 0;
   let maxActiveInfo = 0;
