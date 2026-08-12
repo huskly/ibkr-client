@@ -180,9 +180,9 @@ export class IbkrRequestScheduler {
   }
 
   schedule<T>(options: RequestOptions, task: () => Promise<T>): Promise<T> {
+    if (options.signal?.aborted) return Promise.reject(this.abortReason(options.signal));
     const circuitError = this.currentCircuitError(options.endpoint);
     if (circuitError !== undefined) return Promise.reject(circuitError);
-    if (options.signal?.aborted) return Promise.reject(this.abortReason(options.signal));
     return new Promise<T>((resolve, reject) => {
       const job: ScheduledJob = {
         sequence: this.sequence++,
