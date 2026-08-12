@@ -96,6 +96,7 @@ export type {
   OptionChainSnapshotField,
   OptionChainSnapshotQuote,
   OptionContract,
+  OptionDiscoveryTelemetry,
   OptionMarketQuote,
   OptionQuoteRequest,
   OptionRight,

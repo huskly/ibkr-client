@@ -20,7 +20,10 @@ export interface IbkrRequestTelemetry {
 
 export interface IbkrRequestSchedulerOptions {
   maxConcurrent?: number;
+  /** Maximum concurrent session-mutating discovery requests. Defaults to 1. */
   maxDiscoveryConcurrent?: number;
+  /** Maximum concurrent read-only `secdef/info` requests. Defaults to 4. */
+  maxSecdefInfoConcurrent?: number;
   maxRetries?: number;
   retryBaseDelayMs?: number;
   retryMaxDelayMs?: number;
@@ -36,6 +39,8 @@ export interface IbkrRequestSchedulerOptions {
 interface RequestOptions {
   endpoint: string;
   priority: IbkrRequestPriority;
+  /** Use the bounded read-only security-definition lane. */
+  secdefInfo?: boolean;
   retryable?: boolean;
   retryServerErrors?: boolean;
 }
@@ -44,6 +49,7 @@ interface ScheduledJob {
   sequence: number;
   endpoint: string;
   priority: IbkrRequestPriority;
+  secdefInfo: boolean;
   retryable: boolean;
   retryServerErrors: boolean;
   attempts: number;
@@ -81,10 +87,12 @@ export class IbkrRequestScheduler {
   readonly metrics = {
     maximumConcurrent: 0,
     maximumDiscoveryConcurrent: 0,
+    maximumSecdefInfoConcurrent: 0,
   };
 
   private readonly maxConcurrent: number;
   private readonly maxDiscoveryConcurrent: number;
+  private readonly maxSecdefInfoConcurrent: number;
   private readonly maxRetries: number;
   private readonly retryBaseDelayMs: number;
   private readonly retryMaxDelayMs: number;
@@ -99,6 +107,7 @@ export class IbkrRequestScheduler {
   private sequence = 0;
   private active = 0;
   private activeDiscovery = 0;
+  private activeSecdefInfo = 0;
   private backoffUntil = 0;
   private backoffPromise: Promise<void> | undefined;
   private circuitOpenUntil = 0;
@@ -106,6 +115,8 @@ export class IbkrRequestScheduler {
   constructor(options: IbkrRequestSchedulerOptions = {}) {
     this.maxConcurrent = options.maxConcurrent ?? 10;
     this.maxDiscoveryConcurrent = options.maxDiscoveryConcurrent ?? 1;
+    this.maxSecdefInfoConcurrent =
+      options.maxSecdefInfoConcurrent ?? Math.min(4, this.maxConcurrent);
     this.maxRetries = options.maxRetries ?? 3;
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? 250;
     this.retryMaxDelayMs = options.retryMaxDelayMs ?? 5_000;
@@ -121,7 +132,10 @@ export class IbkrRequestScheduler {
       this.maxConcurrent <= 0 ||
       !Number.isSafeInteger(this.maxDiscoveryConcurrent) ||
       this.maxDiscoveryConcurrent <= 0 ||
-      this.maxDiscoveryConcurrent > this.maxConcurrent
+      this.maxDiscoveryConcurrent > this.maxConcurrent ||
+      !Number.isSafeInteger(this.maxSecdefInfoConcurrent) ||
+      this.maxSecdefInfoConcurrent <= 0 ||
+      this.maxSecdefInfoConcurrent > this.maxConcurrent
     ) {
       throw new Error("Invalid IBKR request concurrency limits");
     }
@@ -150,6 +164,7 @@ export class IbkrRequestScheduler {
         sequence: this.sequence++,
         endpoint: options.endpoint,
         priority: options.priority,
+        secdefInfo: options.secdefInfo ?? false,
         retryable: options.retryable ?? true,
         retryServerErrors: options.retryServerErrors ?? false,
         attempts: 0,
@@ -164,6 +179,12 @@ export class IbkrRequestScheduler {
   }
 
   private drain(): void {
+    if (this.circuitOpenUntil > this.now()) {
+      for (const queued of this.queue.splice(0)) {
+        queued.reject(this.currentCircuitError(queued.endpoint));
+      }
+      return;
+    }
     if (this.backoffUntil > 0) {
       this.ensureBackoffWait();
       return;
@@ -180,7 +201,12 @@ export class IbkrRequestScheduler {
   private nextJobIndex(): number {
     let selected = -1;
     for (const [index, job] of this.queue.entries()) {
-      if (job.priority === "DISCOVERY" && this.activeDiscovery >= this.maxDiscoveryConcurrent) {
+      if (
+        job.priority === "DISCOVERY" &&
+        (job.secdefInfo
+          ? this.activeSecdefInfo >= this.maxSecdefInfoConcurrent
+          : this.activeDiscovery >= this.maxDiscoveryConcurrent)
+      ) {
         continue;
       }
       if (selected < 0) {
@@ -202,11 +228,18 @@ export class IbkrRequestScheduler {
 
   private run(job: ScheduledJob): void {
     this.active += 1;
-    if (job.priority === "DISCOVERY") this.activeDiscovery += 1;
+    if (job.priority === "DISCOVERY") {
+      if (job.secdefInfo) this.activeSecdefInfo += 1;
+      else this.activeDiscovery += 1;
+    }
     this.metrics.maximumConcurrent = Math.max(this.metrics.maximumConcurrent, this.active);
     this.metrics.maximumDiscoveryConcurrent = Math.max(
       this.metrics.maximumDiscoveryConcurrent,
       this.activeDiscovery
+    );
+    this.metrics.maximumSecdefInfoConcurrent = Math.max(
+      this.metrics.maximumSecdefInfoConcurrent,
+      this.activeSecdefInfo
     );
     void Promise.resolve()
       .then(job.task)
@@ -216,7 +249,10 @@ export class IbkrRequestScheduler {
       })
       .finally(() => {
         this.active -= 1;
-        if (job.priority === "DISCOVERY") this.activeDiscovery -= 1;
+        if (job.priority === "DISCOVERY") {
+          if (job.secdefInfo) this.activeSecdefInfo -= 1;
+          else this.activeDiscovery -= 1;
+        }
         this.drain();
       });
   }
