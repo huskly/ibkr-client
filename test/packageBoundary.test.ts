@@ -14,6 +14,7 @@ import {
   type IbkrRequestSchedulerOptions,
   type IbkrRequestTelemetry,
   type OptionChainSnapshot,
+  type OptionDiscoveryOptions,
   type OptionDiscoveryTelemetry,
   type OptionChainSnapshotDiagnostics,
   type OptionChainSnapshotField,
@@ -94,6 +95,12 @@ void test("public request pacing types expose safe effective rate data", () => {
   };
   assert.equal(options.secdefInfoMinStartIntervalMs, 250);
   assert.equal(telemetry.effectiveMinStartIntervalMs, 250);
+});
+
+void test("public option discovery options expose standard abort signals", () => {
+  const controller = new AbortController();
+  const options: OptionDiscoveryOptions = { signal: controller.signal };
+  assert.equal(options.signal, controller.signal);
 });
 
 void test("public option telemetry exposes safe phase counts", () => {

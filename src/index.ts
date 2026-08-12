@@ -6,7 +6,11 @@ export {
   IbkrPriceHistoryContractError,
   IbkrInsufficientHistoryError,
 } from "./ibkr/ibkrClient.js";
-export type { IbkrClientOptions, IbkrHttpErrorResponse } from "./ibkr/ibkrClient.js";
+export type {
+  IbkrClientOptions,
+  IbkrHttpErrorResponse,
+  OptionDiscoveryOptions,
+} from "./ibkr/ibkrClient.js";
 export { IbkrRequestSchedulerError } from "./ibkr/requestScheduler.js";
 export type {
   IbkrRequestPriority,

@@ -776,6 +776,217 @@ void test("an absent requested option side remains an empty expiry result", asyn
   assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/info").length, 0);
 });
 
+void test("terminal definition throttling does not start untouched option strikes", async () => {
+  const definitionStrikes: number[] = [];
+  const telemetry: string[] = [];
+  let schedulerNow = 0;
+  const client = new FakeIbkrClient(
+    (input) => {
+      if (input.path === "iserver/secdef/search") {
+        return [{ conid: 272110, symbol: "SPX", sections: [{ secType: "OPT" }] }];
+      }
+      if (input.path === "iserver/secdef/strikes") {
+        return { call: Array.from({ length: 20 }, (_value, index) => 5_000 + index * 5), put: [] };
+      }
+      if (input.path === "iserver/secdef/info") {
+        definitionStrikes.push(Number(input.params?.["strike"]));
+        throw rateLimitedError("0");
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    },
+    {
+      requestScheduler: {
+        maxConcurrent: 8,
+        maxSecdefInfoConcurrent: 8,
+        maxRetries: 1,
+        retryBaseDelayMs: 1,
+        now: () => schedulerNow,
+        sleep: async (ms) => {
+          schedulerNow += ms;
+        },
+        retryMaxDelayMs: 1,
+        jitterRatio: 0,
+      },
+      onRequestTelemetry: (event) => {
+        if (event.endpoint === "secdef/info" && event.event === "THROTTLED") {
+          telemetry.push(event.event);
+        }
+      },
+    }
+  );
+
+  await assert.rejects(
+    () => client.getOptionExpiries("SPX", "C", "2026-08-01", "2026-08-31"),
+    (error: unknown) =>
+      error instanceof IbkrRequestSchedulerError && error.code === "IBKR_THROTTLED"
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const firstChunk = new Set(Array.from({ length: 8 }, (_value, index) => 5_000 + index * 5));
+  assert.ok(definitionStrikes.every((strike) => firstChunk.has(strike)));
+  assert.ok(definitionStrikes.length <= 8 * 2, "requests stay within one chunk and its retries");
+  assert.ok(telemetry.length <= 8 * 2, "telemetry stays within one chunk and its retries");
+});
+
+void test("a malformed definition chunk does not start later option strikes", async () => {
+  const definitionStrikes: number[] = [];
+  const client = new FakeIbkrClient(
+    (input) => {
+      if (input.path === "iserver/secdef/search") {
+        return [{ conid: 272110, symbol: "SPX", sections: [{ secType: "OPT" }] }];
+      }
+      if (input.path === "iserver/secdef/strikes") {
+        return { call: Array.from({ length: 20 }, (_value, index) => 5_000 + index * 5), put: [] };
+      }
+      if (input.path === "iserver/secdef/info") {
+        definitionStrikes.push(Number(input.params?.["strike"]));
+        return { unexpected: true };
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    },
+    { requestScheduler: { maxConcurrent: 8, maxSecdefInfoConcurrent: 8 } }
+  );
+
+  await assert.rejects(
+    () => client.getOptionExpiries("SPX", "C", "2026-08-01", "2026-08-31"),
+    /malformed option definitions/
+  );
+  assert.deepEqual(
+    definitionStrikes,
+    Array.from({ length: 8 }, (_value, index) => 5_000 + index * 5)
+  );
+});
+
+void test("aborting option discovery stops queued definitions and lets a started request settle", async () => {
+  const controller = new AbortController();
+  let resolveStarted: ((value: unknown) => void) | undefined;
+  let startedSettled = false;
+  const started = new Promise<unknown>((resolve) => {
+    resolveStarted = (value) => {
+      startedSettled = true;
+      resolve(value);
+    };
+  });
+  let notifyStarted: (() => void) | undefined;
+  const firstDefinitionStarted = new Promise<void>((resolve) => {
+    notifyStarted = resolve;
+  });
+  const client = new FakeIbkrClient(
+    (input) => {
+      if (input.path === "iserver/secdef/search") {
+        return [{ conid: 272110, symbol: "SPX", sections: [{ secType: "OPT" }] }];
+      }
+      if (input.path === "iserver/secdef/strikes") {
+        return { call: Array.from({ length: 20 }, (_value, index) => 5_000 + index * 5), put: [] };
+      }
+      if (input.path === "iserver/secdef/info") {
+        notifyStarted?.();
+        return started;
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    },
+    { requestScheduler: { maxConcurrent: 1, maxSecdefInfoConcurrent: 1 } }
+  );
+
+  const discovery = client.getOptionExpiries("SPX", "C", "2026-08-01", "2026-08-31", {
+    signal: controller.signal,
+  });
+  await firstDefinitionStarted;
+  controller.abort();
+  await assert.rejects(
+    discovery,
+    (error: unknown) => error instanceof Error && error.name === "AbortError"
+  );
+  assert.equal(startedSettled, false, "abort does not force the started transport to settle");
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/info").length, 1);
+
+  resolveStarted?.([]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(startedSettled, true, "the started transport settles after the caller aborts");
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/info").length, 1);
+});
+
+void test("aborting one option discovery does not cancel an independent operation", async () => {
+  const firstController = new AbortController();
+  const secondController = new AbortController();
+  let resolveFirst: ((value: unknown) => void) | undefined;
+  let notifyFirstStarted: (() => void) | undefined;
+  const firstStarted = new Promise<void>((resolve) => {
+    notifyFirstStarted = resolve;
+  });
+  const client = new FakeIbkrClient(
+    (input) => {
+      const symbol = String(input.params?.["symbol"] ?? "");
+      if (input.path === "iserver/secdef/search") {
+        return [{ conid: symbol === "AAA" ? 101 : 202, symbol, sections: [{ secType: "OPT" }] }];
+      }
+      if (input.path === "iserver/secdef/strikes") return { call: [100], put: [] };
+      if (input.path === "iserver/secdef/info") {
+        const conid = String(input.params?.["conid"]);
+        if (conid === "101") {
+          notifyFirstStarted?.();
+          return new Promise((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return [{ conid: 20201, symbol: "BBB", maturityDate: "20260814", right: "C", strike: 100 }];
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    },
+    { requestScheduler: { maxConcurrent: 1, maxSecdefInfoConcurrent: 1 } }
+  );
+
+  const first = client.getOptionExpiries("AAA", "C", "2026-08-01", "2026-08-31", {
+    signal: firstController.signal,
+  });
+  const second = client.getOptionExpiries("BBB", "C", "2026-08-01", "2026-08-31", {
+    signal: secondController.signal,
+  });
+  await firstStarted;
+  firstController.abort();
+  await assert.rejects(
+    first,
+    (error: unknown) => error instanceof Error && error.name === "AbortError"
+  );
+  resolveFirst?.([]);
+
+  assert.deepEqual(await second, ["2026-08-14"]);
+  assert.equal(
+    client.calls.filter(
+      ({ path, params }) => path === "iserver/secdef/info" && params?.["conid"] === "202"
+    ).length,
+    1
+  );
+});
+
+void test("a successful large option discovery returns every qualified definition", async () => {
+  const strikes = Array.from({ length: 20 }, (_value, index) => 100 + index * 5);
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: 272110, symbol: "SPX", sections: [{ secType: "OPT" }] }];
+    }
+    if (input.path === "iserver/secdef/strikes") return { call: strikes, put: [] };
+    if (input.path === "iserver/secdef/info") {
+      const strike = Number(input.params?.["strike"]);
+      return [
+        { conid: 10_000 + strike, symbol: "SPX", maturityDate: "20260814", right: "C", strike },
+      ];
+    }
+    if (input.path === "iserver/marketdata/snapshot") return [];
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const snapshot = await client.getOptionChainSnapshot("SPX", "2026-08-14", "C");
+  assert.deepEqual(
+    snapshot.quotes.map(({ strike }) => strike),
+    strikes
+  );
+  assert.equal(
+    client.calls.filter(({ path }) => path === "iserver/secdef/info").length,
+    strikes.length
+  );
+});
+
 void test("429 responses are retried and eventually succeed when status clears", async () => {
   let strikesCalls = 0;
   const client = new FakeIbkrClient((input) => {
