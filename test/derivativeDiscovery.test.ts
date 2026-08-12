@@ -142,7 +142,7 @@ void test("NQ Aug 21 puts resolve as exact QN3 FOP identity from real response s
   assert.ok(client.calls.every((call) => call.method === undefined || call.method === "GET"));
 });
 
-void test("multi-month derivative discovery serializes session priming and secdef expansion", async () => {
+void test("multi-month derivative discovery serializes priming and bounds secdef expansion", async () => {
   let activeInfo = 0;
   let maximumInfo = 0;
   const observed: string[] = [];
@@ -189,7 +189,7 @@ void test("multi-month derivative discovery serializes session priming and secde
     expiries.map(({ expiration }) => expiration),
     ["2026-08-21", "2026-09-18"]
   );
-  assert.equal(maximumInfo, 1);
+  assert.equal(maximumInfo, 2);
   const firstSeptember = observed.findIndex((entry) => entry.includes(":SEP26"));
   const lastAugust = observed.findLastIndex((entry) => entry.includes(":AUG26"));
   assert.ok(firstSeptember > lastAugust);

@@ -287,10 +287,8 @@ void test("multi-month option discovery bounds secdef/info concurrency", async (
 
   const expiries = await client.getOptionExpiries("MSTR", "C", "2026-07-01", "2026-09-30");
   assert.deepEqual(expiries, ["2026-07-14", "2026-08-14", "2026-09-14"]);
-  assert.ok(
-    maxActiveInfo <= 1,
-    `expected bounded concurrent info requests, observed max ${String(maxActiveInfo)}`
-  );
+  assert.equal(maxActiveInfo, 4, "the conservative default secdef/info limit is four");
+  assert.equal(observedInfo.length, 27, "each strike has exactly one definition request");
 
   const order = ["JUL26", "AUG26", "SEP26"].map((month) =>
     observedInfo.findIndex((entry) => entry.startsWith(`info:${month}:`))
@@ -302,6 +300,126 @@ void test("multi-month option discovery bounds secdef/info concurrency", async (
   assert.ok(order.every((index) => index >= 0));
   assert.ok(julyIndex >= 0 && augustIndex >= 0 && septemberIndex >= 0);
   assert.ok(julyIndex < augustIndex && augustIndex < septemberIndex);
+});
+
+void test("exact-expiry option discovery filters the unused right and emits safe phase telemetry", async () => {
+  const telemetry: unknown[] = [];
+  let snapshotReads = 0;
+  const client = new FakeIbkrClient(
+    (input) => {
+      if (input.path === "iserver/secdef/search") {
+        return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
+      }
+      if (input.path === "iserver/secdef/strikes") return { call: [210, 215], put: [90, 95] };
+      if (input.path === "iserver/secdef/info") {
+        assert.equal(input.params?.["right"], "C");
+        const strike = Number(input.params?.["strike"]);
+        return [
+          {
+            conid: strike,
+            symbol: "MSTR",
+            maturityDate: "20260814",
+            right: "C",
+            strike,
+          },
+        ];
+      }
+      if (input.path === "iserver/marketdata/snapshot") {
+        snapshotReads += 1;
+        if (snapshotReads === 1) return [];
+        return [
+          { conid: 210, "84": "4", "86": "4.2", "7308": "0.2" },
+          { conid: 215, "84": "2", "86": "2.2", "7308": "0.1" },
+        ];
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    },
+    { onOptionDiscoveryTelemetry: (event) => telemetry.push(event) }
+  );
+
+  const chain = await client.getOptionChain("mstr", "2026-08-14", "C");
+  assert.deepEqual(
+    chain.map(({ right, strike }) => ({ right, strike })),
+    [
+      { right: "C", strike: 210 },
+      { right: "C", strike: 215 },
+    ]
+  );
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/info").length, 2);
+  assert.ok(
+    client.calls
+      .filter(({ path }) => path === "iserver/marketdata/snapshot")
+      .every(({ params }) => params?.["conids"] === "210,215")
+  );
+  assert.deepEqual(telemetry, [
+    {
+      event: "OPTION_DISCOVERY_PHASE",
+      phase: "SEARCH",
+      symbol: "MSTR",
+      month: "AUG26",
+      right: "C",
+      durationMs: 0,
+      definitionRequestCount: 0,
+      snapshotBatchCount: 0,
+    },
+    {
+      event: "OPTION_DISCOVERY_PHASE",
+      phase: "STRIKES",
+      symbol: "MSTR",
+      month: "AUG26",
+      right: "C",
+      durationMs: 0,
+      definitionRequestCount: 0,
+      snapshotBatchCount: 0,
+    },
+    {
+      event: "OPTION_DISCOVERY_PHASE",
+      phase: "DEFINITIONS",
+      symbol: "MSTR",
+      month: "AUG26",
+      right: "C",
+      durationMs: 0,
+      definitionRequestCount: 2,
+      snapshotBatchCount: 0,
+    },
+    {
+      event: "OPTION_DISCOVERY_PHASE",
+      phase: "SNAPSHOTS",
+      symbol: "MSTR",
+      month: "AUG26",
+      right: "C",
+      durationMs: 0,
+      definitionRequestCount: 0,
+      snapshotBatchCount: 1,
+    },
+  ]);
+});
+
+void test("exact-expiry put-only discovery does not request or quote calls", async () => {
+  let snapshotReads = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
+    }
+    if (input.path === "iserver/secdef/strikes") return { call: [215], put: [95] };
+    if (input.path === "iserver/secdef/info") {
+      assert.equal(input.params?.["right"], "P");
+      return [{ conid: 95, symbol: "MSTR", maturityDate: "20260814", right: "P", strike: 95 }];
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshotReads += 1;
+      assert.equal(input.params?.["conids"], "95");
+      return snapshotReads === 1 ? [] : [{ conid: 95, "84": "1", "86": "1.2", "7308": "-0.1" }];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const chain = await client.getOptionChain("MSTR", "2026-08-14", "P");
+  assert.deepEqual(
+    chain.map(({ right, strike }) => ({ right, strike })),
+    [{ right: "P", strike: 95 }]
+  );
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/info").length, 1);
 });
 
 void test("option chain skips incomplete contracts and returns usable quotes", async () => {

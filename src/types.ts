@@ -870,6 +870,18 @@ export interface OptionQuoteRequest {
   right: OptionRight;
 }
 
+/** Safe phase timing for option discovery. It never contains account or credential data. */
+export interface OptionDiscoveryTelemetry {
+  event: "OPTION_DISCOVERY_PHASE";
+  phase: "SEARCH" | "STRIKES" | "DEFINITIONS" | "SNAPSHOTS";
+  symbol: string;
+  month: string;
+  right: OptionRight | null;
+  durationMs: number;
+  definitionRequestCount: number;
+  snapshotBatchCount: number;
+}
+
 /**
  * The broker-neutral contract implemented by {@link IbkrClient}. Kept
  * intentionally small around account, position, quote, transaction, and order

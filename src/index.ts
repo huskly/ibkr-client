@@ -92,6 +92,7 @@ export type {
   TradingDiagnostics,
   CmeOperatorMetadata,
   OptionContract,
+  OptionDiscoveryTelemetry,
   OptionMarketQuote,
   OptionQuoteRequest,
   OptionRight,

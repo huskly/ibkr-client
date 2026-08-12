@@ -129,8 +129,9 @@ interval. Authentication, entitlement, invalid contract, and ambiguous contract 
 recovery.
 
 - `getOptionExpiries(...)` discovers weekly and monthly maturities across month buckets.
-- `getOptionChain(...)` returns an exact-expiry chain with canonical OSI symbols, conids,
-  bid/ask/mid prices, delta, session volume, and open interest.
+- `getOptionChain(symbol, expiry, right?)` returns an exact-expiry chain with canonical OSI
+  symbols, conids, bid/ask/mid prices, delta, session volume, and open interest. Set `right` to `C`
+  or `P` to skip definition and quote requests for the unused side.
 - `getOptionQuote(...)` resolves and prices one exact contract with the same market-data shape.
   It serializes the session search with one exact security-definition request. It caches an
   identical exact request and does not load the complete option chain. When an exact ticker has listings in more than one market, option
@@ -306,12 +307,14 @@ structured response in `BrokerErrorDetail.details`; transport exceptions are ret
 ### Request pacing and temporary blocks
 
 Every authenticated request runs through one priority scheduler per `IbkrClient`. The default
-limits allow at most ten requests globally and one exploratory security-definition request at a
-time. Order preview, status, warning, cancellation, and immediate-trade requests take priority
-over queued discovery. Multi-month derivative discovery also primes each month serially. A
-session-level transaction guard keeps each stateful security-definition search with its dependent
-strike or definition request. An exact expiry/strike/right request expands only that requested
-contract.
+limits allow at most ten requests globally. Stateful security-definition discovery stays at one
+request at a time. Read-only `iserver/secdef/info` expansion uses a separate conservative limit of
+four concurrent requests. Configure it with `maxSecdefInfoConcurrent`; it cannot exceed the global
+limit. Order preview, status, warning, cancellation, and immediate-trade requests take priority over
+queued discovery. Multi-month derivative discovery also primes each month serially. A session-level
+transaction guard keeps each stateful security-definition search with its dependent strike request.
+Independent definition reads start only after this transaction completes. An exact
+expiry/strike/right request expands only the requested contracts.
 
 A 429 pauses the shared queue behind one `Retry-After`-aware exponential backoff with jitter.
 Individual queued reads do not start independent retry loops. Exhausted throttling throws
@@ -330,7 +333,9 @@ safe `Retry-After` value when it is available. Callers do not have to parse the 
 
 `IbkrClient` accepts optional scheduler limits and an `onRequestTelemetry` callback. Scheduler
 options also accept `now`, `sleep`, and `random` functions for controlled runtimes and tests.
-Telemetry for each retry contains only a sanitized endpoint category, event, attempt, and delay. It
+Telemetry for each retry contains only a sanitized endpoint category, event, attempt, and delay.
+`onOptionDiscoveryTelemetry` reports search, strikes, definitions, and snapshot phases. It includes
+the symbol, month, optional right, duration, definition request count, and snapshot batch count. It
 does not contain account IDs, order IDs, credentials, request payloads, or full URLs. A telemetry
 observer failure does not change request scheduling or request settlement.
 
@@ -362,7 +367,7 @@ const [balances, history, expiries] = await Promise.all([
 ]);
 const expiry = expiries[0];
 if (!expiry) throw new Error(`No listed expiries for ${symbol} in ${from}..${to}`);
-const chain = await client.getOptionChain(symbol, expiry);
+const chain = await client.getOptionChain(symbol, expiry, "C");
 console.log({ equityRead: Number.isFinite(balances.netLiquidation), historyBars: history.bars.length,
   expiry, contracts: chain.length, first: chain[0]?.symbol });
 NODE

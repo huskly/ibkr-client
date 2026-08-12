@@ -11,6 +11,7 @@ import {
   type BrokerQuoteRequest,
   type IbkrHttpErrorResponse,
   type IbkrRequestTelemetry,
+  type OptionDiscoveryTelemetry,
   type PriceHistoryContractCandidate,
   type PriceHistoryContractSelector,
   type PriceHistoryRequest,
@@ -60,6 +61,20 @@ void test("public price-history recovery exposes typed boundary evidence", () =>
   assert.equal(request.days, 220);
   assert.equal(telemetry.event, "HISTORY_WINDOW_FALLBACK");
   assert.equal(error.availableStart, null);
+});
+
+void test("public option telemetry exposes safe phase counts", () => {
+  const telemetry: OptionDiscoveryTelemetry = {
+    event: "OPTION_DISCOVERY_PHASE",
+    phase: "DEFINITIONS",
+    symbol: "SPX",
+    month: "AUG26",
+    right: "C",
+    durationMs: 20,
+    definitionRequestCount: 4,
+    snapshotBatchCount: 0,
+  };
+  assert.equal(telemetry.definitionRequestCount, 4);
 });
 
 void test("public account balance types expose margin snapshots", () => {

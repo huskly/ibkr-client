@@ -46,6 +46,51 @@ void test("scheduler bounds discovery concurrency and prioritizes execution read
   assert.equal(scheduler.metrics.maximumDiscoveryConcurrent, 1);
 });
 
+void test("read-only secdef info uses its own bounded lane and keeps execution priority", async () => {
+  const gates = Array.from({ length: 7 }, () => deferred());
+  let active = 0;
+  let maximum = 0;
+  let calls = 0;
+  const order: string[] = [];
+  const scheduler = new IbkrRequestScheduler({
+    maxConcurrent: 4,
+    maxDiscoveryConcurrent: 1,
+    maxSecdefInfoConcurrent: 3,
+  });
+
+  const definitions = gates.map((gate, index) =>
+    scheduler.schedule(
+      { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+      async () => {
+        calls += 1;
+        active += 1;
+        maximum = Math.max(maximum, active);
+        order.push(`info-${String(index)}-start`);
+        await gate.promise;
+        active -= 1;
+        return index;
+      }
+    )
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls, 3);
+  const execution = scheduler.schedule(
+    { endpoint: "order/status", priority: "EXECUTION" },
+    async () => {
+      order.push("execution");
+      return "execution";
+    }
+  );
+  gates[0]?.resolve();
+  await execution;
+  assert.equal(order[3], "execution");
+  for (const gate of gates) gate.resolve();
+  assert.deepEqual(await Promise.all(definitions), [0, 1, 2, 3, 4, 5, 6]);
+  assert.equal(calls, 7);
+  assert.equal(maximum, 3);
+  assert.equal(scheduler.metrics.maximumSecdefInfoConcurrent, 3);
+});
+
 void test("one 429 pauses queued work behind one coordinated jittered backoff", async () => {
   const backoff = deferred();
   const sleeps: number[] = [];
