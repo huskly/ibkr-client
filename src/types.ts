@@ -803,6 +803,36 @@ export interface OptionMarketQuote extends OptionContract {
   timestamp: string | null;
 }
 
+/** Market-data fields that can be absent from a complete listed option-chain snapshot. */
+export type OptionChainSnapshotField =
+  "bid" | "ask" | "mid" | "delta" | "volume" | "openInterest" | "availability" | "timestamp";
+
+/** A listed option contract that preserves unavailable broker market data as null. */
+export interface OptionChainSnapshotQuote extends OptionContract {
+  bid: number | null;
+  ask: number | null;
+  mid: number | null;
+  delta: number | null;
+  volume: number | null;
+  openInterest: number | null;
+  availability: MarketDataAvailability | null;
+  timestamp: string | null;
+}
+
+/** Safe counts that explain the completeness of an option-chain snapshot. */
+export interface OptionChainSnapshotDiagnostics {
+  qualifiedCount: number;
+  returnedCount: number;
+  malformedDefinitionCount: number;
+  missingFieldCounts: Record<OptionChainSnapshotField, number>;
+}
+
+/** Every qualified contract for one exact expiry and option side, with completeness diagnostics. */
+export interface OptionChainSnapshot {
+  quotes: OptionChainSnapshotQuote[];
+  diagnostics: OptionChainSnapshotDiagnostics;
+}
+
 /** IBKR security types that a price-history contract can report. */
 export type PriceHistorySecurityType =
   "STK" | "IND" | "OPT" | "FUT" | "FOP" | "CASH" | "CFD" | "WAR" | "FUND" | "BOND" | "CMDTY";

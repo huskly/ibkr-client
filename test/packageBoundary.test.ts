@@ -9,9 +9,14 @@ import {
   type BrokerClient,
   type BrokerQuoteOptions,
   type BrokerQuoteRequest,
+  type IbkrClient,
   type IbkrHttpErrorResponse,
   type IbkrRequestTelemetry,
+  type OptionChainSnapshot,
   type OptionDiscoveryTelemetry,
+  type OptionChainSnapshotDiagnostics,
+  type OptionChainSnapshotField,
+  type OptionChainSnapshotQuote,
   type PriceHistoryContractCandidate,
   type PriceHistoryContractSelector,
   type PriceHistoryRequest,
@@ -47,6 +52,20 @@ void test("public price-history types expose contract context and typed failures
   assert.equal(result?.contract.exchange ?? null, null);
   assert.equal(telemetry?.barSize ?? null, null);
   assert.equal(error.code, "CONTRACT_AMBIGUOUS");
+});
+
+void test("public option-chain snapshot types preserve nullable provider data", () => {
+  const field: OptionChainSnapshotField = "delta";
+  const quote = undefined as OptionChainSnapshotQuote | undefined;
+  const diagnostics = undefined as OptionChainSnapshotDiagnostics | undefined;
+  const snapshot = undefined as OptionChainSnapshot | undefined;
+  const getSnapshot: IbkrClient["getOptionChainSnapshot"] | undefined = undefined;
+
+  assert.equal(field, "delta");
+  assert.equal(quote?.bid ?? null, null);
+  assert.equal(diagnostics?.qualifiedCount ?? null, null);
+  assert.equal(snapshot?.quotes.length ?? 0, 0);
+  assert.equal(getSnapshot, undefined);
 });
 
 void test("public price-history recovery exposes typed boundary evidence", () => {

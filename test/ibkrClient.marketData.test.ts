@@ -465,6 +465,209 @@ void test("option chain skips incomplete contracts and returns usable quotes", a
   );
 });
 
+void test("complete option-chain snapshot preserves sparse contracts and reports diagnostics", async () => {
+  let snapshotReads = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [
+        {
+          conid: 272110,
+          symbol: "MSTR",
+          sections: [{ secType: "OPT", exchange: "SMART;CBOE" }],
+        },
+      ];
+    }
+    if (input.path === "iserver/secdef/strikes") {
+      assert.equal(input.params?.["conid"], "272110");
+      return { call: [100, 110, 120], put: [90] };
+    }
+    if (input.path === "iserver/secdef/info") {
+      const strike = input.params?.["strike"];
+      if (strike === 100) {
+        const definition = {
+          conid: 101,
+          symbol: "MSTR",
+          maturityDate: "20260814",
+          right: "C",
+          strike: 100,
+        };
+        return [definition, definition];
+      }
+      if (strike === 110) {
+        return [
+          { conid: 102, symbol: "MSTR", maturityDate: "20260814", right: "C", strike: 110 },
+          { conid: 0, symbol: "MSTR", maturityDate: "20260814", right: "C", strike: 110 },
+        ];
+      }
+      if (strike === 120) {
+        return [
+          { conid: 103, symbol: "MSTR", maturityDate: "20260814", right: "C", strike: 120 },
+          { conid: 104, symbol: "MSTR", maturityDate: "20260821", right: "C", strike: 120 },
+        ];
+      }
+      return [{ conid: 105, symbol: "MSTR", maturityDate: "20260814", right: "P", strike: 90 }];
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshotReads += 1;
+      if (snapshotReads === 1) return [];
+      return [
+        {
+          conid: 101,
+          "84": 0,
+          "86": "0.10",
+          "7308": 0,
+          "7638": 0,
+          "7762": 0,
+          "6509": "R",
+          _updated: 1_786_665_600_000,
+        },
+        {
+          conid: 102,
+          "84": "1.00",
+          "86": "1.20",
+          "7638": 10,
+          "7762": 5,
+          "6509": "D",
+          _updated: 1_786_665_600_000,
+        },
+        { conid: 103, "86": "2.00", "7308": "0.20", "7638": 0, "7762": 0 },
+      ];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const snapshot = await client.getOptionChainSnapshot("mstr", "2026-08-14", "C");
+
+  assert.deepEqual(
+    snapshot.quotes.map(({ conid, symbol, right, bid, ask, mid, delta }) => ({
+      conid,
+      symbol,
+      right,
+      bid,
+      ask,
+      mid,
+      delta,
+    })),
+    [
+      {
+        conid: 101,
+        symbol: "MSTR  260814C00100000",
+        right: "C",
+        bid: 0,
+        ask: 0.1,
+        mid: 0.05,
+        delta: 0,
+      },
+      {
+        conid: 102,
+        symbol: "MSTR  260814C00110000",
+        right: "C",
+        bid: 1,
+        ask: 1.2,
+        mid: 1.1,
+        delta: null,
+      },
+      {
+        conid: 103,
+        symbol: "MSTR  260814C00120000",
+        right: "C",
+        bid: null,
+        ask: 2,
+        mid: null,
+        delta: 0.2,
+      },
+    ]
+  );
+  assert.deepEqual(
+    snapshot.quotes.map(({ volume, openInterest, availability, timestamp }) => ({
+      volume,
+      openInterest,
+      availability,
+      timestamp,
+    })),
+    [
+      {
+        volume: 0,
+        openInterest: 0,
+        availability: "live",
+        timestamp: "2026-08-14T00:00:00.000Z",
+      },
+      {
+        volume: 5,
+        openInterest: 10,
+        availability: "delayed",
+        timestamp: "2026-08-14T00:00:00.000Z",
+      },
+      { volume: 0, openInterest: 0, availability: null, timestamp: null },
+    ]
+  );
+  assert.deepEqual(snapshot.diagnostics, {
+    qualifiedCount: 3,
+    returnedCount: 3,
+    malformedDefinitionCount: 1,
+    missingFieldCounts: {
+      bid: 1,
+      ask: 0,
+      mid: 1,
+      delta: 1,
+      volume: 0,
+      openInterest: 0,
+      availability: 1,
+      timestamp: 1,
+    },
+  });
+});
+
+void test("complete option-chain snapshot keeps a contract when its snapshot never arrives", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/marketdata/snapshot") return [];
+    return discoveryResponse(input);
+  });
+
+  const snapshot = await client.getOptionChainSnapshot("MSTR", "2026-08-21", "C");
+
+  assert.deepEqual(snapshot.quotes, [
+    {
+      conid: 102,
+      symbol: "MSTR  260821C00215000",
+      underlying: "MSTR",
+      expiry: "2026-08-21",
+      strike: 215,
+      right: "C",
+      bid: null,
+      ask: null,
+      mid: null,
+      delta: null,
+      volume: null,
+      openInterest: null,
+      availability: null,
+      timestamp: null,
+    },
+  ]);
+  assert.deepEqual(snapshot.diagnostics.missingFieldCounts, {
+    bid: 1,
+    ask: 1,
+    mid: 1,
+    delta: 1,
+    volume: 1,
+    openInterest: 1,
+    availability: 1,
+    timestamp: 1,
+  });
+});
+
+void test("complete option-chain snapshot rejects a malformed definition response", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/info") return { unexpected: true };
+    return discoveryResponse(input);
+  });
+
+  await assert.rejects(
+    () => client.getOptionChainSnapshot("MSTR", "2026-08-21", "C"),
+    /malformed option definitions/
+  );
+});
+
 void test("individual option quotes preserve activity values and normalize unavailable data", async () => {
   const cases = [
     {
