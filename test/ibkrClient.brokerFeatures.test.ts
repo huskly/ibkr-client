@@ -73,13 +73,14 @@ void test("getAccountBalances exposes typed total and segment margin snapshots",
         buyingpower: { amount: 32_000 },
         totalcashvalue: { amount: 4_000 },
         equitywithloanvalue: { amount: 11_500 },
-        "equitywithloanvalue-s": { amount: 10_000 },
+        "equitywithloanvalue-s": { amount: "10,000.25" },
         regtequity: { amount: 9_500 },
         "regtmargin-s": { amount: 5_000 },
         initmarginreq: { amount: 2_000 },
         "maintmarginreq-s": { amount: 1_500 },
         excessliquidity: { amount: 0 },
-        "availablefunds-c": { amount: "bad-value" },
+        "availablefunds-c": { amount: "x123" },
+        "fullavailablefunds-c": { amount: "1,2,3" },
         sma: { amount: Number.POSITIVE_INFINITY },
         fullavailablefunds: { amount: 7_000 },
         lookaheadnextchange: { amount: 1_754_000_000 },
@@ -118,7 +119,7 @@ void test("getAccountBalances exposes typed total and segment margin snapshots",
         leverage: null,
       },
       securities: {
-        equityWithLoanValue: 10_000,
+        equityWithLoanValue: 10_000.25,
         regTEquity: null,
         regTMargin: 5_000,
         initialMarginRequirement: null,
@@ -236,6 +237,39 @@ void test("getPositions exposes canonical OSI symbols for options", async () => 
       openProfitLoss: 0,
     },
   ]);
+});
+
+void test("getPositions parses thousands-separated day P/L snapshot values", async () => {
+  let snapshotCalls = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "portfolio/accounts") return [{ accountId: "U123" }];
+    if (input.path === "portfolio/U123/positions/0") {
+      return [
+        { conid: 123, contractDesc: "PFFA", assetClass: "STK", position: 14_000 },
+        { conid: 456, contractDesc: "AAPL", assetClass: "STK", position: 10 },
+      ];
+    }
+    if (input.path === "portfolio/U123/positions/1") return [];
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshotCalls += 1;
+      return snapshotCalls === 1
+        ? []
+        : [
+            { conid: 123, "78": "2,100.00" },
+            { conid: 456, "78": "-1,455.32" },
+          ];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const positions = await client.getPositions();
+  assert.deepEqual(
+    positions.map(({ symbol, currentDayProfitLoss }) => ({ symbol, currentDayProfitLoss })),
+    [
+      { symbol: "PFFA", currentDayProfitLoss: 2_100 },
+      { symbol: "AAPL", currentDayProfitLoss: -1_455.32 },
+    ]
+  );
 });
 
 void test("getPositions rejects invalid broker contract ids before market-data requests", async () => {

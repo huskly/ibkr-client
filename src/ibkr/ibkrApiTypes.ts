@@ -20,7 +20,7 @@ export interface IbkrPortfolioAccount {
 
 /** A single field in the `portfolio/{accountId}/summary` response. */
 export interface IbkrSummaryField {
-  amount?: number;
+  amount?: number | string;
   currency?: string;
 }
 
