@@ -205,6 +205,133 @@ void test("one secdef throttle coordinates endpoint backoff without blocking exe
   assert.equal(order[1], "execution");
 });
 
+void test("a secdef throttle paces queued work when retries are disabled", async () => {
+  const pacingWait = deferred();
+  const sleeps: number[] = [];
+  let now = 0;
+  let queuedCalls = 0;
+  const scheduler = new IbkrRequestScheduler({
+    maxConcurrent: 2,
+    maxRetries: 0,
+    secdefInfoMinStartIntervalMs: 100,
+    jitterRatio: 0,
+    now: () => now,
+    sleep: (ms) => {
+      sleeps.push(ms);
+      return pacingWait.promise.then(() => {
+        now += ms;
+      });
+    },
+    classifyError: () => ({ kind: "THROTTLED", retryAfterMs: 60_000 }),
+  });
+
+  const throttled = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => {
+      throw new Error("throttled");
+    }
+  );
+  const queued = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => {
+      queuedCalls += 1;
+      return "queued";
+    }
+  );
+
+  await assert.rejects(
+    throttled,
+    (error: unknown) =>
+      error instanceof IbkrRequestSchedulerError &&
+      error.code === "IBKR_THROTTLED" &&
+      error.retryAfterMs === 60_000
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(queuedCalls, 0);
+  pacingWait.resolve();
+  assert.equal(await queued, "queued");
+  assert.deepEqual(sleeps, [60_000]);
+});
+
+void test("a final secdef throttle extends endpoint pacing before exhaustion", async () => {
+  const waits: Array<{ delayMs: number; gate: ReturnType<typeof deferred> }> = [];
+  let now = 0;
+  let throttledAttempts = 0;
+  let queuedCalls = 0;
+  const scheduler = new IbkrRequestScheduler({
+    maxConcurrent: 2,
+    maxRetries: 1,
+    secdefInfoMinStartIntervalMs: 50,
+    jitterRatio: 0,
+    now: () => now,
+    sleep: (delayMs) => {
+      const gate = deferred();
+      waits.push({ delayMs, gate });
+      return gate.promise.then(() => {
+        now += delayMs;
+      });
+    },
+    classifyError: () => ({
+      kind: "THROTTLED",
+      retryAfterMs: throttledAttempts === 1 ? 100 : 1_000,
+    }),
+  });
+
+  const throttled = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => {
+      throttledAttempts += 1;
+      throw new Error("throttled");
+    }
+  );
+  const queued = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => {
+      queuedCalls += 1;
+      return "queued";
+    }
+  );
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(waits[0]?.delayMs, 100);
+  waits[0]?.gate.resolve();
+  await assert.rejects(throttled, IbkrRequestSchedulerError);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(queuedCalls, 0);
+  assert.equal(waits[1]?.delayMs, 1_000);
+  waits[1]?.gate.resolve();
+  assert.equal(await queued, "queued");
+  assert.equal(throttledAttempts, 2);
+});
+
+void test("a rejected secdef pacing sleep rejects queued definitions once", async () => {
+  const sleepError = new Error("pacing sleep failed");
+  const strandedSleep = deferred();
+  let sleepCalls = 0;
+  const scheduler = new IbkrRequestScheduler({
+    secdefInfoMinStartIntervalMs: 250,
+    now: () => 0,
+    sleep: () => {
+      sleepCalls += 1;
+      return sleepCalls === 1 ? Promise.reject(sleepError) : strandedSleep.promise;
+    },
+  });
+
+  const first = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => "first"
+  );
+  const queued = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => "must not run"
+  );
+
+  assert.equal(await first, "first");
+  await assert.rejects(queued, (error: unknown) => error === sleepError);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sleepCalls, 1);
+});
+
 void test("temporary block opens a bounded circuit and rejects queued discovery", async () => {
   let queuedCalls = 0;
   const scheduler = new IbkrRequestScheduler({

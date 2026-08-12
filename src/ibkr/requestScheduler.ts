@@ -318,6 +318,21 @@ export class IbkrRequestScheduler {
       job.reject(error);
       return;
     }
+    const delayMs = this.retryDelay(job.attempts, classification.retryAfterMs);
+    if (job.secdefInfo) {
+      this.effectiveSecdefInfoMinStartIntervalMs = Math.max(
+        this.effectiveSecdefInfoMinStartIntervalMs,
+        delayMs
+      );
+      this.secdefInfoNextStartAt = Math.max(this.secdefInfoNextStartAt, this.now() + delayMs);
+      this.emitTelemetry({
+        event: "THROTTLED",
+        endpoint: job.endpoint,
+        attempt: job.attempts + 1,
+        delayMs,
+        effectiveMinStartIntervalMs: this.effectiveSecdefInfoMinStartIntervalMs,
+      });
+    }
     if (!job.retryable || job.attempts >= this.maxRetries) {
       job.reject(
         new IbkrRequestSchedulerError(
@@ -330,27 +345,17 @@ export class IbkrRequestScheduler {
       );
       return;
     }
-    const delayMs = this.retryDelay(job.attempts, classification.retryAfterMs);
     job.attempts += 1;
-    if (job.secdefInfo) {
-      this.effectiveSecdefInfoMinStartIntervalMs = Math.max(
-        this.effectiveSecdefInfoMinStartIntervalMs,
-        delayMs
-      );
-      this.secdefInfoNextStartAt = Math.max(this.secdefInfoNextStartAt, this.now() + delayMs);
-    } else {
+    if (!job.secdefInfo) {
       this.backoffUntil = Math.max(this.backoffUntil, this.now() + delayMs);
+      this.emitTelemetry({
+        event: "THROTTLED",
+        endpoint: job.endpoint,
+        attempt: job.attempts,
+        delayMs,
+      });
     }
     this.queue.push(job);
-    this.emitTelemetry({
-      event: "THROTTLED",
-      endpoint: job.endpoint,
-      attempt: job.attempts,
-      delayMs,
-      ...(job.secdefInfo
-        ? { effectiveMinStartIntervalMs: this.effectiveSecdefInfoMinStartIntervalMs }
-        : {}),
-    });
   }
 
   private retryDelay(attempt: number, retryAfterMs?: number): number {
@@ -400,10 +405,21 @@ export class IbkrRequestScheduler {
       delayMs,
       effectiveMinStartIntervalMs: this.effectiveSecdefInfoMinStartIntervalMs,
     });
-    this.secdefInfoPacingPromise = this.sleep(delayMs).finally(() => {
-      this.secdefInfoPacingPromise = undefined;
-      this.drain();
-    });
+    this.secdefInfoPacingPromise = this.sleep(delayMs).then(
+      () => {
+        this.secdefInfoPacingPromise = undefined;
+        this.drain();
+      },
+      (error: unknown) => {
+        this.secdefInfoPacingPromise = undefined;
+        const queued = this.queue.splice(0);
+        for (const job of queued) {
+          if (job.secdefInfo) job.reject(error);
+          else this.queue.push(job);
+        }
+        this.drain();
+      }
+    );
   }
 
   private openCircuit(job: ScheduledJob, cause: unknown): void {
