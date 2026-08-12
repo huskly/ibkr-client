@@ -164,8 +164,9 @@ await expiries;
 ```
 
 `getOptionChain` and `getOptionChainSnapshot` accept the same final options argument. An aborted
-operation rejects with the signal reason. An `AbortController` without a custom reason uses the
-standard `AbortError`.
+operation rejects with the signal reason when it is an `Error`. A non-error custom reason is retained
+as the `cause` of an `Error`. An `AbortController` without a custom reason uses the standard
+`AbortError`.
 
 ### Broker-neutral derivative discovery
 

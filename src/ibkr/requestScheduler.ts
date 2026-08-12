@@ -182,7 +182,7 @@ export class IbkrRequestScheduler {
   schedule<T>(options: RequestOptions, task: () => Promise<T>): Promise<T> {
     const circuitError = this.currentCircuitError(options.endpoint);
     if (circuitError !== undefined) return Promise.reject(circuitError);
-    if (options.signal?.aborted) return Promise.reject(options.signal.reason);
+    if (options.signal?.aborted) return Promise.reject(this.abortReason(options.signal));
     return new Promise<T>((resolve, reject) => {
       const job: ScheduledJob = {
         sequence: this.sequence++,
@@ -205,15 +205,16 @@ export class IbkrRequestScheduler {
         finished: false,
       };
       if (job.signal !== undefined) {
+        const signal = job.signal;
         job.abortListener = () => {
           job.aborted = true;
           const queuedIndex = this.queue.indexOf(job);
           if (queuedIndex >= 0) this.queue.splice(queuedIndex, 1);
-          this.rejectJob(job, job.signal?.reason);
+          this.rejectJob(job, this.abortReason(signal));
           this.drain();
         };
-        job.signal.addEventListener("abort", job.abortListener, { once: true });
-        if (job.signal.aborted) {
+        signal.addEventListener("abort", job.abortListener, { once: true });
+        if (signal.aborted) {
           job.abortListener();
           return;
         }
@@ -413,7 +414,17 @@ export class IbkrRequestScheduler {
         delayMs,
       });
     }
+    this.requeueIfActive(job);
+  }
+
+  private requeueIfActive(job: ScheduledJob): void {
     if (!job.aborted) this.queue.push(job);
+  }
+
+  private abortReason(signal: AbortSignal): Error {
+    return signal.reason instanceof Error
+      ? signal.reason
+      : new Error("IBKR request was aborted", { cause: signal.reason });
   }
 
   private retryDelay(attempt: number, retryAfterMs?: number): number {

@@ -46,6 +46,20 @@ void test("scheduler bounds discovery concurrency and prioritizes execution read
   assert.equal(scheduler.metrics.maximumDiscoveryConcurrent, 1);
 });
 
+void test("a non-error abort reason rejects with safe Error evidence", async () => {
+  const controller = new AbortController();
+  controller.abort("caller stopped");
+  const scheduler = new IbkrRequestScheduler();
+
+  await assert.rejects(
+    scheduler.schedule(
+      { endpoint: "secdef/info", priority: "DISCOVERY", signal: controller.signal },
+      async () => "must not start"
+    ),
+    (error: unknown) => error instanceof Error && error.cause === "caller stopped"
+  );
+});
+
 void test("default secdef pacing prevents starts that are too close together", async () => {
   let now = 0;
   const starts: number[] = [];
