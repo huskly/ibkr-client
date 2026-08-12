@@ -24,20 +24,28 @@ export const ASSET_CLASS_LABELS: Record<string, string> = {
   CFD: "CFD",
 };
 
+/** Parse a provider number with optional comma thousands separators. */
+function parseProviderNumber(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (
+    trimmed.includes(",") &&
+    !/^[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(trimmed)
+  ) {
+    return null;
+  }
+  const result = Number(trimmed.replace(/,/g, ""));
+  return Number.isFinite(result) ? result : null;
+}
+
 /** Coerce an unknown (string | number | null) into a number, defaulting to 0. */
 export function toNumber(value: unknown): number {
   if (typeof value === "number") return value;
-  if (typeof value === "string") {
-    const n = parseFloat(value);
-    return Number.isNaN(n) ? 0 : n;
-  }
-  return 0;
+  return typeof value === "string" ? (parseProviderNumber(value) ?? 0) : 0;
 }
 
 /** Coerce an unknown provider amount into a finite number or unavailable null. */
 export function toNullableNumber(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value !== "string" || value.trim() === "") return null;
-  const result = Number(value);
-  return Number.isFinite(result) ? result : null;
+  return typeof value === "string" ? parseProviderNumber(value) : null;
 }
