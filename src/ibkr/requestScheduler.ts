@@ -48,6 +48,10 @@ interface RequestOptions {
   secdefInfo?: boolean;
   retryable?: boolean;
   retryServerErrors?: boolean;
+  /** Cancel only the jobs that belong to this caller operation. */
+  signal?: AbortSignal;
+  /** Notify the owning operation before this job reports a terminal failure. */
+  onTerminalFailure?: (error: unknown) => void;
 }
 
 interface ScheduledJob {
@@ -61,6 +65,11 @@ interface ScheduledJob {
   task: () => Promise<unknown>;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  abortListener?: () => void;
+  onTerminalFailure?: (error: unknown) => void;
+  aborted: boolean;
+  finished: boolean;
 }
 
 const priorityRank: Record<IbkrRequestPriority, number> = {
@@ -171,10 +180,11 @@ export class IbkrRequestScheduler {
   }
 
   schedule<T>(options: RequestOptions, task: () => Promise<T>): Promise<T> {
+    if (options.signal?.aborted) return Promise.reject(this.abortReason(options.signal));
     const circuitError = this.currentCircuitError(options.endpoint);
     if (circuitError !== undefined) return Promise.reject(circuitError);
     return new Promise<T>((resolve, reject) => {
-      this.queue.push({
+      const job: ScheduledJob = {
         sequence: this.sequence++,
         endpoint: options.endpoint,
         priority: options.priority,
@@ -187,15 +197,59 @@ export class IbkrRequestScheduler {
           resolve(value as T);
         },
         reject,
-      });
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.onTerminalFailure === undefined
+          ? {}
+          : { onTerminalFailure: options.onTerminalFailure }),
+        aborted: false,
+        finished: false,
+      };
+      if (job.signal !== undefined) {
+        const signal = job.signal;
+        job.abortListener = () => {
+          job.aborted = true;
+          const queuedIndex = this.queue.indexOf(job);
+          if (queuedIndex >= 0) this.queue.splice(queuedIndex, 1);
+          this.rejectJob(job, this.abortReason(signal));
+          this.drain();
+        };
+        signal.addEventListener("abort", job.abortListener, { once: true });
+        if (signal.aborted) {
+          job.abortListener();
+          return;
+        }
+      }
+      this.queue.push(job);
       this.drain();
     });
+  }
+
+  private resolveJob(job: ScheduledJob, value: unknown): void {
+    if (job.finished) return;
+    job.finished = true;
+    this.removeAbortListener(job);
+    job.resolve(value);
+  }
+
+  private rejectJob(job: ScheduledJob, error: unknown): void {
+    if (job.finished) return;
+    job.finished = true;
+    this.removeAbortListener(job);
+    if (!job.aborted) job.onTerminalFailure?.(error);
+    job.reject(error);
+  }
+
+  private removeAbortListener(job: ScheduledJob): void {
+    if (job.signal !== undefined && job.abortListener !== undefined) {
+      job.signal.removeEventListener("abort", job.abortListener);
+      delete job.abortListener;
+    }
   }
 
   private drain(): void {
     if (this.circuitOpenUntil > this.now()) {
       for (const queued of this.queue.splice(0)) {
-        queued.reject(this.currentCircuitError(queued.endpoint));
+        this.rejectJob(queued, this.currentCircuitError(queued.endpoint));
       }
       return;
     }
@@ -265,7 +319,9 @@ export class IbkrRequestScheduler {
     );
     void Promise.resolve()
       .then(job.task)
-      .then(job.resolve)
+      .then((value) => {
+        this.resolveJob(job, value);
+      })
       .catch((error: unknown) => {
         this.handleFailure(job, error);
       })
@@ -280,6 +336,7 @@ export class IbkrRequestScheduler {
   }
 
   private handleFailure(job: ScheduledJob, error: unknown): void {
+    if (job.aborted) return;
     const classification = this.classifyError(error);
     if (classification.kind === "TEMPORARILY_BLOCKED") {
       this.openCircuit(job, error);
@@ -287,7 +344,7 @@ export class IbkrRequestScheduler {
     }
     if (classification.kind === "SERVER_ERROR") {
       if (!job.retryServerErrors || job.attempts >= this.maxRetries) {
-        job.reject(error);
+        this.rejectJob(job, error);
         return;
       }
       const delayMs = this.retryDelay(job.attempts, classification.retryAfterMs);
@@ -300,22 +357,23 @@ export class IbkrRequestScheduler {
       });
       void this.sleep(delayMs).then(
         () => {
+          if (job.aborted) return;
           const circuitError = this.currentCircuitError(job.endpoint);
           if (circuitError !== undefined) {
-            job.reject(circuitError);
+            this.rejectJob(job, circuitError);
             return;
           }
           this.queue.push(job);
           this.drain();
         },
         () => {
-          job.reject(error);
+          this.rejectJob(job, error);
         }
       );
       return;
     }
     if (classification.kind !== "THROTTLED") {
-      job.reject(error);
+      this.rejectJob(job, error);
       return;
     }
     const delayMs = this.retryDelay(job.attempts, classification.retryAfterMs);
@@ -334,7 +392,8 @@ export class IbkrRequestScheduler {
       });
     }
     if (!job.retryable || job.attempts >= this.maxRetries) {
-      job.reject(
+      this.rejectJob(
+        job,
         new IbkrRequestSchedulerError(
           `IBKR throttled ${job.endpoint}`,
           "IBKR_THROTTLED",
@@ -355,7 +414,17 @@ export class IbkrRequestScheduler {
         delayMs,
       });
     }
-    this.queue.push(job);
+    this.requeueIfActive(job);
+  }
+
+  private requeueIfActive(job: ScheduledJob): void {
+    if (!job.aborted) this.queue.push(job);
+  }
+
+  private abortReason(signal: AbortSignal): Error {
+    return signal.reason instanceof Error
+      ? signal.reason
+      : new Error("IBKR request was aborted", { cause: signal.reason });
   }
 
   private retryDelay(attempt: number, retryAfterMs?: number): number {
@@ -414,7 +483,7 @@ export class IbkrRequestScheduler {
         this.secdefInfoPacingPromise = undefined;
         const queued = this.queue.splice(0);
         for (const job of queued) {
-          if (job.secdefInfo) job.reject(error);
+          if (job.secdefInfo) this.rejectJob(job, error);
           else this.queue.push(job);
         }
         this.drain();
@@ -432,8 +501,8 @@ export class IbkrRequestScheduler {
       this.circuitDurationMs,
       { cause }
     );
-    job.reject(error);
-    for (const queued of this.queue.splice(0)) queued.reject(error);
+    this.rejectJob(job, error);
+    for (const queued of this.queue.splice(0)) this.rejectJob(queued, error);
     this.emitTelemetry({
       event: "CIRCUIT_OPEN",
       endpoint: job.endpoint,

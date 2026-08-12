@@ -46,6 +46,20 @@ void test("scheduler bounds discovery concurrency and prioritizes execution read
   assert.equal(scheduler.metrics.maximumDiscoveryConcurrent, 1);
 });
 
+void test("a non-error abort reason rejects with safe Error evidence", async () => {
+  const controller = new AbortController();
+  controller.abort("caller stopped");
+  const scheduler = new IbkrRequestScheduler();
+
+  await assert.rejects(
+    scheduler.schedule(
+      { endpoint: "secdef/info", priority: "DISCOVERY", signal: controller.signal },
+      async () => "must not start"
+    ),
+    (error: unknown) => error instanceof Error && error.cause === "caller stopped"
+  );
+});
+
 void test("default secdef pacing prevents starts that are too close together", async () => {
   let now = 0;
   const starts: number[] = [];
@@ -369,6 +383,36 @@ void test("temporary block opens a bounded circuit and rejects queued discovery"
     (error: unknown) =>
       error instanceof IbkrRequestSchedulerError && error.code === "IBKR_TEMPORARILY_BLOCKED"
   );
+});
+
+void test("a pre-aborted request keeps its abort reason while the circuit is open", async () => {
+  const abortReason = new Error("caller stopped");
+  const controller = new AbortController();
+  controller.abort(abortReason);
+  let requestCalls = 0;
+  const scheduler = new IbkrRequestScheduler({
+    now: () => 10_000,
+    circuitDurationMs: 60_000,
+    classifyError: () => ({ kind: "TEMPORARILY_BLOCKED" }),
+  });
+
+  await assert.rejects(
+    scheduler.schedule({ endpoint: "secdef/search", priority: "DISCOVERY" }, async () => {
+      throw new Error("blocked");
+    }),
+    (error: unknown) =>
+      error instanceof IbkrRequestSchedulerError && error.code === "IBKR_TEMPORARILY_BLOCKED"
+  );
+  await assert.rejects(
+    scheduler.schedule(
+      { endpoint: "secdef/info", priority: "DISCOVERY", signal: controller.signal },
+      async () => {
+        requestCalls += 1;
+      }
+    ),
+    (error: unknown) => error === abortReason
+  );
+  assert.equal(requestCalls, 0);
 });
 
 void test("server retries are opt-in and use a per-job bounded delay", async () => {

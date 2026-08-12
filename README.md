@@ -146,6 +146,29 @@ recovery.
   does not identify one listing.
 - `getOptionContract(conid)` maps a broker conid back to durable OSI identity.
 
+The option discovery methods submit at most eight `secdef/info` definitions at one time. The next
+chunk starts only after the current chunk succeeds. Multi-month expiry discovery completes one month
+before it starts the next month. A terminal failure cancels queued definitions that belong to that
+operation. It does not cancel definitions that belong to another operation. HTTP requests that
+started before cancellation can settle normally.
+
+Pass an `OptionDiscoveryOptions` value as the last argument to stop one operation with a standard
+`AbortSignal`:
+
+```ts
+const controller = new AbortController();
+const expiries = client.getOptionExpiries("SPX", "C", from, to, {
+  signal: controller.signal,
+});
+controller.abort();
+await expiries;
+```
+
+`getOptionChain` and `getOptionChainSnapshot` accept the same final options argument. Their signal
+applies to definition discovery and market-data snapshots. An aborted operation rejects with the
+signal reason when it is an `Error`. A non-error custom reason is retained as the `cause` of an
+`Error`. An `AbortController` without a custom reason uses the standard `AbortError`.
+
 ### Broker-neutral derivative discovery
 
 `IbkrClient` implements the capability-specific `DerivativeDiscoveryClient` without adding

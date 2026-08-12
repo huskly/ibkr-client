@@ -201,7 +201,6 @@ const QUOTE_FIELDS = [
   "6509", // Market data availability
   "7762", // Unformatted volume
 ].join(",");
-const OPTION_DISCOVERY_MONTH_CONCURRENCY = 1;
 const OPTION_SECDEF_INFO_BATCH_SIZE = 8;
 const OPTION_MARKETDATA_BATCH_SIZE = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -379,6 +378,12 @@ interface IbkrRequestInput {
 }
 
 type IbkrRequestRetryPolicy = "SAFE_READ" | "PRICE_HISTORY" | "SINGLE_ATTEMPT";
+
+/** Controls one option-chain or expiry-discovery operation. */
+export interface OptionDiscoveryOptions {
+  /** Stop this operation without canceling work owned by another caller. */
+  signal?: AbortSignal;
+}
 
 export interface IbkrClientOptions {
   requestScheduler?: Omit<IbkrRequestSchedulerOptions, "classifyError" | "onTelemetry">;
@@ -4201,17 +4206,15 @@ export class IbkrClient
     symbol: string,
     right: OptionRight,
     fromDate: string,
-    toDate: string
+    toDate: string,
+    options: OptionDiscoveryOptions = {}
   ): Promise<string[]> {
     const normalized = symbol.trim().toUpperCase();
     const months = monthCodes(fromDate, toDate);
     const contracts: OptionContract[] = [];
-    for (let index = 0; index < months.length; index += OPTION_DISCOVERY_MONTH_CONCURRENCY) {
-      const batch = months.slice(index, index + OPTION_DISCOVERY_MONTH_CONCURRENCY);
-      const batchContracts = await Promise.all(
-        batch.map((month) => this.discoverOptions(normalized, month, right))
-      );
-      contracts.push(...batchContracts.flatMap((result) => result.contracts));
+    for (const month of months) {
+      const result = await this.discoverOptions(normalized, month, right, options);
+      contracts.push(...result.contracts);
     }
     return [
       ...new Set(
@@ -4229,11 +4232,12 @@ export class IbkrClient
   async getOptionChain(
     symbol: string,
     expiry: string,
-    right?: OptionRight
+    right?: OptionRight,
+    options: OptionDiscoveryOptions = {}
   ): Promise<OptionMarketQuote[]> {
     const month = monthCode(expiry);
     const normalized = symbol.trim().toUpperCase();
-    const discovery = await this.discoverOptions(normalized, month, right);
+    const discovery = await this.discoverOptions(normalized, month, right, options);
     const contracts = discovery.contracts.filter(
       (contract) => contract.expiry === expiry && (right === undefined || contract.right === right)
     );
@@ -4243,6 +4247,7 @@ export class IbkrClient
     const quoted = await this.fetchOptionQuotes(contracts, {
       allowIncomplete: true,
       telemetry: { symbol: normalized, month, right: right ?? null },
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
     if (!quoted.length) {
       throw new Error(`IBKR returned no usable option quotes for ${symbol} ${expiry}`);
@@ -4254,20 +4259,22 @@ export class IbkrClient
   async getOptionChainSnapshot(
     symbol: string,
     expiry: string,
-    right: OptionRight
+    right: OptionRight,
+    options: OptionDiscoveryOptions = {}
   ): Promise<OptionChainSnapshot> {
     const month = monthCode(expiry);
     const normalized = symbol.trim().toUpperCase();
-    const discovery = await this.discoverOptions(normalized, month, right);
+    const discovery = await this.discoverOptions(normalized, month, right, options);
     const contracts = discovery.contracts.filter((contract) => contract.expiry === expiry);
     if (!contracts.length) {
       throw new Error(`IBKR returned no ${right} option contracts for ${symbol} ${expiry}`);
     }
-    return this.fetchOptionChainSnapshot(contracts, discovery.malformedDefinitionCount, {
-      symbol: normalized,
-      month,
-      right,
-    });
+    return this.fetchOptionChainSnapshot(
+      contracts,
+      discovery.malformedDefinitionCount,
+      { symbol: normalized, month, right },
+      options.signal
+    );
   }
 
   /** Fetch one exact option quote; null means the contract is not listed. */
@@ -4612,9 +4619,13 @@ export class IbkrClient
   private discoverOptions(
     symbol: string,
     month: string,
-    right?: OptionRight
+    right?: OptionRight,
+    options: OptionDiscoveryOptions = {}
   ): Promise<OptionDiscoveryResult> {
     const normalized = symbol.trim().toUpperCase();
+    if (options.signal !== undefined) {
+      return this.loadOptionContracts(normalized, month, right, options.signal);
+    }
     const key = `${normalized}:${month}:${right ?? "*"}`;
     let pending = this.optionDiscovery.get(key);
     if (!pending && right !== undefined) {
@@ -4631,14 +4642,20 @@ export class IbkrClient
     return pending;
   }
 
-  private async loadOptionUnderlying(symbol: string): Promise<OptionUnderlying> {
+  private async loadOptionUnderlying(
+    symbol: string,
+    signal?: AbortSignal
+  ): Promise<OptionUnderlying> {
     // This search is load-bearing: IBKR silently returns empty definitions unless the current
     // session has first searched the underlying.
     const search = this.parseSecdefSearchResponse(
-      await this.req<unknown>({
-        path: "iserver/secdef/search",
-        params: { symbol },
-      })
+      await this.req<unknown>(
+        {
+          path: "iserver/secdef/search",
+          params: { symbol },
+        },
+        signal
+      )
     );
     const candidates = search.flatMap((item) => {
       if (!isUnknownRecord(item)) return [];
@@ -4682,125 +4699,157 @@ export class IbkrClient
   private async loadOptionContracts(
     symbol: string,
     month: string,
-    right?: OptionRight
+    right?: OptionRight,
+    callerSignal?: AbortSignal
   ): Promise<OptionDiscoveryResult> {
-    const { underlying, requests } = await this.withSecdefPriming(async () => {
-      const searchStarted = this.requestNow();
-      const selectedUnderlying = await this.loadOptionUnderlying(symbol);
-      this.emitOptionDiscoveryTelemetry({
-        phase: "SEARCH",
-        symbol,
-        month,
-        right: right ?? null,
-        durationMs: this.elapsedSince(searchStarted),
-        definitionRequestCount: 0,
-        snapshotBatchCount: 0,
+    const operation = new AbortController();
+    const abortFromCaller = (): void => {
+      operation.abort(callerSignal?.reason);
+    };
+    if (callerSignal?.aborted) abortFromCaller();
+    else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+
+    try {
+      const { underlying, requests } = await this.withSecdefPriming(async () => {
+        const searchStarted = this.requestNow();
+        const selectedUnderlying = await this.loadOptionUnderlying(symbol, operation.signal);
+        this.emitOptionDiscoveryTelemetry({
+          phase: "SEARCH",
+          symbol,
+          month,
+          right: right ?? null,
+          durationMs: this.elapsedSince(searchStarted),
+          definitionRequestCount: 0,
+          snapshotBatchCount: 0,
+        });
+
+        const strikesStarted = this.requestNow();
+        const strikes = await this.req<IbkrSecdefStrikesResponse>(
+          {
+            path: "iserver/secdef/strikes",
+            params: { conid: String(selectedUnderlying.conid), sectype: "OPT", month },
+          },
+          operation.signal
+        );
+        this.emitOptionDiscoveryTelemetry({
+          phase: "STRIKES",
+          symbol,
+          month,
+          right: right ?? null,
+          durationMs: this.elapsedSince(strikesStarted),
+          definitionRequestCount: 0,
+          snapshotBatchCount: 0,
+        });
+        const callStrikes = strikes.call ?? [];
+        const putStrikes = strikes.put ?? [];
+        if (callStrikes.length === 0 && putStrikes.length === 0) {
+          throw new Error(
+            `IBKR returned empty option strikes for ${symbol} ${month} after secdef/search priming`
+          );
+        }
+        const definitionRequests = [
+          ...(right === undefined || right === "C"
+            ? callStrikes.map((strike) => ({ strike, right: "C" as const }))
+            : []),
+          ...(right === undefined || right === "P"
+            ? putStrikes.map((strike) => ({ strike, right: "P" as const }))
+            : []),
+        ];
+        return { underlying: selectedUnderlying, requests: definitionRequests };
       });
 
-      const strikesStarted = this.requestNow();
-      const strikes = await this.req<IbkrSecdefStrikesResponse>({
-        path: "iserver/secdef/strikes",
-        params: { conid: String(selectedUnderlying.conid), sectype: "OPT", month },
-      });
+      const definitionsStarted = this.requestNow();
+      const contracts: OptionContract[] = [];
+      let malformedDefinitionCount = 0;
+      for (const batch of chunks(requests, OPTION_SECDEF_INFO_BATCH_SIZE)) {
+        let responses: unknown[];
+        try {
+          responses = await Promise.all(
+            batch.map(({ strike, right: requestRight }) =>
+              this.req<unknown>(
+                {
+                  path: "iserver/secdef/info",
+                  params: {
+                    conid: String(underlying.conid),
+                    sectype: "OPT",
+                    month,
+                    strike,
+                    right: requestRight,
+                  },
+                },
+                operation.signal,
+                (error) => {
+                  operation.abort(error);
+                }
+              )
+            )
+          );
+        } catch (error) {
+          operation.abort(error);
+          throw error;
+        }
+
+        for (const response of responses) {
+          if (!Array.isArray(response)) {
+            throw new Error(`IBKR returned malformed option definitions for ${symbol} ${month}`);
+          }
+          for (const raw of response) {
+            if (!isUnknownRecord(raw)) {
+              malformedDefinitionCount += 1;
+              continue;
+            }
+            let contract: OptionContract | null;
+            try {
+              contract = normalizeOptionContract({
+                conid: typeof raw["conid"] === "number" ? raw["conid"] : undefined,
+                symbol: typeof raw["symbol"] === "string" ? raw["symbol"] : underlying.symbol,
+                maturityDate:
+                  typeof raw["maturityDate"] === "string" ? raw["maturityDate"] : undefined,
+                right: typeof raw["right"] === "string" ? raw["right"] : undefined,
+                strike:
+                  typeof raw["strike"] === "string" || typeof raw["strike"] === "number"
+                    ? raw["strike"]
+                    : undefined,
+              });
+            } catch {
+              malformedDefinitionCount += 1;
+              continue;
+            }
+            if (contract) contracts.push(contract);
+            else malformedDefinitionCount += 1;
+          }
+        }
+      }
       this.emitOptionDiscoveryTelemetry({
-        phase: "STRIKES",
+        phase: "DEFINITIONS",
         symbol,
         month,
         right: right ?? null,
-        durationMs: this.elapsedSince(strikesStarted),
-        definitionRequestCount: 0,
+        durationMs: this.elapsedSince(definitionsStarted),
+        definitionRequestCount: requests.length,
         snapshotBatchCount: 0,
       });
-      const callStrikes = strikes.call ?? [];
-      const putStrikes = strikes.put ?? [];
-      if (callStrikes.length === 0 && putStrikes.length === 0) {
+      if (requests.length === 0) return { contracts: [], malformedDefinitionCount: 0 };
+
+      const unique = [...new Map(contracts.map((contract) => [contract.conid, contract])).values()];
+      if (!unique.length) {
         throw new Error(
-          `IBKR returned empty option strikes for ${symbol} ${month} after secdef/search priming`
+          `IBKR returned no usable option definitions for ${symbol} ${month} (${String(
+            malformedDefinitionCount
+          )} malformed)`
         );
       }
-      const definitionRequests = [
-        ...(right === undefined || right === "C"
-          ? callStrikes.map((strike) => ({ strike, right: "C" as const }))
-          : []),
-        ...(right === undefined || right === "P"
-          ? putStrikes.map((strike) => ({ strike, right: "P" as const }))
-          : []),
-      ];
-      return { underlying: selectedUnderlying, requests: definitionRequests };
-    });
-
-    const definitionsStarted = this.requestNow();
-    const responses = await Promise.all(
-      requests.map(({ strike, right: requestRight }) =>
-        this.req<unknown>({
-          path: "iserver/secdef/info",
-          params: {
-            conid: String(underlying.conid),
-            sectype: "OPT",
-            month,
-            strike,
-            right: requestRight,
-          },
-        })
-      )
-    );
-    this.emitOptionDiscoveryTelemetry({
-      phase: "DEFINITIONS",
-      symbol,
-      month,
-      right: right ?? null,
-      durationMs: this.elapsedSince(definitionsStarted),
-      definitionRequestCount: requests.length,
-      snapshotBatchCount: 0,
-    });
-    if (requests.length === 0) return { contracts: [], malformedDefinitionCount: 0 };
-
-    const contracts: OptionContract[] = [];
-    let malformedDefinitionCount = 0;
-    for (const response of responses) {
-      if (!Array.isArray(response)) {
-        throw new Error(`IBKR returned malformed option definitions for ${symbol} ${month}`);
-      }
-      for (const raw of response) {
-        if (!isUnknownRecord(raw)) {
-          malformedDefinitionCount += 1;
-          continue;
-        }
-        let contract: OptionContract | null;
-        try {
-          contract = normalizeOptionContract({
-            conid: typeof raw["conid"] === "number" ? raw["conid"] : undefined,
-            symbol: typeof raw["symbol"] === "string" ? raw["symbol"] : underlying.symbol,
-            maturityDate: typeof raw["maturityDate"] === "string" ? raw["maturityDate"] : undefined,
-            right: typeof raw["right"] === "string" ? raw["right"] : undefined,
-            strike:
-              typeof raw["strike"] === "string" || typeof raw["strike"] === "number"
-                ? raw["strike"]
-                : undefined,
-          });
-        } catch {
-          malformedDefinitionCount += 1;
-          continue;
-        }
-        if (contract) contracts.push(contract);
-        else malformedDefinitionCount += 1;
-      }
+      return { contracts: unique, malformedDefinitionCount };
+    } finally {
+      callerSignal?.removeEventListener("abort", abortFromCaller);
     }
-    const unique = [...new Map(contracts.map((contract) => [contract.conid, contract])).values()];
-    if (!unique.length) {
-      throw new Error(
-        `IBKR returned no usable option definitions for ${symbol} ${month} (${String(
-          malformedDefinitionCount
-        )} malformed)`
-      );
-    }
-    return { contracts: unique, malformedDefinitionCount };
   }
 
   private async fetchOptionChainSnapshot(
     contracts: readonly OptionContract[],
     malformedDefinitionCount: number,
-    telemetry: { symbol: string; month: string; right: OptionRight }
+    telemetry: { symbol: string; month: string; right: OptionRight },
+    signal?: AbortSignal
   ): Promise<OptionChainSnapshot> {
     const fields: readonly OptionChainSnapshotField[] = [
       "bid",
@@ -4816,7 +4865,7 @@ export class IbkrClient
       OptionChainSnapshotField,
       number
     >;
-    const quotes = await this.fetchNullableOptionQuotes(contracts, telemetry);
+    const quotes = await this.fetchNullableOptionQuotes(contracts, telemetry, signal);
     for (const quote of quotes) {
       for (const field of fields) {
         if (quote[field] === null) missingFieldCounts[field] += 1;
@@ -4833,7 +4882,8 @@ export class IbkrClient
 
   private async fetchNullableOptionQuotes(
     contracts: readonly OptionContract[],
-    telemetry?: { symbol: string; month: string; right: OptionRight | null }
+    telemetry?: { symbol: string; month: string; right: OptionRight | null },
+    signal?: AbortSignal
   ): Promise<OptionChainSnapshotQuote[]> {
     const quotes: OptionChainSnapshotQuote[] = [];
     const batches = chunks(contracts, OPTION_MARKETDATA_BATCH_SIZE);
@@ -4843,12 +4893,12 @@ export class IbkrClient
         conids: batch.map((contract) => contract.conid).join(","),
         fields: OPTION_QUOTE_FIELDS,
       };
-      await this.req<unknown>({ path: "iserver/marketdata/snapshot", params });
+      await this.req<unknown>({ path: "iserver/marketdata/snapshot", params }, signal);
       await this.wait(2000);
-      const response = await this.req<unknown>({
-        path: "iserver/marketdata/snapshot",
-        params,
-      });
+      const response = await this.req<unknown>(
+        { path: "iserver/marketdata/snapshot", params },
+        signal
+      );
       if (!Array.isArray(response)) {
         throw new Error("IBKR returned malformed option market-data snapshots");
       }
@@ -4898,12 +4948,13 @@ export class IbkrClient
     options: {
       allowIncomplete?: boolean;
       telemetry?: { symbol: string; month: string; right: OptionRight | null };
+      signal?: AbortSignal;
     } = {}
   ): Promise<OptionMarketQuote[]> {
-    const { allowIncomplete = false, telemetry } = options;
+    const { allowIncomplete = false, telemetry, signal } = options;
     const result: OptionMarketQuote[] = [];
     const skipped: string[] = [];
-    for (const quote of await this.fetchNullableOptionQuotes(contracts, telemetry)) {
+    for (const quote of await this.fetchNullableOptionQuotes(contracts, telemetry, signal)) {
       if (quote.bid === null || quote.ask === null || quote.delta === null) {
         if (allowIncomplete) {
           skipped.push(quote.symbol);
@@ -5755,8 +5806,12 @@ export class IbkrClient
     }
   }
 
-  protected req<T>(input: IbkrRequestInput): Promise<T> {
-    return this.scheduledRequest(input, "SAFE_READ");
+  protected req<T>(
+    input: IbkrRequestInput,
+    signal?: AbortSignal,
+    onTerminalFailure?: (error: unknown) => void
+  ): Promise<T> {
+    return this.scheduledRequest(input, "SAFE_READ", signal, onTerminalFailure);
   }
 
   private historyRequest<T>(input: IbkrRequestInput): Promise<T> {
@@ -5769,7 +5824,9 @@ export class IbkrClient
 
   private scheduledRequest<T>(
     input: IbkrRequestInput,
-    retryPolicy: IbkrRequestRetryPolicy
+    retryPolicy: IbkrRequestRetryPolicy,
+    signal?: AbortSignal,
+    onTerminalFailure?: (error: unknown) => void
   ): Promise<T> {
     return this.requestScheduler.schedule(
       {
@@ -5778,6 +5835,8 @@ export class IbkrClient
         secdefInfo: input.path === "iserver/secdef/info",
         retryable: retryPolicy !== "SINGLE_ATTEMPT",
         retryServerErrors: retryPolicy === "PRICE_HISTORY",
+        ...(signal === undefined ? {} : { signal }),
+        ...(onTerminalFailure === undefined ? {} : { onTerminalFailure }),
       },
       async () => {
         try {
