@@ -313,8 +313,8 @@ four concurrent requests. Configure it with `maxSecdefInfoConcurrent`; it cannot
 limit. Order preview, status, warning, cancellation, and immediate-trade requests take priority over
 queued discovery. Multi-month derivative discovery also primes each month serially. A session-level
 transaction guard keeps each stateful security-definition search with its dependent strike request.
-Independent definition reads start only after this transaction completes. An exact
-expiry/strike/right request expands only the requested contracts.
+For option-chain discovery, independent definition reads run outside this guard after search and
+strikes finish. An exact expiry/strike/right request expands only the requested contracts.
 
 A 429 pauses the shared queue behind one `Retry-After`-aware exponential backoff with jitter.
 Individual queued reads do not start independent retry loops. Exhausted throttling throws

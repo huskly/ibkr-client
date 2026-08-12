@@ -4680,19 +4680,21 @@ export class IbkrClient
         definitionRequestCount: 0,
         snapshotBatchCount: 0,
       });
-      const definitionRequests = [
-        ...(right === undefined || right === "C"
-          ? (strikes.call ?? []).map((strike) => ({ strike, right: "C" as const }))
-          : []),
-        ...(right === undefined || right === "P"
-          ? (strikes.put ?? []).map((strike) => ({ strike, right: "P" as const }))
-          : []),
-      ];
-      if (!definitionRequests.length) {
+      const callStrikes = strikes.call ?? [];
+      const putStrikes = strikes.put ?? [];
+      if (callStrikes.length === 0 && putStrikes.length === 0) {
         throw new Error(
           `IBKR returned empty option strikes for ${symbol} ${month} after secdef/search priming`
         );
       }
+      const definitionRequests = [
+        ...(right === undefined || right === "C"
+          ? callStrikes.map((strike) => ({ strike, right: "C" as const }))
+          : []),
+        ...(right === undefined || right === "P"
+          ? putStrikes.map((strike) => ({ strike, right: "P" as const }))
+          : []),
+      ];
       return { underlying: selectedUnderlying, requests: definitionRequests };
     });
 
@@ -4721,6 +4723,7 @@ export class IbkrClient
       definitionRequestCount: requests.length,
       snapshotBatchCount: 0,
     });
+    if (requests.length === 0) return [];
     const contracts = responses.flatMap((response) =>
       response.flatMap((raw) => {
         const contract = normalizeOptionContract({

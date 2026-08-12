@@ -554,6 +554,19 @@ void test("an empty post-prime strikes response rejects instead of masquerading 
   );
 });
 
+void test("an absent requested option side remains an empty expiry result", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: 272110, symbol: "MSTR", sections: [{ secType: "OPT" }] }];
+    }
+    if (input.path === "iserver/secdef/strikes") return { call: [215], put: [] };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  assert.deepEqual(await client.getOptionExpiries("MSTR", "P", "2026-08-01", "2026-08-31"), []);
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/info").length, 0);
+});
+
 void test("429 responses are retried and eventually succeed when status clears", async () => {
   let strikesCalls = 0;
   const client = new FakeIbkrClient((input) => {
