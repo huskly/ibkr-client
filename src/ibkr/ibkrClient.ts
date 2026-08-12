@@ -201,7 +201,6 @@ const QUOTE_FIELDS = [
   "6509", // Market data availability
   "7762", // Unformatted volume
 ].join(",");
-const OPTION_DISCOVERY_MONTH_CONCURRENCY = 1;
 const OPTION_SECDEF_INFO_BATCH_SIZE = 8;
 const OPTION_MARKETDATA_BATCH_SIZE = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -380,7 +379,7 @@ interface IbkrRequestInput {
 
 type IbkrRequestRetryPolicy = "SAFE_READ" | "PRICE_HISTORY" | "SINGLE_ATTEMPT";
 
-/** Controls one option-discovery operation. */
+/** Controls one option-chain or expiry-discovery operation. */
 export interface OptionDiscoveryOptions {
   /** Stop this operation without canceling work owned by another caller. */
   signal?: AbortSignal;
@@ -4213,12 +4212,9 @@ export class IbkrClient
     const normalized = symbol.trim().toUpperCase();
     const months = monthCodes(fromDate, toDate);
     const contracts: OptionContract[] = [];
-    for (let index = 0; index < months.length; index += OPTION_DISCOVERY_MONTH_CONCURRENCY) {
-      const batch = months.slice(index, index + OPTION_DISCOVERY_MONTH_CONCURRENCY);
-      const batchContracts = await Promise.all(
-        batch.map((month) => this.discoverOptions(normalized, month, right, options))
-      );
-      contracts.push(...batchContracts.flatMap((result) => result.contracts));
+    for (const month of months) {
+      const result = await this.discoverOptions(normalized, month, right, options);
+      contracts.push(...result.contracts);
     }
     return [
       ...new Set(
@@ -4251,6 +4247,7 @@ export class IbkrClient
     const quoted = await this.fetchOptionQuotes(contracts, {
       allowIncomplete: true,
       telemetry: { symbol: normalized, month, right: right ?? null },
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
     if (!quoted.length) {
       throw new Error(`IBKR returned no usable option quotes for ${symbol} ${expiry}`);
@@ -4272,11 +4269,12 @@ export class IbkrClient
     if (!contracts.length) {
       throw new Error(`IBKR returned no ${right} option contracts for ${symbol} ${expiry}`);
     }
-    return this.fetchOptionChainSnapshot(contracts, discovery.malformedDefinitionCount, {
-      symbol: normalized,
-      month,
-      right,
-    });
+    return this.fetchOptionChainSnapshot(
+      contracts,
+      discovery.malformedDefinitionCount,
+      { symbol: normalized, month, right },
+      options.signal
+    );
   }
 
   /** Fetch one exact option quote; null means the contract is not listed. */
@@ -4850,7 +4848,8 @@ export class IbkrClient
   private async fetchOptionChainSnapshot(
     contracts: readonly OptionContract[],
     malformedDefinitionCount: number,
-    telemetry: { symbol: string; month: string; right: OptionRight }
+    telemetry: { symbol: string; month: string; right: OptionRight },
+    signal?: AbortSignal
   ): Promise<OptionChainSnapshot> {
     const fields: readonly OptionChainSnapshotField[] = [
       "bid",
@@ -4866,7 +4865,7 @@ export class IbkrClient
       OptionChainSnapshotField,
       number
     >;
-    const quotes = await this.fetchNullableOptionQuotes(contracts, telemetry);
+    const quotes = await this.fetchNullableOptionQuotes(contracts, telemetry, signal);
     for (const quote of quotes) {
       for (const field of fields) {
         if (quote[field] === null) missingFieldCounts[field] += 1;
@@ -4883,7 +4882,8 @@ export class IbkrClient
 
   private async fetchNullableOptionQuotes(
     contracts: readonly OptionContract[],
-    telemetry?: { symbol: string; month: string; right: OptionRight | null }
+    telemetry?: { symbol: string; month: string; right: OptionRight | null },
+    signal?: AbortSignal
   ): Promise<OptionChainSnapshotQuote[]> {
     const quotes: OptionChainSnapshotQuote[] = [];
     const batches = chunks(contracts, OPTION_MARKETDATA_BATCH_SIZE);
@@ -4893,12 +4893,12 @@ export class IbkrClient
         conids: batch.map((contract) => contract.conid).join(","),
         fields: OPTION_QUOTE_FIELDS,
       };
-      await this.req<unknown>({ path: "iserver/marketdata/snapshot", params });
+      await this.req<unknown>({ path: "iserver/marketdata/snapshot", params }, signal);
       await this.wait(2000);
-      const response = await this.req<unknown>({
-        path: "iserver/marketdata/snapshot",
-        params,
-      });
+      const response = await this.req<unknown>(
+        { path: "iserver/marketdata/snapshot", params },
+        signal
+      );
       if (!Array.isArray(response)) {
         throw new Error("IBKR returned malformed option market-data snapshots");
       }
@@ -4948,12 +4948,13 @@ export class IbkrClient
     options: {
       allowIncomplete?: boolean;
       telemetry?: { symbol: string; month: string; right: OptionRight | null };
+      signal?: AbortSignal;
     } = {}
   ): Promise<OptionMarketQuote[]> {
-    const { allowIncomplete = false, telemetry } = options;
+    const { allowIncomplete = false, telemetry, signal } = options;
     const result: OptionMarketQuote[] = [];
     const skipped: string[] = [];
-    for (const quote of await this.fetchNullableOptionQuotes(contracts, telemetry)) {
+    for (const quote of await this.fetchNullableOptionQuotes(contracts, telemetry, signal)) {
       if (quote.bid === null || quote.ask === null || quote.delta === null) {
         if (allowIncomplete) {
           skipped.push(quote.symbol);

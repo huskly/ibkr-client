@@ -776,6 +776,44 @@ void test("an absent requested option side remains an empty expiry result", asyn
   assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/info").length, 0);
 });
 
+void test("a multi-month expiry failure does not start definitions for later months", async () => {
+  const definitionMonths: string[] = [];
+  const client = new FakeIbkrClient(
+    (input) => {
+      if (input.path === "iserver/secdef/search") {
+        return [{ conid: 272110, symbol: "SPX", sections: [{ secType: "OPT" }] }];
+      }
+      if (input.path === "iserver/secdef/strikes") return { call: [5_000], put: [] };
+      if (input.path === "iserver/secdef/info") {
+        const month = String(input.params?.["month"]);
+        definitionMonths.push(month);
+        if (month === "AUG26") throw new Error("terminal August definition failure");
+        return [
+          {
+            conid: month === "SEP26" ? 102 : 103,
+            symbol: "SPX",
+            maturityDate: month === "SEP26" ? "20260918" : "20261016",
+            right: "C",
+            strike: 5_000,
+          },
+        ];
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    },
+    { requestScheduler: { maxConcurrent: 1, maxSecdefInfoConcurrent: 1 } }
+  );
+
+  await assert.rejects(
+    () => client.getOptionExpiries("SPX", "C", "2026-08-01", "2026-10-31"),
+    /terminal August definition failure/
+  );
+  for (let index = 0; index < 4; index += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  assert.deepEqual(definitionMonths, ["AUG26"]);
+});
+
 void test("terminal definition throttling does not start untouched option strikes", async () => {
   const definitionStrikes: number[] = [];
   const telemetry: string[] = [];
@@ -904,6 +942,49 @@ void test("aborting option discovery stops queued definitions and lets a started
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(startedSettled, true, "the started transport settles after the caller aborts");
   assert.equal(client.calls.filter(({ path }) => path === "iserver/secdef/info").length, 1);
+});
+
+void test("aborting an option chain stops snapshot work after discovery", async () => {
+  const controller = new AbortController();
+  let resolveSnapshot: ((value: unknown) => void) | undefined;
+  let snapshotCalls = 0;
+  let notifySnapshotStarted: (() => void) | undefined;
+  const snapshotStarted = new Promise<void>((resolve) => {
+    notifySnapshotStarted = resolve;
+  });
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: 272110, symbol: "SPX", sections: [{ secType: "OPT" }] }];
+    }
+    if (input.path === "iserver/secdef/strikes") return { call: [5_000], put: [] };
+    if (input.path === "iserver/secdef/info") {
+      return [{ conid: 101, symbol: "SPX", maturityDate: "20260814", right: "C", strike: 5_000 }];
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshotCalls += 1;
+      if (snapshotCalls === 1) {
+        notifySnapshotStarted?.();
+        return new Promise((resolve) => {
+          resolveSnapshot = resolve;
+        });
+      }
+      return [{ conid: 101, "84": "1.00", "86": "1.20", "7308": "0.50" }];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const chain = client.getOptionChain("SPX", "2026-08-14", "C", {
+    signal: controller.signal,
+  });
+  await snapshotStarted;
+  controller.abort();
+  resolveSnapshot?.([{ conid: 101, "84": "1.00", "86": "1.20", "7308": "0.50" }]);
+
+  await assert.rejects(
+    chain,
+    (error: unknown) => error instanceof Error && error.name === "AbortError"
+  );
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/marketdata/snapshot").length, 1);
 });
 
 void test("aborting one option discovery does not cancel an independent operation", async () => {
