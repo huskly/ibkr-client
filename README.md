@@ -315,18 +315,23 @@ structured response in `BrokerErrorDetail.details`; transport exceptions are ret
 
 Every authenticated request runs through one priority scheduler per `IbkrClient`. The default
 limits allow at most ten requests globally. Stateful security-definition discovery stays at one
-request at a time. Read-only `iserver/secdef/info` expansion uses a separate conservative limit of
-four concurrent requests. Configure it with `maxSecdefInfoConcurrent`; it cannot exceed the global
-limit. Order preview, status, warning, cancellation, and immediate-trade requests take priority over
-queued discovery. Multi-month derivative discovery also primes each month serially. A session-level
+request at a time. Read-only `iserver/secdef/info` expansion defaults to one concurrent request and
+at least 250 ms between request starts. Configure these limits with `maxSecdefInfoConcurrent` and
+`secdefInfoMinStartIntervalMs`; concurrency cannot exceed the global limit. Order preview, status,
+warning, cancellation, and immediate-trade requests take priority over queued discovery, including
+while definition work waits for its next allowed start. Multi-month derivative discovery also primes
+each month serially. A session-level
 transaction guard keeps each stateful security-definition search with its dependent strike request.
 For option-chain discovery, independent definition reads run outside this guard after search and
 strikes finish. An exact expiry/strike/right request expands only the requested contracts.
 
-A 429 pauses the shared queue behind one `Retry-After`-aware exponential backoff with jitter.
-Individual queued reads do not start independent retry loops. Exhausted throttling throws
-`IbkrRequestSchedulerError` with code `IBKR_THROTTLED`. A broker temporary-block response opens a
-bounded circuit, rejects queued work, and throws code `IBKR_TEMPORARILY_BLOCKED` without a retry.
+A `secdef/info` 429 extends one endpoint-wide wait and raises the effective minimum start interval.
+It honors `Retry-After` and does not block execution requests. A 429 from another endpoint pauses the
+shared queue behind one `Retry-After`-aware exponential backoff with jitter. Individual queued reads
+do not start independent retry loops, and the retry count does not increase. Exhausted throttling
+throws `IbkrRequestSchedulerError` with code `IBKR_THROTTLED`. A broker temporary-block response
+opens a bounded circuit, rejects queued work, and throws code `IBKR_TEMPORARILY_BLOCKED` without a
+retry.
 
 A price-history read retries a 5xx response with bounded exponential backoff and jitter. No other
 request retries a 5xx response. An explicit `Retry-After` value replaces the local backoff delay
@@ -340,9 +345,11 @@ safe `Retry-After` value when it is available. Callers do not have to parse the 
 
 `IbkrClient` accepts optional scheduler limits and an `onRequestTelemetry` callback. Scheduler
 options also accept `now`, `sleep`, and `random` functions for controlled runtimes and tests.
-Telemetry for each retry contains only a sanitized endpoint category, event, attempt, and delay.
-`onOptionDiscoveryTelemetry` reports search, strikes, definitions, and snapshot phases. It includes
-the symbol, month, optional right, duration, definition request count, and snapshot batch count. It
+Request telemetry contains only a sanitized endpoint category, event, attempt, applied delay, and
+the effective `secdef/info` minimum start interval when it applies. It contains no parameters,
+payloads, or account data. `onOptionDiscoveryTelemetry` reports search, strikes, definitions, and
+snapshot phases. It includes the symbol, month, optional right, duration, definition request count,
+and snapshot batch count. It
 does not contain account IDs, order IDs, credentials, request payloads, or full URLs. A telemetry
 observer failure does not change request scheduling or request settlement.
 

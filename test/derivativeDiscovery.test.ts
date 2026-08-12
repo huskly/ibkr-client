@@ -25,7 +25,7 @@ class FakeIbkrClient extends IbkrClient {
   readonly calls: RequestInput[] = [];
 
   constructor(private readonly responder: (input: RequestInput) => unknown) {
-    super(config);
+    super(config, { requestScheduler: { secdefInfoMinStartIntervalMs: 0 } });
   }
 
   protected override sendRequest<T>(input: RequestInput): Promise<T> {
@@ -189,7 +189,7 @@ void test("multi-month derivative discovery serializes priming and bounds secdef
     expiries.map(({ expiration }) => expiration),
     ["2026-08-21", "2026-09-18"]
   );
-  assert.equal(maximumInfo, 2);
+  assert.equal(maximumInfo, 1);
   const firstSeptember = observed.findIndex((entry) => entry.includes(":SEP26"));
   const lastAugust = observed.findLastIndex((entry) => entry.includes(":AUG26"));
   assert.ok(firstSeptember > lastAugust);
