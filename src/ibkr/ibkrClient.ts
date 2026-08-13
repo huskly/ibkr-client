@@ -143,6 +143,7 @@ interface PriceHistoryCandidate {
   symbol: string;
   securityType: PriceHistorySecurityType;
   exchange?: string;
+  supportsSmartOptions: boolean;
 }
 
 /** An optionable underlying resolved and primed in the current IBKR session. */
@@ -267,6 +268,21 @@ function parseRetryAfter(raw: unknown, now: number): number | undefined {
 
 function isUnknownRecord(input: unknown): input is Readonly<Record<string, unknown>> {
   return typeof input === "object" && input !== null && !Array.isArray(input);
+}
+
+function supportsSmartOptions(sections: unknown): boolean {
+  if (!Array.isArray(sections)) return false;
+  return sections.some((section) => {
+    if (!isUnknownRecord(section)) return false;
+    const securityType = section["secType"];
+    const exchange = section["exchange"];
+    return (
+      typeof securityType === "string" &&
+      securityType.trim().toUpperCase() === "OPT" &&
+      typeof exchange === "string" &&
+      exchange.split(";").some((name) => name.trim().toUpperCase() === "SMART")
+    );
+  });
 }
 
 const PRICE_HISTORY_SECURITY_TYPES = new Set<string>([
@@ -479,6 +495,10 @@ export class IbkrClient
   private accountIdPromise?: Promise<string>;
   private readonly optionDiscovery = new Map<string, Promise<OptionDiscoveryResult>>();
   private readonly optionContractResolution = new Map<string, Promise<OptionContract | null>>();
+  private readonly priceHistoryContractResolution = new Map<
+    string,
+    Promise<PriceHistoryContract>
+  >();
   private readonly derivativeDiscovery = new Map<string, Promise<DerivativeContract[]>>();
   private readonly requestScheduler: IbkrRequestScheduler;
   private readonly requestNow: () => number;
@@ -3872,7 +3892,10 @@ export class IbkrClient
     }
     const interval = this.historyInterval(input);
     const period = `${String(interval.days)}d`;
-    const contract = await this.resolvePriceHistoryContract(requestedSymbol, input.contract);
+    const contract =
+      input.contract === undefined
+        ? await this.resolveSymbolPriceHistoryContract(requestedSymbol)
+        : await this.resolvePriceHistoryContract(requestedSymbol, input.contract);
     const request = {
       period,
       ...(input.endDate === undefined ? {} : { startTime: this.historyStartTime(interval.end) }),
@@ -3891,6 +3914,19 @@ export class IbkrClient
       contract,
       request: { requestedSymbol, period, barSize: "1d" },
     };
+  }
+
+  private resolveSymbolPriceHistoryContract(symbol: string): Promise<PriceHistoryContract> {
+    const cached = this.priceHistoryContractResolution.get(symbol);
+    if (cached !== undefined) return cached;
+    const pending = this.resolvePriceHistoryContract(symbol, undefined).catch((error: unknown) => {
+      if (this.priceHistoryContractResolution.get(symbol) === pending) {
+        this.priceHistoryContractResolution.delete(symbol);
+      }
+      throw error;
+    });
+    this.priceHistoryContractResolution.set(symbol, pending);
+    return pending;
   }
 
   private async resolvePriceHistoryContract(
@@ -3920,6 +3956,18 @@ export class IbkrClient
     }
 
     const search = await this.searchSecdef({ symbol: requestedSymbol });
+    const smartOptionConids = new Set(
+      search.flatMap((item): number[] => {
+        const symbol = item.symbol?.trim().toUpperCase();
+        const conid = Number(item.conid);
+        return symbol === requestedSymbol &&
+          Number.isSafeInteger(conid) &&
+          conid > 0 &&
+          supportsSmartOptions(item.sections)
+          ? [conid]
+          : [];
+      })
+    );
     const candidates = search.flatMap((item): PriceHistoryCandidate[] => {
       const symbol = item.symbol?.trim().toUpperCase();
       const conid = Number(item.conid);
@@ -3941,6 +3989,7 @@ export class IbkrClient
             symbol,
             securityType,
             ...(exchange ? { exchange } : {}),
+            supportsSmartOptions: smartOptionConids.has(conid),
           },
         ];
       });
@@ -3958,20 +4007,22 @@ export class IbkrClient
         "CONTRACT_NOT_FOUND"
       );
     }
-    if (uniqueCandidates.length !== 1) {
+    const smartCandidates = uniqueCandidates.filter((candidate) => candidate.supportsSmartOptions);
+    if (smartCandidates.length !== 1) {
       const safeCandidates = uniqueCandidates.map((candidate) => ({
         conid: candidate.conid,
         symbol: candidate.symbol,
         securityType: candidate.securityType,
         exchange: candidate.exchange ?? null,
       }));
+      const isMissing = smartCandidates.length === 0;
       throw new IbkrPriceHistoryContractError(
-        `IBKR price-history contract is ambiguous for ${requestedSymbol}; specify contract.conid`,
-        "CONTRACT_AMBIGUOUS",
+        `IBKR price-history SMART option underlying is ${isMissing ? "missing" : "ambiguous"} for ${requestedSymbol}; specify contract.conid`,
+        isMissing ? "CONTRACT_NOT_FOUND" : "CONTRACT_AMBIGUOUS",
         safeCandidates
       );
     }
-    const candidate = uniqueCandidates[0];
+    const candidate = smartCandidates[0];
     if (candidate === undefined) {
       throw new Error("IBKR price-history resolution lost its selected contract");
     }
@@ -4672,18 +4723,14 @@ export class IbkrClient
       }
       const sections = item["sections"];
       if (!Array.isArray(sections)) return [];
-      const optionSections = sections.flatMap((section) => {
-        if (!isUnknownRecord(section)) return [];
-        const secType = section["secType"];
-        if (typeof secType !== "string" || secType.trim().toUpperCase() !== "OPT") return [];
-        const exchange = section["exchange"];
-        return [{ exchange: typeof exchange === "string" ? exchange : null }];
-      });
-      if (!optionSections.length) return [];
-      const supportsSmart = optionSections.some(
-        ({ exchange }) =>
-          exchange?.split(";").some((name) => name.trim().toUpperCase() === "SMART") ?? false
+      const hasOptions = sections.some(
+        (section) =>
+          isUnknownRecord(section) &&
+          typeof section["secType"] === "string" &&
+          section["secType"].trim().toUpperCase() === "OPT"
       );
+      if (!hasOptions) return [];
+      const supportsSmart = supportsSmartOptions(sections);
       const conid = Number(item["conid"]);
       return Number.isSafeInteger(conid) && conid > 0 ? [{ conid, symbol, supportsSmart }] : [];
     });
