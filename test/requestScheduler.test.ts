@@ -91,6 +91,49 @@ void test("default secdef pacing prevents starts that are too close together", a
   assert.equal(scheduler.metrics.maximumSecdefInfoConcurrent, 1);
 });
 
+void test("secdef pacing arms a wait when the clock reaches the boundary during drain", async () => {
+  const pacingWait = deferred();
+  const sleeps: number[] = [];
+  let firstFinished = false;
+  let clockReadsAfterFirst = 0;
+  let queuedCalls = 0;
+  const scheduler = new IbkrRequestScheduler({
+    secdefInfoMinStartIntervalMs: 250,
+    now: () => {
+      if (!firstFinished) return 0;
+      clockReadsAfterFirst += 1;
+      return clockReadsAfterFirst >= 3 ? 250 : 249;
+    },
+    sleep: (ms) => {
+      sleeps.push(ms);
+      return pacingWait.promise;
+    },
+  });
+
+  const first = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => {
+      firstFinished = true;
+      return "first";
+    }
+  );
+  const queued = scheduler.schedule(
+    { endpoint: "secdef/info", priority: "DISCOVERY", secdefInfo: true },
+    async () => {
+      queuedCalls += 1;
+      return "queued";
+    }
+  );
+
+  assert.equal(await first, "first");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(sleeps, [1]);
+  assert.equal(queuedCalls, 0);
+
+  pacingWait.resolve();
+  assert.equal(await queued, "queued");
+});
+
 void test("configured secdef lane enforces concurrency and minimum start spacing", async () => {
   const gates = Array.from({ length: 7 }, () => deferred());
   let active = 0;

@@ -258,9 +258,10 @@ export class IbkrRequestScheduler {
       return;
     }
     while (this.active < this.maxConcurrent) {
-      const index = this.nextJobIndex();
+      const now = this.now();
+      const index = this.nextJobIndex(now);
       if (index < 0) {
-        this.ensureSecdefInfoPacingWait();
+        this.ensureSecdefInfoPacingWait(now);
         return;
       }
       const [job] = this.queue.splice(index, 1);
@@ -270,14 +271,14 @@ export class IbkrRequestScheduler {
     this.ensureSecdefInfoPacingWait();
   }
 
-  private nextJobIndex(): number {
+  private nextJobIndex(now: number): number {
     let selected = -1;
     for (const [index, job] of this.queue.entries()) {
       if (
         job.priority === "DISCOVERY" &&
         (job.secdefInfo
           ? this.activeSecdefInfo >= this.maxSecdefInfoConcurrent ||
-            this.secdefInfoNextStartAt > this.now()
+            this.secdefInfoNextStartAt > now
           : this.activeDiscovery >= this.maxDiscoveryConcurrent)
       ) {
         continue;
@@ -460,12 +461,12 @@ export class IbkrRequestScheduler {
     });
   }
 
-  private ensureSecdefInfoPacingWait(): void {
+  private ensureSecdefInfoPacingWait(now = this.now()): void {
     if (this.secdefInfoPacingPromise !== undefined) return;
     if (this.activeSecdefInfo >= this.maxSecdefInfoConcurrent) return;
     if (!this.queue.some((job) => job.secdefInfo)) return;
     const target = this.secdefInfoNextStartAt;
-    const delayMs = target - this.now();
+    const delayMs = target - now;
     if (delayMs <= 0) return;
     this.emitTelemetry({
       event: "SECDEF_INFO_PACING",
