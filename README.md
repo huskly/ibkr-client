@@ -94,15 +94,16 @@ validated at runtime. Its broker-neutral account API includes:
 The reusable `IbkrClient` also exposes typed, read-only strategy data:
 
 - `getPriceHistory(...)` returns normalized OHLCV bars and the validated IBKR contract context.
-  A symbol-only request accepts one exact `STK` or `IND` contract. The method rejects an ambiguous
-  result. Use `contract.conid` to select a contract. You can also set `contract.assetClass` and
-  `contract.exchange` as validation constraints. The history request includes the validated
-  exchange. IBKR uses the primary exchange when the exchange parameter is absent.
+  A symbol-only request selects the only exact `STK` or `IND` contract that also has `SMART` option
+  routing. It rejects the result when this rule does not identify one contract. Use `contract.conid`
+  for an exceptional explicit selection.
+  You can also set `contract.assetClass` and `contract.exchange` as validation constraints. The
+  history request includes the validated exchange. IBKR uses the primary exchange when the exchange
+  parameter is absent.
 
 ```ts
 const history = await client.getPriceHistory({
   symbol: "SPX",
-  contract: { conid: 416904, assetClass: "IND", exchange: "CBOE" },
   days: 220,
 });
 console.log(history.contract, history.request, history.bars);
