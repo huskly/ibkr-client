@@ -3828,6 +3828,20 @@ export class IbkrClient
     };
   }
 
+  /**
+   * Resolve a plain symbol to the one contract its quote may describe.
+   *
+   * The tradable underlying is the contract that lists options on SMART - the same evidence the
+   * price-history path uses - so an index root such as `SPX` resolves to the CBOE index. The
+   * first `trsrv/stocks` row is not authoritative: that endpoint is equity-only and returns
+   * foreign listings that share the ticker (`SPX` matches an Australian mining stock), and a
+   * snapshot taken from one of them reports a wrong price under the requested symbol. Stock
+   * search therefore serves only symbols that list no SMART options, and only when it names
+   * exactly one contract.
+   *
+   * A symbol that stays ambiguous resolves to no contract, so `getQuotes` omits it instead of
+   * reporting a plausible wrong price.
+   */
   private async resolveQuoteContract(symbol: string): Promise<QuoteContract | undefined> {
     const osi = parseOsiOptionSymbol(symbol);
     if (osi) {
@@ -3845,40 +3859,83 @@ export class IbkrClient
           }
         : undefined;
     }
-    const instruments = await this.searchInstruments(symbol);
-    const instrument = instruments.find((item) => item.brokerId !== undefined);
-    if (instrument?.brokerId !== undefined) {
-      const conid = parseInt(instrument.brokerId, 10);
-      if (!Number.isNaN(conid)) {
-        return {
-          requestedSymbol: symbol,
-          symbol: instrument.symbol ?? symbol.toUpperCase(),
-          conid,
-          ...(instrument.description !== undefined ? { description: instrument.description } : {}),
-          ...(instrument.exchange !== undefined ? { exchange: instrument.exchange } : {}),
-        };
-      }
-    }
-    // `trsrv/stocks` is equity/ETF-only. Fall back to security-definition search so
-    // non-stock roots (indexes like VIX, futures, etc.) still resolve to a conid.
-    const search = await this.searchSecdef({ symbol: symbol.trim().toUpperCase() });
-    const candidate = search.find(
-      (item) =>
-        item.conid !== undefined &&
-        item.sections?.some((section) => {
-          const secType = section.secType?.trim().toUpperCase();
-          return secType !== undefined && secType !== "" && secType !== "STK";
-        })
-    );
-    if (candidate?.conid === undefined) return undefined;
-    const fallbackConid = Number(candidate.conid);
-    if (!Number.isSafeInteger(fallbackConid) || fallbackConid <= 0) return undefined;
+    const requestedSymbol = symbol.trim().toUpperCase();
+    if (!requestedSymbol) return undefined;
 
+    const search = await this.searchSecdef({ symbol: requestedSymbol });
+    const optionable = this.quoteContractConids(requestedSymbol, search, (item) =>
+      supportsSmartOptions(item.sections)
+    );
+    if (optionable.length > 1) return undefined;
+    const [optionableConid] = optionable;
+    if (optionableConid !== undefined) {
+      return { requestedSymbol: symbol, symbol: requestedSymbol, conid: optionableConid };
+    }
+
+    // `trsrv/stocks` is equity/ETF-only, so a symbol with no SMART options can still be a plain
+    // stock or ETF that the security-definition search does not describe as optionable.
+    const stock = this.uniqueStockQuoteContract(symbol, await this.searchInstruments(symbol));
+    if (stock !== undefined) return stock;
+
+    // Non-stock roots without listed SMART options (indexes, futures) keep resolving from the
+    // security-definition search that is already in hand.
+    const nonStock = this.quoteContractConids(requestedSymbol, search, (item) =>
+      (item.sections ?? []).some((section) => {
+        const secType = section.secType?.trim().toUpperCase();
+        return secType !== undefined && secType !== "" && secType !== "STK";
+      })
+    );
+    if (nonStock.length !== 1) return undefined;
+    const [fallbackConid] = nonStock;
+    if (fallbackConid === undefined) return undefined;
+
+    return { requestedSymbol: symbol, symbol: requestedSymbol, conid: fallbackConid };
+  }
+
+  /** Distinct conids that the security-definition search reports for one exact symbol. */
+  private quoteContractConids(
+    requestedSymbol: string,
+    search: readonly IbkrSecdefSearchResult[],
+    matches: (item: IbkrSecdefSearchResult) => boolean
+  ): number[] {
+    return [
+      ...new Set(
+        search.flatMap((item): number[] => {
+          const conid = this.quoteConid(item.conid);
+          return item.symbol?.trim().toUpperCase() === requestedSymbol &&
+            conid !== undefined &&
+            matches(item)
+            ? [conid]
+            : [];
+        })
+      ),
+    ];
+  }
+
+  /** The one `trsrv/stocks` contract for a symbol, or nothing when the search is ambiguous. */
+  private uniqueStockQuoteContract(
+    symbol: string,
+    instruments: readonly BrokerInstrument[]
+  ): QuoteContract | undefined {
+    const listed = instruments.filter((item) => this.quoteConid(item.brokerId) !== undefined);
+    if (new Set(listed.map((item) => item.brokerId)).size !== 1) return undefined;
+    const instrument = listed[0];
+    const conid = this.quoteConid(instrument?.brokerId);
+    if (instrument === undefined || conid === undefined) return undefined;
     return {
       requestedSymbol: symbol,
-      symbol: candidate.symbol ?? symbol.trim().toUpperCase(),
-      conid: fallbackConid,
+      symbol: instrument.symbol ?? symbol.trim().toUpperCase(),
+      conid,
+      ...(instrument.description !== undefined ? { description: instrument.description } : {}),
+      ...(instrument.exchange !== undefined ? { exchange: instrument.exchange } : {}),
     };
+  }
+
+  /** A positive IBKR contract id, or nothing when the provider value is not usable. */
+  private quoteConid(value: unknown): number | undefined {
+    if (typeof value !== "number" && typeof value !== "string") return undefined;
+    const conid = Number(value);
+    return Number.isSafeInteger(conid) && conid > 0 ? conid : undefined;
   }
 
   /** Return complete daily history with the exact validated IBKR request context. */
