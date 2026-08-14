@@ -2739,6 +2739,111 @@ void test("index symbol getQuotes falls back to secdef/search when trsrv/stocks 
   );
 });
 
+void test("index getQuotes prefers the SMART option underlying over a foreign stock listing", async () => {
+  // `trsrv/stocks` answers SPX with unrelated foreign equities that share the ticker. Only the
+  // CBOE index lists SPX options on SMART, so the snapshot must use that contract.
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") {
+      return {
+        SPX: [
+          {
+            name: "SPECTRUM METALS LTD",
+            assetClass: "STK",
+            contracts: [{ conid: 141513582, exchange: "VALUE", isUS: false }],
+          },
+          {
+            name: "SPIRAX GROUP PLC",
+            assetClass: "STK",
+            contracts: [{ conid: 196961203, exchange: "LSE", isUS: false }],
+          },
+        ],
+      };
+    }
+    if (input.path === "iserver/secdef/search") {
+      return [
+        {
+          conid: "416904",
+          symbol: "SPX",
+          sections: [
+            { secType: "IND", exchange: "CBOE;" },
+            { secType: "OPT", exchange: "SMART;CBOE;IBUSOPT" },
+          ],
+        },
+        { conid: "141513582", symbol: "SPX", sections: [{ secType: "STK", exchange: "VALUE;" }] },
+        {
+          conid: "196961203",
+          symbol: "SPX",
+          sections: [
+            { secType: "STK" },
+            // A SMART CFD is not a SMART option, so this listing stays a stock candidate.
+            { secType: "CFD", exchange: "SMART" },
+          ],
+        },
+      ];
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return snapshots === 1 ? [] : [{ conid: 416904, "31": "7785.87", "55": "SPX" }];
+    }
+    if (input.path === "iserver/marketdata/history") return { data: [] };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const quotes = await client.getQuotes([{ symbol: "SPX" }]);
+  assert.equal(quotes["SPX"]?.quote.lastPrice, 7785.87);
+  assert.equal(
+    client.calls.every(
+      (call) => call.path !== "iserver/marketdata/snapshot" || call.params?.["conids"] === "416904"
+    ),
+    true
+  );
+});
+
+void test("two SMART option underlyings for one symbol fail closed without a snapshot", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") return {};
+    if (input.path === "iserver/secdef/search") {
+      return [
+        { conid: "1", symbol: "DUP", sections: [{ secType: "OPT", exchange: "SMART;CBOE" }] },
+        { conid: "2", symbol: "DUP", sections: [{ secType: "OPT", exchange: "SMART;ISE" }] },
+      ];
+    }
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return [];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  assert.deepEqual(await client.getQuotes([{ symbol: "DUP" }]), {});
+  assert.equal(snapshots, 0);
+});
+
+void test("an ambiguous stock search without SMART options fails closed", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "trsrv/stocks") {
+      return {
+        AMB: [
+          { name: "FIRST AMB", assetClass: "STK", contracts: [{ conid: 11, exchange: "LSE" }] },
+          { name: "SECOND AMB", assetClass: "STK", contracts: [{ conid: 22, exchange: "ASX" }] },
+        ],
+      };
+    }
+    if (input.path === "iserver/secdef/search") return [];
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return [];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  assert.deepEqual(await client.getQuotes([{ symbol: "AMB" }]), {});
+  assert.equal(snapshots, 0);
+});
+
 void test("unresolvable non-stock symbol fails closed without a snapshot", async () => {
   let snapshots = 0;
   const client = new FakeIbkrClient((input) => {

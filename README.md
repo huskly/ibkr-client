@@ -81,7 +81,14 @@ validated at runtime. Its broker-neutral account API includes:
   change. Without history, `reference.description`, `quote.lastPrice`, `quote.highPrice`,
   `quote.lowPrice`, `quote.netChange`, `quote.netPercentChange`, and `quote.totalVolume` are present
   only if contract or snapshot data supplies them. `quote.closePrice` and `quote.openPrice` are not
-  present. Non-stock roots such as indexes use `iserver/secdef/search` if `trsrv/stocks` is empty.
+  present. A symbol request resolves the contract from `iserver/secdef/search`, and it selects the
+  one contract of that exact symbol which lists options on SMART. This is the same rule the
+  price-history path uses, so an index root such as `SPX` reads the CBOE index. `trsrv/stocks` is
+  equity-only and answers index roots with unrelated foreign stocks that share the ticker, so stock
+  search serves only symbols with no SMART options, and only if it names exactly one contract.
+  Non-stock roots without SMART options, such as futures roots, use the same
+  `iserver/secdef/search` result. A symbol that stays ambiguous gets no contract, and `getQuotes()`
+  omits it instead of reporting a wrong price under the requested symbol.
   That search validates the HTTP payload at one shared boundary. A success array continues. An IBKR
   error object throws `IbkrBrokerResponseError` and keeps the broker detail. Any other shape fails
   closed as a malformed response. An error object is never an empty successful search.
