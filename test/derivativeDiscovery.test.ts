@@ -506,3 +506,160 @@ void test("secdef/search error object rejects option underlying discovery with a
     }
   );
 });
+
+// Real `iserver/secdef/search` shape for `UNH`: IBKR answers with both the NYSE common stock and
+// a Canadian Depositary Receipt on Toronto whose options trade on `CDE`. `NFLX` answers the same
+// way. Only the US listing routes options on SMART (#671).
+const unhSearch = [
+  {
+    conid: "13272",
+    symbol: "UNH",
+    companyHeader: "UNITEDHEALTH GROUP INC - NYSE",
+    description: "NYSE",
+    sections: [
+      { secType: "STK" },
+      {
+        secType: "OPT",
+        months: "AUG26;SEP26",
+        exchange:
+          "SMART;AMEX;BATS;BOX;CBOE;CBOE2;EDGX;EMERALD;GEMINI;IBUSOPT;ISE;MEMX;MERCURY;MIAX;NASDAQBX;NASDAQOM;PEARL;PHLX;PSE;SAPPHIRE",
+      },
+    ],
+  },
+  {
+    conid: "575959888",
+    symbol: "UNH",
+    companyHeader: "UNITEDHEALTH GROUP INC - CDR - TSE",
+    description: "TSE",
+    sections: [{ secType: "STK" }, { secType: "OPT", months: "AUG26;SEP26", exchange: "CDE" }],
+  },
+];
+
+const unhSep375Definitions = [
+  {
+    conid: 800000001,
+    symbol: "UNH",
+    secType: "OPT",
+    exchange: "SMART",
+    right: "P",
+    strike: 375,
+    maturityDate: "20260904",
+    multiplier: "100",
+    tradingClass: "UNH",
+  },
+];
+
+void test("a ticker that also names a depositary receipt resolves through the SMART listing", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") return unhSearch;
+    if (input.path === "iserver/secdef/strikes") return { call: [], put: [365, 375] };
+    if (input.path === "iserver/secdef/info") return unhSep375Definitions;
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const contract = await client.resolveDerivativeContract({
+    assetClass: "OPT",
+    underlying: "UNH",
+    expiration: "2026-09-04",
+    strike: 375,
+    right: "P",
+  });
+
+  assert.equal(contract.conid, 800000001);
+  // Discovery must ask about the NYSE listing, never the Toronto depositary receipt.
+  const strikes = client.calls.find(({ path }) => path === "iserver/secdef/strikes");
+  assert.equal(strikes?.params?.["conid"], "13272");
+  const info = client.calls.find(({ path }) => path === "iserver/secdef/info");
+  assert.equal(info?.params?.["conid"], "13272");
+});
+
+void test("two SMART listings stay ambiguous and name the competing listings", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [
+        unhSearch[0],
+        {
+          conid: "999000111",
+          symbol: "UNH",
+          companyHeader: "UNITEDHEALTH GROUP INC - ARCA",
+          sections: [{ secType: "OPT", months: "SEP26", exchange: "SMART;ARCA" }],
+        },
+      ];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    client.resolveDerivativeContract({
+      assetClass: "OPT",
+      underlying: "UNH",
+      expiration: "2026-09-04",
+      strike: 375,
+      right: "P",
+    }),
+    (error: Error) => {
+      // Fail closed, and tell the operator exactly which listings competed so a `tradingClass`
+      // or an explicit conid can settle it.
+      assert.match(error.message, /IBKR OPT underlying identity is ambiguous for UNH/);
+      assert.match(error.message, /conid 13272 UNITEDHEALTH GROUP INC - NYSE/);
+      assert.match(error.message, /conid 999000111 UNITEDHEALTH GROUP INC - ARCA \(SMART\/ARCA\)/);
+      return true;
+    }
+  );
+});
+
+void test("a symbol with no listing of the requested asset class is reported as missing", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [{ conid: "13272", symbol: "UNH", sections: [{ secType: "STK" }] }];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    client.resolveDerivativeContract({
+      assetClass: "OPT",
+      underlying: "UNH",
+      expiration: "2026-09-04",
+      strike: 375,
+      right: "P",
+    }),
+    // A missing listing names nothing, because there is no competing listing to report.
+    /IBKR OPT underlying identity is missing for UNH$/
+  );
+});
+
+void test("one listing repeated across sections is one candidate, not an ambiguity", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") {
+      return [
+        {
+          conid: "13272",
+          symbol: "UNH",
+          sections: [
+            { secType: "OPT", months: "AUG26", exchange: "SMART;CBOE" },
+            { secType: "OPT", months: "SEP26", exchange: "SMART;PHLX" },
+          ],
+        },
+        // A different ticker is a different instrument and is never a candidate.
+        {
+          conid: "424242",
+          symbol: "UNHX",
+          sections: [{ secType: "OPT", months: "SEP26", exchange: "SMART" }],
+        },
+      ];
+    }
+    if (input.path === "iserver/secdef/strikes") return { call: [], put: [375] };
+    if (input.path === "iserver/secdef/info") return unhSep375Definitions;
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const contract = await client.resolveDerivativeContract({
+    assetClass: "OPT",
+    underlying: "UNH",
+    expiration: "2026-09-04",
+    strike: 375,
+    right: "P",
+  });
+  assert.equal(contract.conid, 800000001);
+});

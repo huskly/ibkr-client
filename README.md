@@ -191,8 +191,16 @@ derivative operations to the smaller account-oriented `BrokerClient`:
   underlying contract, such as the September NQ future behind an August QN3 option.
 
 Both `OPT` and `FOP` use the stateful `secdef/search` -> `secdef/strikes` -> `secdef/info`
-sequence. FOP discovery derives a unique exchange such as CME from the search result when the
-caller does not provide one. Index-option callers can select a venue explicitly, such as SMART.
+sequence. Derivative discovery selects the underlying listing the same way option discovery and
+quote resolution do: it keeps each distinct listing of the exact symbol that has a section of the
+requested asset class, then narrows to the listing which routes options on `SMART`. This is
+necessary because IBKR answers a plain ticker with every listing that carries it, and a ticker
+such as `UNH` or `NFLX` also names a Canadian Depositary Receipt on Toronto whose options trade on
+`CDE`. A symbol that keeps more than one listing after this rule fails closed, and the error names
+each competing listing with its conid, description, and exchanges, so a caller can supply an
+explicit `tradingClass`. Series that never advertise `SMART`, such as futures options, keep every
+listing and stay unaffected. FOP discovery derives a unique exchange such as CME from the search
+result when the caller does not provide one. Index-option callers can select a venue explicitly, such as SMART.
 Every `secdef/search` consumer shares the same response validation: success arrays, typed broker
 errors for documented error objects, and fail-closed malformed-response errors.
 

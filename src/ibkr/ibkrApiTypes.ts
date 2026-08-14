@@ -273,6 +273,9 @@ export interface IbkrMarketDataHistoryResponse {
 export interface IbkrSecdefSearchResult {
   conid?: number | string;
   symbol?: string;
+  /** IBKR's own label for the listing, such as `UNITEDHEALTH GROUP INC - CDR - TSE`. */
+  companyHeader?: string;
+  description?: string;
   sections?: { secType?: string; months?: string; exchange?: string }[];
 }
 

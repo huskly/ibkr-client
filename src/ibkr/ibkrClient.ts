@@ -270,6 +270,106 @@ function isUnknownRecord(input: unknown): input is Readonly<Record<string, unkno
   return typeof input === "object" && input !== null && !Array.isArray(input);
 }
 
+/**
+ * One listing that `iserver/secdef/search` reports under an exact symbol (#671).
+ *
+ * IBKR answers a plain ticker with every listing that carries it, and several of them can be
+ * genuinely different instruments. `UNH` returns both the NYSE common stock and a Canadian
+ * Depositary Receipt on Toronto whose options trade on `CDE`; `NFLX` returns the same pair. Only
+ * one of them owns the SMART-routed US options a caller means, so a resolver that demands a
+ * single search row refuses these symbols outright.
+ */
+interface SecdefListing {
+  readonly conid: number;
+  readonly symbol: string;
+  /** Whether this listing routes options on SMART, which identifies the US listing. */
+  readonly supportsSmartOptions: boolean;
+  /** Exchanges the matched asset-class section names, for an operator-readable refusal. */
+  readonly exchanges: readonly string[];
+  /** IBKR's own description of the listing, when it supplies one. */
+  readonly description: string | null;
+}
+
+/**
+ * Every distinct listing of an exact symbol that carries a section of one asset class (#671).
+ *
+ * Duplicate conids collapse: IBKR repeats a listing across sections, and the same contract twice
+ * is one candidate, not an ambiguity. A symbol that does not match exactly is never a candidate,
+ * because a foreign listing under a different ticker is a different instrument.
+ */
+function secdefListings(
+  search: readonly IbkrSecdefSearchResult[],
+  symbol: string,
+  assetClass: string
+): SecdefListing[] {
+  const requested = symbol.trim().toUpperCase();
+  const wanted = assetClass.trim().toUpperCase();
+  const listings = search.flatMap((item): SecdefListing[] => {
+    if (item.symbol?.trim().toUpperCase() !== requested) return [];
+    const conid = Number(item.conid);
+    if (!Number.isSafeInteger(conid) || conid <= 0) return [];
+    const sections = Array.isArray(item.sections) ? item.sections : [];
+    const matched = sections.filter((section) => section.secType?.trim().toUpperCase() === wanted);
+    if (matched.length === 0) return [];
+    const exchanges = [
+      ...new Set(
+        matched.flatMap((section) =>
+          (section.exchange ?? "")
+            .split(";")
+            .map((name) => name.trim().toUpperCase())
+            .filter(Boolean)
+        )
+      ),
+    ];
+    // An empty label is no label, so it falls through to the next source rather than becoming
+    // an empty description in an operator message.
+    const labels = [item.companyHeader?.trim(), item.description?.trim()];
+    const description = labels.find((label) => label !== undefined && label !== "") ?? null;
+    return [
+      {
+        conid,
+        symbol: requested,
+        supportsSmartOptions: supportsSmartOptions(sections),
+        exchanges,
+        description,
+      },
+    ];
+  });
+  return [...new Map(listings.map((listing) => [listing.conid, listing])).values()];
+}
+
+/** The listings that route options on SMART, which is the US listing a caller means. */
+function smartOptionListings(listings: readonly SecdefListing[]): SecdefListing[] {
+  return listings.filter((listing) => listing.supportsSmartOptions);
+}
+
+/**
+ * Narrow listings to the SMART-routed one, keeping them all when none routes SMART (#671).
+ *
+ * The fallback matters: futures options and other non-SMART series never advertise SMART, and
+ * dropping every candidate there would refuse a symbol that is not ambiguous at all.
+ */
+function preferSmartOptionListings(listings: readonly SecdefListing[]): SecdefListing[] {
+  const smart = smartOptionListings(listings);
+  return smart.length > 0 ? smart : [...listings];
+}
+
+/**
+ * Name the competing listings so an operator can pass an explicit `tradingClass` or conid (#671).
+ *
+ * It reports the conid, IBKR's description, and the exchanges of each listing. It carries no
+ * account identity, no order identity, and no credentials.
+ */
+function describeSecdefListings(listings: readonly SecdefListing[]): string {
+  return listings
+    .map((listing) => {
+      const venue = listing.exchanges.length > 0 ? listing.exchanges.join("/") : "no exchange";
+      const description = listing.description === null ? "" : ` ${listing.description}`;
+      return `conid ${String(listing.conid)}${description} (${venue})`;
+    })
+    .join("; ");
+}
+
 function supportsSmartOptions(sections: unknown): boolean {
   if (!Array.isArray(sections)) return false;
   return sections.some((section) => {
@@ -3863,13 +3963,11 @@ export class IbkrClient
     if (!requestedSymbol) return undefined;
 
     const search = await this.searchSecdef({ symbol: requestedSymbol });
-    const optionable = this.quoteContractConids(requestedSymbol, search, (item) =>
-      supportsSmartOptions(item.sections)
-    );
+    const optionable = smartOptionListings(secdefListings(search, requestedSymbol, "OPT"));
     if (optionable.length > 1) return undefined;
-    const [optionableConid] = optionable;
-    if (optionableConid !== undefined) {
-      return { requestedSymbol: symbol, symbol: requestedSymbol, conid: optionableConid };
+    const [optionableListing] = optionable;
+    if (optionableListing !== undefined) {
+      return { requestedSymbol: symbol, symbol: requestedSymbol, conid: optionableListing.conid };
     }
 
     // `trsrv/stocks` is equity/ETF-only, so a symbol with no SMART options can still be a plain
@@ -4014,16 +4112,9 @@ export class IbkrClient
 
     const search = await this.searchSecdef({ symbol: requestedSymbol });
     const smartOptionConids = new Set(
-      search.flatMap((item): number[] => {
-        const symbol = item.symbol?.trim().toUpperCase();
-        const conid = Number(item.conid);
-        return symbol === requestedSymbol &&
-          Number.isSafeInteger(conid) &&
-          conid > 0 &&
-          supportsSmartOptions(item.sections)
-          ? [conid]
-          : [];
-      })
+      smartOptionListings(secdefListings(search, requestedSymbol, "OPT")).map(
+        (listing) => listing.conid
+      )
     );
     const candidates = search.flatMap((item): PriceHistoryCandidate[] => {
       const symbol = item.symbol?.trim().toUpperCase();
@@ -4592,28 +4683,22 @@ export class IbkrClient
         params: { symbol: underlying, ...(assetClass === "FOP" ? { secType: "FUT" } : {}) },
       })
     );
-    const candidates = search.filter(
-      (candidate) =>
-        candidate.conid !== undefined &&
-        candidate.symbol?.trim().toUpperCase() === underlying &&
-        candidate.sections?.some((section) => section.secType?.toUpperCase() === assetClass)
-    );
+    // Order placement resolves its legs through here, so it narrows the search exactly as option
+    // discovery does. Without it a ticker that also names a Canadian Depositary Receipt, such as
+    // `UNH` or `NFLX`, refuses every order for a listing it does not trade (#671).
+    const listings = secdefListings(search, underlying, assetClass);
+    const candidates = preferSmartOptionListings(listings);
     if (candidates.length !== 1) {
+      const detail =
+        candidates.length > 1 ? `; competing listings: ${describeSecdefListings(candidates)}` : "";
       throw new Error(
-        `IBKR ${assetClass} underlying identity is ${candidates.length ? "ambiguous" : "missing"} for ${underlying}`
+        `IBKR ${assetClass} underlying identity is ${candidates.length ? "ambiguous" : "missing"} for ${underlying}${detail}`
       );
     }
     const candidate = candidates[0];
     if (!candidate) throw new Error(`IBKR lost the selected underlying for ${underlying}`);
-    const conid = Number(candidate.conid);
-    if (!Number.isSafeInteger(conid) || conid <= 0) {
-      throw new Error(`IBKR returned an invalid underlying contract id for ${underlying}`);
-    }
-    const section = candidate.sections?.find((item) => item.secType?.toUpperCase() === assetClass);
-    const exchanges = (section?.exchange ?? "")
-      .split(";")
-      .map((value) => value.trim().toUpperCase())
-      .filter(Boolean);
+    const conid = candidate.conid;
+    const exchanges = candidate.exchanges;
     if (requestedExchange && !exchanges.includes(requestedExchange)) {
       throw new Error(
         `IBKR does not list ${underlying} ${assetClass} discovery on ${requestedExchange}`
@@ -4772,39 +4857,18 @@ export class IbkrClient
         signal
       )
     );
-    const candidates = search.flatMap((item) => {
-      if (!isUnknownRecord(item)) return [];
-      const candidateSymbol = item["symbol"];
-      if (typeof candidateSymbol !== "string" || candidateSymbol.trim().toUpperCase() !== symbol) {
-        return [];
-      }
-      const sections = item["sections"];
-      if (!Array.isArray(sections)) return [];
-      const hasOptions = sections.some(
-        (section) =>
-          isUnknownRecord(section) &&
-          typeof section["secType"] === "string" &&
-          section["secType"].trim().toUpperCase() === "OPT"
-      );
-      if (!hasOptions) return [];
-      const supportsSmart = supportsSmartOptions(sections);
-      const conid = Number(item["conid"]);
-      return Number.isSafeInteger(conid) && conid > 0 ? [{ conid, symbol, supportsSmart }] : [];
-    });
-    const unique = [
-      ...new Map(candidates.map((candidate) => [candidate.conid, candidate])).values(),
-    ];
-    const smart = unique.filter((candidate) => candidate.supportsSmart);
-    const eligible = smart.length > 0 ? smart : unique;
+    const eligible = preferSmartOptionListings(secdefListings(search, symbol, "OPT"));
     if (eligible.length !== 1) {
+      const detail =
+        eligible.length > 1 ? `; competing listings: ${describeSecdefListings(eligible)}` : "";
       throw new Error(
-        `IBKR option underlying identity is ${eligible.length ? "ambiguous" : "missing"} for ${symbol}`
+        `IBKR option underlying identity is ${eligible.length ? "ambiguous" : "missing"} for ${symbol}${detail}`
       );
     }
     const [underlying] = eligible;
     if (underlying === undefined)
       throw new Error(`IBKR lost the selected underlying for ${symbol}`);
-    return underlying;
+    return { conid: underlying.conid, symbol };
   }
 
   private async loadOptionContracts(
