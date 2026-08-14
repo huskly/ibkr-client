@@ -154,6 +154,13 @@ recovery.
   does not identify one listing.
 - `getOptionContract(conid)` maps a broker conid back to durable OSI identity.
 
+The `timestamp` on an option quote is IBKR's `_updated` snapshot field. It is a last-change time,
+not an observation time: it moves only when IBKR's record for that contract changes, and a repeated
+request does not move it. A quiet contract on a `live` feed can hold one `timestamp` for several
+minutes while it reports the same bid and ask. Measure how recently you read the market with your
+own receipt time, and use `availability` to find a feed that is `frozen` or delayed. The age of
+`timestamp` measures how long the contract did not reprice, and it has no upper bound.
+
 The option discovery methods submit at most eight `secdef/info` definitions at one time. The next
 chunk starts only after the current chunk succeeds. Multi-month expiry discovery completes one month
 before it starts the next month. A terminal failure cancels queued definitions that belong to that
