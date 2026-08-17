@@ -525,6 +525,19 @@ function normalizeStrikeRange(range?: OptionStrikeRange): OptionStrikeRange | un
   return range;
 }
 
+/** The first pair of contracts that share one durable symbol, or `null` when every one is unique. */
+function firstSymbolCollision(
+  contracts: readonly OptionContract[]
+): { symbol: string; first: OptionContract; second: OptionContract } | null {
+  const bySymbol = new Map<string, OptionContract>();
+  for (const contract of contracts) {
+    const seen = bySymbol.get(contract.symbol);
+    if (seen !== undefined) return { symbol: contract.symbol, first: seen, second: contract };
+    bySymbol.set(contract.symbol, contract);
+  }
+  return null;
+}
+
 /** One stable memo token for a band, so a narrowed result cannot answer a wider request. */
 function strikeRangeKey(range?: OptionStrikeRange): string {
   if (range === undefined) return "*";
@@ -543,20 +556,31 @@ function strikeInRange(strike: number, range?: OptionStrikeRange): boolean {
 /** A cached record is used only when it is a whole contract and it answers the key it is filed under. */
 function isCachedOptionContract(value: unknown, key: OptionDefinitionCacheKey): boolean {
   if (!isUnknownRecord(value)) return false;
-  const { conid, symbol, underlying, expiry, strike, right } = value;
-  return (
-    typeof conid === "number" &&
-    Number.isFinite(conid) &&
-    typeof symbol === "string" &&
-    symbol.length > 0 &&
-    typeof underlying === "string" &&
-    underlying.length > 0 &&
-    typeof expiry === "string" &&
-    expiry.length > 0 &&
-    typeof strike === "number" &&
-    strike === key.strike &&
-    right === key.right
-  );
+  const { conid, symbol, underlying, tradingClass, expiry, strike, right } = value;
+  if (
+    typeof conid !== "number" ||
+    !Number.isFinite(conid) ||
+    typeof symbol !== "string" ||
+    symbol.length === 0 ||
+    typeof underlying !== "string" ||
+    underlying.length === 0 ||
+    typeof expiry !== "string" ||
+    expiry.length === 0 ||
+    typeof strike !== "number" ||
+    strike !== key.strike ||
+    right !== key.right
+  ) {
+    return false;
+  }
+  // The class is part of identity, so a record that predates it, or that lost it, is a miss and
+  // the broker answers. `null` is a stated absence and is accepted; `undefined` is a record shape
+  // this version does not recognize.
+  if (tradingClass !== null && (typeof tradingClass !== "string" || tradingClass.length === 0)) {
+    return false;
+  }
+  // A record whose symbol does not carry its own root is not the identity it claims to be.
+  const parsed = parseOsiOptionSymbol(symbol);
+  return parsed !== null && parsed.root === (tradingClass ?? underlying);
 }
 
 export interface OptionDiscoveryOptions {
@@ -4025,11 +4049,17 @@ export class IbkrClient
   private async resolveQuoteContract(symbol: string): Promise<QuoteContract | undefined> {
     const osi = parseOsiOptionSymbol(symbol);
     if (osi) {
+      // The OSI root names the listing class, which is the underlying only for a single-class
+      // name. It is passed as both: as the search root, which is all IBKR can be asked for here,
+      // and as the class, so a month that lists more than one class resolves to the one this
+      // symbol names instead of refusing. A caller holding a class-rooted symbol whose class IBKR
+      // does not resolve as a root must quote by `brokerId` (the conid) instead.
       const option = await this.resolveOptionContract({
-        symbol: osi.underlying,
+        symbol: osi.root,
         expiry: osi.expiry,
         strike: osi.strike,
         right: osi.right,
+        tradingClass: osi.root,
       });
       return option
         ? {
@@ -4583,8 +4613,11 @@ export class IbkrClient
     if (!raw) return null;
     return normalizeOptionContract({
       conid: raw.conid ?? conid,
-      // `symbol` is absent on this payload; IBKR names the underlying `ticker`/`undSym` here.
-      symbol: raw.symbol ?? raw.ticker ?? raw.undSym,
+      // `symbol` is absent on this payload; IBKR names the underlying `undSym` and the listing
+      // class `ticker` here. `ticker` is the class - `SPXW` where `undSym` is `SPX` - so it is the
+      // trading class, and the underlying falls back to it for a single-listing name.
+      symbol: raw.undSym ?? raw.symbol ?? raw.ticker,
+      tradingClass: raw.tradingClass ?? raw.ticker,
       maturityDate: raw.expiry ?? raw.maturityDate,
       right: raw.putOrCall,
       strike: raw.strike,
@@ -4594,7 +4627,13 @@ export class IbkrClient
   private resolveOptionContract(input: OptionQuoteRequest): Promise<OptionContract | null> {
     const underlying = input.symbol.trim().toUpperCase();
     const month = monthCode(input.expiry);
-    const key = [underlying, input.expiry, String(input.strike), input.right].join(":");
+    const key = [
+      underlying,
+      input.expiry,
+      String(input.strike),
+      input.right,
+      input.tradingClass?.trim().toUpperCase() ?? "*",
+    ].join(":");
     let pending = this.optionContractResolution.get(key);
     if (!pending) {
       pending = this.loadExactOptionContract({ ...input, symbol: underlying }, month).then(
@@ -4647,6 +4686,7 @@ export class IbkrClient
       }
       const rawConid = raw["conid"];
       const rawSymbol = raw["symbol"];
+      const rawTradingClass = raw["tradingClass"];
       const rawMaturityDate = raw["maturityDate"];
       const rawRight = raw["right"];
       const rawStrike = raw["strike"];
@@ -4656,6 +4696,7 @@ export class IbkrClient
         contract = normalizeOptionContract({
           conid: typeof rawConid === "number" ? rawConid : undefined,
           symbol: typeof rawSymbol === "string" ? rawSymbol : underlying.symbol,
+          tradingClass: typeof rawTradingClass === "string" ? rawTradingClass : undefined,
           maturityDate: typeof rawMaturityDate === "string" ? rawMaturityDate : undefined,
           right: typeof rawRight === "string" ? rawRight : undefined,
           strike:
@@ -4672,11 +4713,22 @@ export class IbkrClient
         malformed = true;
         continue;
       }
+      const requestedClass = input.tradingClass?.trim().toUpperCase();
+      // A caller reaches this with either a plain underlying or an OSI root that names a class, so
+      // both are accepted as the requested root. The class filter below is what keeps two listings
+      // apart; without it, an underlying that lists two classes still refuses rather than guesses.
+      const rootMatches =
+        contract.underlying === input.symbol || contract.tradingClass === input.symbol;
       if (
-        contract.underlying === input.symbol &&
+        rootMatches &&
         contract.expiry === input.expiry &&
         contract.right === input.right &&
-        contract.strike === input.strike
+        contract.strike === input.strike &&
+        (requestedClass === undefined ||
+          contract.tradingClass === requestedClass ||
+          // A contract with no stated class answers a request for its own underlying root, which
+          // is what a single-listing name asks for. It never answers for another class.
+          (contract.tradingClass === null && contract.underlying === requestedClass))
       ) {
         matches.push(contract);
       }
@@ -4686,8 +4738,18 @@ export class IbkrClient
     }
     const unique = [...new Map(matches.map((contract) => [contract.conid, contract])).values()];
     if (unique.length > 1) {
+      // Two listing classes of one underlying are two products, and the caller must say which one
+      // it means. Two contracts inside one class are a collision the client cannot resolve; both
+      // stay a refusal rather than a guess.
+      const classes = [
+        ...new Set(unique.map((contract) => contract.tradingClass ?? contract.underlying)),
+      ].sort();
+      const detail =
+        classes.length > 1
+          ? `; listing classes: ${classes.join(", ")}. Name one in 'tradingClass'.`
+          : "";
       throw new Error(
-        `IBKR returned ambiguous option definitions for ${input.symbol} ${input.expiry}`
+        `IBKR returned ambiguous option definitions for ${input.symbol} ${input.expiry}${detail}`
       );
     }
     return unique[0] ?? null;
@@ -5100,6 +5162,8 @@ export class IbkrClient
               contract = normalizeOptionContract({
                 conid: typeof raw["conid"] === "number" ? raw["conid"] : undefined,
                 symbol: typeof raw["symbol"] === "string" ? raw["symbol"] : underlying.symbol,
+                tradingClass:
+                  typeof raw["tradingClass"] === "string" ? raw["tradingClass"] : undefined,
                 maturityDate:
                   typeof raw["maturityDate"] === "string" ? raw["maturityDate"] : undefined,
                 right: typeof raw["right"] === "string" ? raw["right"] : undefined,
@@ -5155,6 +5219,17 @@ export class IbkrClient
           `IBKR returned no usable option definitions for ${symbol} ${month} (${String(
             malformedDefinitionCount
           )} malformed)`
+        );
+      }
+      // Two conids that reach one durable symbol are two contracts a consumer cannot tell apart.
+      // This is the check that lets an unstated listing class fall back to the underlying root: a
+      // fallback that would hide a collision is refused instead of returned.
+      const collision = firstSymbolCollision(unique);
+      if (collision !== null) {
+        throw new Error(
+          `IBKR returned two option contracts with one identity for ${symbol} ${month}: ` +
+            `${collision.symbol} is conid ${String(collision.first.conid)} and ` +
+            `${String(collision.second.conid)}. IBKR stated no listing class for at least one.`
         );
       }
       return { contracts: unique, malformedDefinitionCount };

@@ -316,7 +316,9 @@ export interface IbkrSecdefResponse {
 export interface IbkrSecdefContract {
   conid?: number;
   symbol?: string;
+  /** The listing class, for example `SPXW`. IBKR names the underlying `undSym` on this payload. */
   ticker?: string;
+  tradingClass?: string;
   undSym?: string;
   expiry?: string;
   maturityDate?: string;

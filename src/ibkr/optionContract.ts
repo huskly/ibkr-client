@@ -3,7 +3,14 @@ import type { OptionContract, OptionRight } from "../types.js";
 const OSI_PATTERN = /^(.{6})(\d{6})([CP])(\d{8})$/;
 
 export interface ParsedOsiOptionSymbol {
-  underlying: string;
+  /**
+   * The OSI root, which names the option listing class and not always the underlying.
+   *
+   * `SPXW  260917P07000000` has the root `SPXW` and the underlying `SPX`. An OSI symbol carries no
+   * underlying of its own, so a caller that needs one must keep it beside the symbol, or quote the
+   * contract by its broker conid.
+   */
+  root: string;
   expiry: string;
   strike: number;
   right: OptionRight;
@@ -54,7 +61,7 @@ export function parseOsiOptionSymbol(symbol: string): ParsedOsiOptionSymbol | nu
   if (right !== "C" && right !== "P") return null;
   try {
     return {
-      underlying: root.trim(),
+      root: root.trim(),
       expiry: calendarDate(`20${date}`),
       right,
       strike: Number(strike) / 1000,
@@ -67,6 +74,11 @@ export function parseOsiOptionSymbol(symbol: string): ParsedOsiOptionSymbol | nu
 export function normalizeOptionContract(input: {
   conid?: number | undefined;
   symbol?: string | undefined;
+  /**
+   * The IBKR listing class, for example `SPX` or `SPXW`. It names the deliverable, and two classes
+   * of one underlying quote the same expiry, strike, and right as different products.
+   */
+  tradingClass?: string | undefined;
   maturityDate?: string | undefined;
   right?: string | undefined;
   strike?: string | number | undefined;
@@ -86,14 +98,26 @@ export function normalizeOptionContract(input: {
     return null;
   }
   const expiry = calendarDate(input.maturityDate);
+  // The OSI root is the listing class, not the underlying. `SPX` and `SPXW` are two deliverables
+  // with different settlement, and a root of `SPX` for both makes one identity out of two
+  // contracts.
+  //
+  // A definition that states no class is not given one. `tradingClass` stays `null`, which says
+  // the broker did not report it, and the root falls back to the underlying so the contract stays
+  // usable. Discovery then refuses any month in which two conids reach the same symbol, so an
+  // unstated class can never hide a collision behind a plausible identity.
+  const tradingClass = input.tradingClass?.trim().toUpperCase();
+  const underlying = input.symbol.trim().toUpperCase();
+  const stated = tradingClass !== undefined && tradingClass.length > 0 ? tradingClass : null;
   return {
     conid: input.conid,
-    underlying: input.symbol.trim().toUpperCase(),
+    underlying,
+    tradingClass: stated,
     expiry,
     strike,
     right,
     symbol: formatOsiOptionSymbol({
-      underlying: input.symbol,
+      underlying: stated ?? underlying,
       expiry,
       strike,
       right,

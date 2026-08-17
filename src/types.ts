@@ -620,7 +620,12 @@ export type ActiveDerivativeOrderUncertainty =
 
 export interface ActiveDerivativeOptionIdentity {
   symbol: string;
-  underlying: string;
+  /**
+   * The OSI root read from the order description, which names the listing class rather than the
+   * underlying. `SPXW` is the root of an SPX weekly. The description carries no underlying, so
+   * none is reported rather than guessed.
+   */
+  root: string;
   expiry: string;
   strike: number;
   right: OptionRight;
@@ -784,6 +789,19 @@ export interface OptionContract {
   conid: number;
   symbol: string;
   underlying: string;
+  /**
+   * The IBKR listing class of this contract, for example `SPX` or `SPXW`, or `null` when IBKR
+   * stated none.
+   *
+   * Two classes of one underlying list the same expiry, strike, and right as different products
+   * with different settlement, so the class is part of contract identity and is the root of
+   * {@link symbol}.
+   *
+   * `null` means the broker did not report a class, not that the contract has none. The root of
+   * {@link symbol} then falls back to {@link underlying}, and discovery refuses a month in which
+   * two conids reach one symbol, so an unstated class cannot hide a collision.
+   */
+  tradingClass: string | null;
   expiry: string;
   strike: number;
   right: OptionRight;
@@ -898,6 +916,14 @@ export interface OptionQuoteRequest {
   expiry: string;
   strike: number;
   right: OptionRight;
+  /**
+   * The IBKR listing class to resolve, for example `SPXW`.
+   *
+   * Required only where one underlying lists the same expiry, strike, and right in more than one
+   * class. Omitted, the request accepts any class and refuses when more than one answers, because
+   * two classes are two products with different settlement.
+   */
+  tradingClass?: string;
 }
 
 /** Safe phase timing for option discovery. It never contains account or credential data. */

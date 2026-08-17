@@ -143,8 +143,9 @@ void test("public option definition cache carries identity only", () => {
     contracts: [
       {
         conid: 777,
-        symbol: "SPX   260918P07000000",
+        symbol: "SPXW  260918P07000000",
         underlying: "SPX",
+        tradingClass: "SPXW",
         expiry: "2026-09-18",
         strike: 7000,
         right: "P",
