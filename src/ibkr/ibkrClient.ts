@@ -63,8 +63,12 @@ import type {
   OptionChainSnapshotField,
   OptionChainSnapshotQuote,
   OptionContract,
+  OptionDefinitionCache,
+  OptionDefinitionCacheEntry,
+  OptionDefinitionCacheKey,
   OptionDiscoveryTelemetry,
   OptionMarketQuote,
+  OptionStrikeRange,
   OptionQuoteRequest,
   OptionRight,
   OrderWarning,
@@ -496,9 +500,76 @@ interface IbkrRequestInput {
 type IbkrRequestRetryPolicy = "SAFE_READ" | "PRICE_HISTORY" | "SINGLE_ATTEMPT";
 
 /** Controls one option-chain or expiry-discovery operation. */
+/** The optional count fields of {@link OptionDiscoveryTelemetry}; each defaults to 0. */
+type OptionDiscoveryTelemetryCount =
+  | "definitionRequestCount"
+  | "snapshotBatchCount"
+  | "listedStrikeCount"
+  | "selectedStrikeCount"
+  | "cachedDefinitionCount";
+
+/** Refuse a band that is not made of finite numbers, or that can never select a strike. */
+function normalizeStrikeRange(range?: OptionStrikeRange): OptionStrikeRange | undefined {
+  if (range === undefined) return undefined;
+  const { min, max } = range;
+  if (min !== undefined && !Number.isFinite(min)) {
+    throw new TypeError("Option strike range min must be a finite number");
+  }
+  if (max !== undefined && !Number.isFinite(max)) {
+    throw new TypeError("Option strike range max must be a finite number");
+  }
+  if (min !== undefined && max !== undefined && min > max) {
+    throw new TypeError(`Option strike range min ${String(min)} is above max ${String(max)}`);
+  }
+  if (min === undefined && max === undefined) return undefined;
+  return range;
+}
+
+/** One stable memo token for a band, so a narrowed result cannot answer a wider request. */
+function strikeRangeKey(range?: OptionStrikeRange): string {
+  if (range === undefined) return "*";
+  return `${String(range.min ?? "-inf")}..${String(range.max ?? "+inf")}`;
+}
+
+/** A strike that IBKR does not report as a finite number is never selected. */
+function strikeInRange(strike: number, range?: OptionStrikeRange): boolean {
+  if (!Number.isFinite(strike)) return false;
+  if (range === undefined) return true;
+  if (range.min !== undefined && strike < range.min) return false;
+  if (range.max !== undefined && strike > range.max) return false;
+  return true;
+}
+
+/** A cached record is used only when it is a whole contract and it answers the key it is filed under. */
+function isCachedOptionContract(value: unknown, key: OptionDefinitionCacheKey): boolean {
+  if (!isUnknownRecord(value)) return false;
+  const { conid, symbol, underlying, expiry, strike, right } = value;
+  return (
+    typeof conid === "number" &&
+    Number.isFinite(conid) &&
+    typeof symbol === "string" &&
+    symbol.length > 0 &&
+    typeof underlying === "string" &&
+    underlying.length > 0 &&
+    typeof expiry === "string" &&
+    expiry.length > 0 &&
+    typeof strike === "number" &&
+    strike === key.strike &&
+    right === key.right
+  );
+}
+
 export interface OptionDiscoveryOptions {
   /** Stop this operation without canceling work owned by another caller. */
   signal?: AbortSignal;
+  /**
+   * Resolve only the strikes inside this inclusive band.
+   *
+   * One security definition costs one paced `secdef/info` request, so a month that lists thousands
+   * of strikes costs thousands of requests. A caller that can name the strikes it uses makes the
+   * cost proportional to that band. Without a band every listed strike is resolved.
+   */
+  strikeRange?: OptionStrikeRange;
 }
 
 export interface IbkrClientOptions {
@@ -508,6 +579,13 @@ export interface IbkrClientOptions {
   onPriceHistoryTelemetry?: (event: PriceHistoryTelemetry) => void;
   /** Receive safe timing and request counts for option-discovery phases. */
   onOptionDiscoveryTelemetry?: (event: OptionDiscoveryTelemetry) => void;
+  /**
+   * Supply resolved security definitions so discovery does not request them again.
+   *
+   * The cache is an accelerator and never an authority: a rejected read, a malformed record, or a
+   * misaligned result is treated as a miss, and the broker then answers.
+   */
+  optionDefinitionCache?: OptionDefinitionCache;
 }
 
 /** Safe HTTP response evidence retained when the raw transport rejects a request. */
@@ -594,6 +672,7 @@ export class IbkrClient
   private initPromise?: Promise<void>;
   private accountIdPromise?: Promise<string>;
   private readonly optionDiscovery = new Map<string, Promise<OptionDiscoveryResult>>();
+  private readonly optionDefinitionCache: OptionDefinitionCache | undefined;
   private readonly optionContractResolution = new Map<string, Promise<OptionContract | null>>();
   private readonly priceHistoryContractResolution = new Map<
     string,
@@ -611,6 +690,7 @@ export class IbkrClient
     this.raw = new RawIbkrClientCtor(config);
     this.onPriceHistoryTelemetry = options.onPriceHistoryTelemetry ?? (() => undefined);
     this.onOptionDiscoveryTelemetry = options.onOptionDiscoveryTelemetry ?? (() => undefined);
+    this.optionDefinitionCache = options.optionDefinitionCache;
     this.onRequestTelemetry = options.onRequestTelemetry ?? (() => undefined);
     const schedulerOptions = options.requestScheduler;
     this.requestNow = schedulerOptions?.now ?? (() => this.now());
@@ -4816,16 +4896,24 @@ export class IbkrClient
     options: OptionDiscoveryOptions = {}
   ): Promise<OptionDiscoveryResult> {
     const normalized = symbol.trim().toUpperCase();
+    const strikeRange = normalizeStrikeRange(options.strikeRange);
+    const discoveryOptions = {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(strikeRange === undefined ? {} : { strikeRange }),
+    };
     if (options.signal !== undefined) {
-      return this.loadOptionContracts(normalized, month, right, options.signal);
+      return this.loadOptionContracts(normalized, month, right, discoveryOptions);
     }
-    const key = `${normalized}:${month}:${right ?? "*"}`;
+    // The band belongs in the memo key. A narrowed result holds only part of the month, so it must
+    // never answer a later request for a different band.
+    const bandKey = strikeRangeKey(strikeRange);
+    const key = `${normalized}:${month}:${right ?? "*"}:${bandKey}`;
     const cached = this.optionDiscovery.get(key);
     if (cached !== undefined) return cached;
 
     let discovery: Promise<OptionDiscoveryResult> | undefined;
     if (right !== undefined) {
-      const complete = this.optionDiscovery.get(`${normalized}:${month}:*`);
+      const complete = this.optionDiscovery.get(`${normalized}:${month}:*:${bandKey}`);
       if (complete !== undefined) {
         discovery = complete.then((result) => ({
           contracts: result.contracts.filter((contract) => contract.right === right),
@@ -4833,7 +4921,7 @@ export class IbkrClient
         }));
       }
     }
-    discovery ??= this.loadOptionContracts(normalized, month, right);
+    discovery ??= this.loadOptionContracts(normalized, month, right, discoveryOptions);
     const pending = discovery.catch((error: unknown) => {
       if (this.optionDiscovery.get(key) === pending) this.optionDiscovery.delete(key);
       throw error;
@@ -4875,8 +4963,10 @@ export class IbkrClient
     symbol: string,
     month: string,
     right?: OptionRight,
-    callerSignal?: AbortSignal
+    options: { signal?: AbortSignal; strikeRange?: OptionStrikeRange } = {}
   ): Promise<OptionDiscoveryResult> {
+    const callerSignal = options.signal;
+    const strikeRange = normalizeStrikeRange(options.strikeRange);
     const operation = new AbortController();
     const abortFromCaller = (): void => {
       operation.abort(callerSignal?.reason);
@@ -4885,7 +4975,7 @@ export class IbkrClient
     else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
 
     try {
-      const { underlying, requests } = await this.withSecdefPriming(async () => {
+      const { underlying, requests, listedStrikeCount } = await this.withSecdefPriming(async () => {
         const searchStarted = this.requestNow();
         const selectedUnderlying = await this.loadOptionUnderlying(symbol, operation.signal);
         this.emitOptionDiscoveryTelemetry({
@@ -4894,8 +4984,6 @@ export class IbkrClient
           month,
           right: right ?? null,
           durationMs: this.elapsedSince(searchStarted),
-          definitionRequestCount: 0,
-          snapshotBatchCount: 0,
         });
 
         const strikesStarted = this.requestNow();
@@ -4906,15 +4994,7 @@ export class IbkrClient
           },
           operation.signal
         );
-        this.emitOptionDiscoveryTelemetry({
-          phase: "STRIKES",
-          symbol,
-          month,
-          right: right ?? null,
-          durationMs: this.elapsedSince(strikesStarted),
-          definitionRequestCount: 0,
-          snapshotBatchCount: 0,
-        });
+        const strikesDurationMs = this.elapsedSince(strikesStarted);
         const callStrikes = strikes.call ?? [];
         const putStrikes = strikes.put ?? [];
         if (callStrikes.length === 0 && putStrikes.length === 0) {
@@ -4922,7 +5002,7 @@ export class IbkrClient
             `IBKR returned empty option strikes for ${symbol} ${month} after secdef/search priming`
           );
         }
-        const definitionRequests = [
+        const listed = [
           ...(right === undefined || right === "C"
             ? callStrikes.map((strike) => ({ strike, right: "C" as const }))
             : []),
@@ -4930,13 +5010,51 @@ export class IbkrClient
             ? putStrikes.map((strike) => ({ strike, right: "P" as const }))
             : []),
         ];
-        return { underlying: selectedUnderlying, requests: definitionRequests };
+        // One security definition costs one paced request, so the band is applied here, before any
+        // definition is requested. Applying it later would keep the full cost of the month.
+        const selected = listed.filter(({ strike }) => strikeInRange(strike, strikeRange));
+        this.emitOptionDiscoveryTelemetry({
+          phase: "STRIKES",
+          symbol,
+          month,
+          right: right ?? null,
+          durationMs: strikesDurationMs,
+          listedStrikeCount: listed.length,
+          selectedStrikeCount: selected.length,
+        });
+        // A band that keeps nothing is a caller mistake, not an empty chain. Reporting it as an
+        // empty result would look like an unlisted expiry.
+        if (listed.length > 0 && selected.length === 0) {
+          throw new Error(
+            `IBKR option strike range [${String(strikeRange?.min ?? "-inf")}, ` +
+              `${String(strikeRange?.max ?? "+inf")}] selected none of the ` +
+              `${String(listed.length)} listed strikes for ${symbol} ${month}`
+          );
+        }
+        return {
+          underlying: selectedUnderlying,
+          requests: selected,
+          listedStrikeCount: listed.length,
+        };
       });
 
       const definitionsStarted = this.requestNow();
       const contracts: OptionContract[] = [];
       let malformedDefinitionCount = 0;
-      for (const batch of chunks(requests, OPTION_SECDEF_INFO_BATCH_SIZE)) {
+      const cached = await this.readCachedOptionDefinitions(underlying.conid, month, requests);
+      const pending: { strike: number; right: OptionRight }[] = [];
+      let cachedDefinitionCount = 0;
+      for (const [position, request] of requests.entries()) {
+        const hit = cached[position];
+        if (hit === undefined || hit === null) {
+          pending.push(request);
+          continue;
+        }
+        cachedDefinitionCount += 1;
+        contracts.push(...hit);
+      }
+      const resolved: OptionDefinitionCacheEntry[] = [];
+      for (const batch of chunks(pending, OPTION_SECDEF_INFO_BATCH_SIZE)) {
         let responses: unknown[];
         try {
           responses = await Promise.all(
@@ -4964,13 +5082,17 @@ export class IbkrClient
           throw error;
         }
 
-        for (const response of responses) {
+        for (const [position, response] of responses.entries()) {
           if (!Array.isArray(response)) {
             throw new Error(`IBKR returned malformed option definitions for ${symbol} ${month}`);
           }
+          const request = batch[position];
+          const resolvedForRequest: OptionContract[] = [];
+          let requestHadMalformedRecord = false;
           for (const raw of response) {
             if (!isUnknownRecord(raw)) {
               malformedDefinitionCount += 1;
+              requestHadMalformedRecord = true;
               continue;
             }
             let contract: OptionContract | null;
@@ -4988,21 +5110,42 @@ export class IbkrClient
               });
             } catch {
               malformedDefinitionCount += 1;
+              requestHadMalformedRecord = true;
               continue;
             }
-            if (contract) contracts.push(contract);
-            else malformedDefinitionCount += 1;
+            if (contract) resolvedForRequest.push(contract);
+            else {
+              malformedDefinitionCount += 1;
+              requestHadMalformedRecord = true;
+            }
+          }
+          contracts.push(...resolvedForRequest);
+          // A partial answer is never stored. A later run must ask the broker again rather than
+          // read a record that already lost contracts.
+          if (request !== undefined && !requestHadMalformedRecord) {
+            resolved.push({
+              key: {
+                underlyingConid: underlying.conid,
+                month,
+                right: request.right,
+                strike: request.strike,
+              },
+              contracts: resolvedForRequest,
+            });
           }
         }
       }
+      await this.writeCachedOptionDefinitions(resolved);
       this.emitOptionDiscoveryTelemetry({
         phase: "DEFINITIONS",
         symbol,
         month,
         right: right ?? null,
         durationMs: this.elapsedSince(definitionsStarted),
-        definitionRequestCount: requests.length,
-        snapshotBatchCount: 0,
+        definitionRequestCount: pending.length,
+        listedStrikeCount,
+        selectedStrikeCount: requests.length,
+        cachedDefinitionCount,
       });
       if (requests.length === 0) return { contracts: [], malformedDefinitionCount: 0 };
 
@@ -5017,6 +5160,59 @@ export class IbkrClient
       return { contracts: unique, malformedDefinitionCount };
     } finally {
       callerSignal?.removeEventListener("abort", abortFromCaller);
+    }
+  }
+
+  /**
+   * Read one definition for each request from the cache, aligned by index.
+   *
+   * Every failure mode collapses to "miss": no cache, a rejected read, a misaligned result, or a
+   * record that is not a valid contract for the key it answers. The broker is then asked, so a bad
+   * cache costs time and never changes an answer.
+   */
+  private async readCachedOptionDefinitions(
+    underlyingConid: number,
+    month: string,
+    requests: readonly { strike: number; right: OptionRight }[]
+  ): Promise<readonly (readonly OptionContract[] | null)[]> {
+    const cache = this.optionDefinitionCache;
+    if (cache === undefined || requests.length === 0) return requests.map(() => null);
+    const keys: OptionDefinitionCacheKey[] = requests.map(({ strike, right }) => ({
+      underlyingConid,
+      month,
+      right,
+      strike,
+    }));
+    // The result is treated as untrusted data, not as the declared type. An implementation that
+    // returns the wrong shape must degrade to a miss, never to a fabricated contract.
+    let answer: unknown;
+    try {
+      answer = await cache.get(keys);
+    } catch {
+      return requests.map(() => null);
+    }
+    if (!Array.isArray(answer) || answer.length !== keys.length) return requests.map(() => null);
+    const records: readonly unknown[] = answer;
+    return keys.map((key, position) => {
+      const record = records[position];
+      if (record === null || record === undefined) return null;
+      if (!Array.isArray(record)) return null;
+      const cachedContracts: readonly unknown[] = record;
+      if (!cachedContracts.every((contract) => isCachedOptionContract(contract, key))) return null;
+      return cachedContracts as readonly OptionContract[];
+    });
+  }
+
+  /** Store resolved definitions. A store failure is never fatal: the identity came from IBKR. */
+  private async writeCachedOptionDefinitions(
+    entries: readonly OptionDefinitionCacheEntry[]
+  ): Promise<void> {
+    const cache = this.optionDefinitionCache;
+    if (cache === undefined || entries.length === 0) return;
+    try {
+      await cache.set(entries);
+    } catch {
+      // A cache is an accelerator. Discovery already holds the broker answer.
     }
   }
 
@@ -5188,10 +5384,18 @@ export class IbkrClient
     return Math.max(0, this.requestNow() - startedAt);
   }
 
-  private emitOptionDiscoveryTelemetry(event: Omit<OptionDiscoveryTelemetry, "event">): void {
+  private emitOptionDiscoveryTelemetry(
+    event: Omit<OptionDiscoveryTelemetry, "event" | OptionDiscoveryTelemetryCount> &
+      Partial<Pick<OptionDiscoveryTelemetry, OptionDiscoveryTelemetryCount>>
+  ): void {
     try {
       const result = this.onOptionDiscoveryTelemetry({
         event: "OPTION_DISCOVERY_PHASE",
+        definitionRequestCount: 0,
+        snapshotBatchCount: 0,
+        listedStrikeCount: 0,
+        selectedStrikeCount: 0,
+        cachedDefinitionCount: 0,
         ...event,
       });
       void Promise.resolve(result).catch(() => undefined);

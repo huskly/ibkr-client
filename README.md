@@ -177,6 +177,52 @@ applies to definition discovery and market-data snapshots. An aborted operation 
 signal reason when it is an `Error`. A non-error custom reason is retained as the `cause` of an
 `Error`. An `AbortController` without a custom reason uses the standard `AbortError`.
 
+#### Bounded strike discovery
+
+One security definition costs one paced `secdef/info` request, so the cost of discovery is
+proportional to the number of strikes the month lists. A broad index lists thousands of strikes, and
+a caller usually uses only a small band of them. Give `strikeRange` to resolve only that band:
+
+```ts
+const chain = await client.getOptionChain("SPX", expiry, "P", {
+  strikeRange: { min: 6800, max: 7400 },
+});
+```
+
+- Both bounds are inclusive, and each bound is optional. An open bound keeps every strike on that
+  side. No `strikeRange` keeps every listed strike, which is the behavior of earlier versions.
+- A bound that is not a finite number, and a `min` above the `max`, are refused with a `TypeError`
+  before any request.
+- A band that keeps none of the listed strikes fails with an error. It does not report an empty
+  chain, because an empty chain looks like an unlisted expiry.
+- Discovery memoizes each band separately, so a narrow result can never answer a request for a
+  different band.
+- The `STRIKES` and `DEFINITIONS` telemetry phases report `listedStrikeCount` and
+  `selectedStrikeCount`, so you can measure what the band removed.
+
+#### Security-definition cache
+
+A security definition is identity: conid, symbol, underlying, expiry, strike, and right. It holds no
+price, no greek, and no availability, and it does not change for a listed contract. Give an
+`optionDefinitionCache` to keep those definitions between runs and remove their requests:
+
+```ts
+const client = new IbkrClient(config, {
+  optionDefinitionCache: {
+    get: (keys) => store.read(keys), // aligned to `keys` by index; `null` is a miss
+    set: (entries) => store.write(entries),
+  },
+});
+```
+
+- The key is the underlying conid, the month token, the right, and the strike.
+- An empty array is a hit that records a strike IBKR does not list. `null` is a miss.
+- The cache is an accelerator, never an authority. A rejected read, a result of the wrong length, or
+  a record that is not a whole contract for its key is treated as a miss, and the broker answers.
+- A partial or malformed broker answer is never stored.
+- A failed write never fails discovery.
+- The `DEFINITIONS` telemetry phase reports `cachedDefinitionCount` beside `definitionRequestCount`.
+
 ### Broker-neutral derivative discovery
 
 `IbkrClient` implements the capability-specific `DerivativeDiscoveryClient` without adding

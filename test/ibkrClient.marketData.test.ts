@@ -450,6 +450,9 @@ void test("exact-expiry option discovery filters the unused right and emits safe
       durationMs: 0,
       definitionRequestCount: 0,
       snapshotBatchCount: 0,
+      listedStrikeCount: 0,
+      selectedStrikeCount: 0,
+      cachedDefinitionCount: 0,
     },
     {
       event: "OPTION_DISCOVERY_PHASE",
@@ -460,6 +463,9 @@ void test("exact-expiry option discovery filters the unused right and emits safe
       durationMs: 0,
       definitionRequestCount: 0,
       snapshotBatchCount: 0,
+      listedStrikeCount: 2,
+      selectedStrikeCount: 2,
+      cachedDefinitionCount: 0,
     },
     {
       event: "OPTION_DISCOVERY_PHASE",
@@ -470,6 +476,9 @@ void test("exact-expiry option discovery filters the unused right and emits safe
       durationMs: 0,
       definitionRequestCount: 2,
       snapshotBatchCount: 0,
+      listedStrikeCount: 2,
+      selectedStrikeCount: 2,
+      cachedDefinitionCount: 0,
     },
     {
       event: "OPTION_DISCOVERY_PHASE",
@@ -480,6 +489,9 @@ void test("exact-expiry option discovery filters the unused right and emits safe
       durationMs: 0,
       definitionRequestCount: 0,
       snapshotBatchCount: 1,
+      listedStrikeCount: 0,
+      selectedStrikeCount: 0,
+      cachedDefinitionCount: 0,
     },
   ]);
 });

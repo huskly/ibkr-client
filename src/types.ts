@@ -910,6 +910,62 @@ export interface OptionDiscoveryTelemetry {
   durationMs: number;
   definitionRequestCount: number;
   snapshotBatchCount: number;
+  /** Strikes the month lists, before {@link OptionStrikeRange} removes any. */
+  listedStrikeCount: number;
+  /** Strikes kept after {@link OptionStrikeRange}. Equal to the listed count when no range applies. */
+  selectedStrikeCount: number;
+  /** Definitions an {@link OptionDefinitionCache} supplied, so no request was made for them. */
+  cachedDefinitionCount: number;
+}
+
+/**
+ * An inclusive strike band for one discovery operation. A caller that knows which strikes it can
+ * use supplies this band, because a security definition costs one paced `secdef/info` request for
+ * each strike, and a broad-index month lists thousands of strikes.
+ *
+ * A bound that is not a finite number is refused. An empty object selects every listed strike.
+ */
+export interface OptionStrikeRange {
+  /** Lowest strike to resolve, inclusive. */
+  min?: number;
+  /** Highest strike to resolve, inclusive. */
+  max?: number;
+}
+
+/** The identity of one security definition. It holds no price and no greek. */
+export interface OptionDefinitionCacheKey {
+  underlyingConid: number;
+  /** IBKR month token, for example `AUG26`. */
+  month: string;
+  right: OptionRight;
+  strike: number;
+}
+
+/** One cache record: the contracts IBKR returned for one {@link OptionDefinitionCacheKey}. */
+export interface OptionDefinitionCacheEntry {
+  key: OptionDefinitionCacheKey;
+  contracts: readonly OptionContract[];
+}
+
+/**
+ * A store for resolved option security definitions.
+ *
+ * A definition is identity only: conid, symbol, underlying, expiry, strike, and right. It holds no
+ * price, no greek, and no availability, so a cached record can never reach a pricing decision.
+ *
+ * The cache is an accelerator, never an authority. The client treats a rejected promise, a
+ * malformed record, and a length mismatch the same as a miss, and it then asks the broker.
+ */
+export interface OptionDefinitionCache {
+  /**
+   * Read the cached contracts for each key. The result is aligned to `keys` by index. `null` at one
+   * index is a miss; an empty array is a hit that records a strike IBKR does not list.
+   */
+  get(
+    keys: readonly OptionDefinitionCacheKey[]
+  ): Promise<readonly (readonly OptionContract[] | null)[]>;
+  /** Store the contracts the broker resolved. A rejected promise is logged by the caller, not fatal. */
+  set(entries: readonly OptionDefinitionCacheEntry[]): Promise<void>;
 }
 
 /**
