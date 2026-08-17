@@ -10,12 +10,17 @@ import {
   type BrokerQuoteOptions,
   type BrokerQuoteRequest,
   type IbkrClient,
+  type IbkrClientOptions,
   type IbkrHttpErrorResponse,
   type IbkrRequestSchedulerOptions,
   type IbkrRequestTelemetry,
   type OptionChainSnapshot,
+  type OptionDefinitionCache,
+  type OptionDefinitionCacheEntry,
+  type OptionDefinitionCacheKey,
   type OptionDiscoveryOptions,
   type OptionDiscoveryTelemetry,
+  type OptionStrikeRange,
   type OptionChainSnapshotDiagnostics,
   type OptionChainSnapshotField,
   type OptionChainSnapshotQuote,
@@ -97,10 +102,13 @@ void test("public request pacing types expose safe effective rate data", () => {
   assert.equal(telemetry.effectiveMinStartIntervalMs, 250);
 });
 
-void test("public option discovery options expose standard abort signals", () => {
+void test("public option discovery options expose standard abort signals and a strike band", () => {
   const controller = new AbortController();
-  const options: OptionDiscoveryOptions = { signal: controller.signal };
+  const range: OptionStrikeRange = { min: 6800, max: 7400 };
+  const options: OptionDiscoveryOptions = { signal: controller.signal, strikeRange: range };
   assert.equal(options.signal, controller.signal);
+  assert.equal(options.strikeRange?.min, 6800);
+  assert.equal(options.strikeRange?.max, 7400);
 });
 
 void test("public option telemetry exposes safe phase counts", () => {
@@ -113,8 +121,45 @@ void test("public option telemetry exposes safe phase counts", () => {
     durationMs: 20,
     definitionRequestCount: 4,
     snapshotBatchCount: 0,
+    listedStrikeCount: 900,
+    selectedStrikeCount: 40,
+    cachedDefinitionCount: 36,
   };
   assert.equal(telemetry.definitionRequestCount, 4);
+  assert.equal(telemetry.listedStrikeCount, 900);
+  assert.equal(telemetry.selectedStrikeCount, 40);
+  assert.equal(telemetry.cachedDefinitionCount, 36);
+});
+
+void test("public option definition cache carries identity only", () => {
+  const key: OptionDefinitionCacheKey = {
+    underlyingConid: 416904,
+    month: "SEP26",
+    right: "P",
+    strike: 7000,
+  };
+  const entry: OptionDefinitionCacheEntry = {
+    key,
+    contracts: [
+      {
+        conid: 777,
+        symbol: "SPX   260918P07000000",
+        underlying: "SPX",
+        expiry: "2026-09-18",
+        strike: 7000,
+        right: "P",
+      },
+    ],
+  };
+  const cache: OptionDefinitionCache = {
+    get: (keys) => Promise.resolve(keys.map(() => null)),
+    set: () => Promise.resolve(),
+  };
+  const clientOptions: IbkrClientOptions = { optionDefinitionCache: cache };
+
+  assert.equal(entry.contracts[0]?.conid, 777);
+  assert.equal(clientOptions.optionDefinitionCache, cache);
+  assert.ok(!Object.keys(entry.contracts[0] ?? {}).includes("bid"));
 });
 
 void test("public account balance types expose margin snapshots", () => {
