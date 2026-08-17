@@ -6133,6 +6133,14 @@ export class IbkrClient
     return Number.isFinite(parsed) ? parsed : undefined;
   }
 
+  /**
+   * Read IBKR's `_updated` snapshot field as an ISO instant.
+   *
+   * `_updated` is a last-change time, not an observation time: it moves only when IBKR's record
+   * for the contract changes, and a repeated request does not move it. A quiet option on a live
+   * feed can hold one value for several minutes while it reports the same bid and ask, so a
+   * consumer must not read the age of this value as the age of its own reading.
+   */
   private snapshotTimestamp(snapshot: IbkrMarketDataSnapshot): string | null {
     const updated = this.snapshotNumber(snapshot, "_updated");
     if (updated === undefined) return null;
