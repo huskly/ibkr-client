@@ -97,7 +97,7 @@ void test("lists a typed active single option and preserves lifecycle evidence",
         quantity: 3,
         option: {
           symbol: "SPY   260821C00600000",
-          underlying: "SPY",
+          root: "SPY",
           expiry: "2026-08-21",
           strike: 600,
           right: "C",

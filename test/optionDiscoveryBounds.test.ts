@@ -300,3 +300,54 @@ void test("a malformed broker answer is never stored", async () => {
     [100]
   );
 });
+
+void test("a cached record without a listing class is a miss, not an identity", async () => {
+  // The shape version 1.4 wrote. It cannot state which listing it is, so the broker answers.
+  const stale = {
+    conid: 91_000,
+    symbol: "SPX   260918P00100000",
+    underlying: "SPX",
+    expiry: "2026-09-18",
+    strike: 100,
+    right: "P",
+  };
+  const cache = {
+    get: (keys: readonly OptionDefinitionCacheKey[]) => Promise.resolve(keys.map(() => [stale])),
+    set: () => Promise.resolve(),
+  } as unknown as OptionDefinitionCache;
+  const client = new FakeIbkrClient(chainResponder, { optionDefinitionCache: cache });
+
+  await client.getOptionChainSnapshot("SPX", "2026-09-18", "P", { strikeRange: { max: 200 } });
+
+  assert.deepEqual(definitionRequests(client), [100, 200]);
+});
+
+void test("a cached record whose symbol does not carry its own root is a miss", async () => {
+  const inconsistent = { ...contract(100), tradingClass: "SPXW" };
+  const cache: OptionDefinitionCache = {
+    get: (keys) => Promise.resolve(keys.map(() => [inconsistent])),
+    set: () => Promise.resolve(),
+  };
+  const client = new FakeIbkrClient(chainResponder, { optionDefinitionCache: cache });
+
+  await client.getOptionChainSnapshot("SPX", "2026-09-18", "P", { strikeRange: { max: 200 } });
+
+  assert.deepEqual(
+    definitionRequests(client),
+    [100, 200],
+    "a symbol rooted on SPX cannot belong to the SPXW class"
+  );
+});
+
+void test("a cached record that states no class is used when its root is the underlying", async () => {
+  const classless = { ...contract(200), tradingClass: null };
+  const cache: OptionDefinitionCache = {
+    get: (keys) => Promise.resolve(keys.map((key) => (key.strike === 200 ? [classless] : null))),
+    set: () => Promise.resolve(),
+  };
+  const client = new FakeIbkrClient(chainResponder, { optionDefinitionCache: cache });
+
+  await client.getOptionChainSnapshot("SPX", "2026-09-18", "P", { strikeRange: { max: 200 } });
+
+  assert.deepEqual(definitionRequests(client), [100], "the stated absence is a hit");
+});

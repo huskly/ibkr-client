@@ -732,7 +732,8 @@ void test("complete option-chain snapshot keeps a contract when its snapshot nev
       conid: 102,
       symbol: "MSTR  260821C00215000",
       underlying: "MSTR",
-      tradingClass: "MSTR",
+      // The fake payload states no class, so none is invented.
+      tradingClass: null,
       expiry: "2026-08-21",
       strike: 215,
       right: "C",
@@ -1276,7 +1277,7 @@ void test("conid details normalize back to canonical OSI", async () => {
     conid: 893911238,
     symbol: "STRC  260821P00095000",
     underlying: "STRC",
-    tradingClass: "STRC",
+    tradingClass: null,
     expiry: "2026-08-21",
     strike: 95,
     right: "P",

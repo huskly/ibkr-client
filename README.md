@@ -167,8 +167,18 @@ One underlying can list the same expiry, strike, and right in more than one clas
 `SPX` (AM-settled) and `SPXW` (PM-settled) on some dates, and they are different products.
 
 `OptionContract.tradingClass` holds that class, and it is the root of the OSI `symbol`, so `SPXW`
-contracts never collide with `SPX` contracts. `underlying` stays the index for both. An underlying
-with one listing reports its own root as the class, so its identity is unchanged.
+contracts never collide with `SPX` contracts. `underlying` stays the index for both.
+
+A definition that states no class reports `tradingClass: null`, and the OSI root then falls back to
+the underlying. The absence is reported, never filled in with a guess. Discovery refuses any month
+in which two conids reach one symbol, so an unstated class cannot hide a collision behind a
+plausible identity.
+
+An OSI symbol carries a root, not an underlying. `parseOsiOptionSymbol` therefore reports `root`.
+`getQuotes` passes that root to IBKR as both the search root and the listing class, which resolves
+a class-rooted symbol when IBKR lists the class as a searchable root. A caller that holds a
+class-rooted symbol IBKR does not resolve that way should quote by `brokerId` (the conid), which
+skips symbol resolution.
 
 `getOptionQuote` accepts an optional `tradingClass` to name the listing it wants:
 

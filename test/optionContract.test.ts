@@ -11,7 +11,8 @@ void test("OSI symbols preserve root padding, calendar expiry, right, and millis
   });
   assert.equal(symbol, "MSTR  260821C00215000");
   assert.deepEqual(parseOsiOptionSymbol(symbol), {
-    underlying: "MSTR",
+    // The OSI root, which is the listing class and only sometimes the underlying.
+    root: "MSTR",
     expiry: "2026-08-21",
     right: "C",
     strike: 215,
