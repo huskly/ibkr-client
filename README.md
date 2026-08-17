@@ -161,6 +161,31 @@ minutes while it reports the same bid and ask. Measure how recently you read the
 own receipt time, and use `availability` to find a feed that is `frozen` or delayed. The age of
 `timestamp` measures how long the contract did not reprice, and it has no upper bound.
 
+#### Option listing classes
+
+One underlying can list the same expiry, strike, and right in more than one class. SPX quotes
+`SPX` (AM-settled) and `SPXW` (PM-settled) on some dates, and they are different products.
+
+`OptionContract.tradingClass` holds that class, and it is the root of the OSI `symbol`, so `SPXW`
+contracts never collide with `SPX` contracts. `underlying` stays the index for both. An underlying
+with one listing reports its own root as the class, so its identity is unchanged.
+
+`getOptionQuote` accepts an optional `tradingClass` to name the listing it wants:
+
+```ts
+const weekly = await client.getOptionQuote({
+  symbol: "SPX",
+  expiry: "2026-09-17",
+  strike: 7000,
+  right: "P",
+  tradingClass: "SPXW",
+});
+```
+
+Without it, a request that matches more than one class is refused and the message names the classes
+that answered. Two contracts inside one class stay a refusal as well: that is a collision the client
+cannot resolve, and it never guesses.
+
 The option discovery methods submit at most eight `secdef/info` definitions at one time. The next
 chunk starts only after the current chunk succeeds. Multi-month expiry discovery completes one month
 before it starts the next month. A terminal failure cancels queued definitions that belong to that

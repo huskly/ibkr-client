@@ -81,6 +81,7 @@ function contract(strike: number): OptionContract {
     conid: 9000 + strike,
     symbol: `SPX   260918P00${String(strike)}000`,
     underlying: "SPX",
+    tradingClass: "SPX",
     expiry: "2026-09-18",
     strike,
     right: "P",

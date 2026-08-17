@@ -67,6 +67,11 @@ export function parseOsiOptionSymbol(symbol: string): ParsedOsiOptionSymbol | nu
 export function normalizeOptionContract(input: {
   conid?: number | undefined;
   symbol?: string | undefined;
+  /**
+   * The IBKR listing class, for example `SPX` or `SPXW`. It names the deliverable, and two classes
+   * of one underlying quote the same expiry, strike, and right as different products.
+   */
+  tradingClass?: string | undefined;
   maturityDate?: string | undefined;
   right?: string | undefined;
   strike?: string | number | undefined;
@@ -86,14 +91,22 @@ export function normalizeOptionContract(input: {
     return null;
   }
   const expiry = calendarDate(input.maturityDate);
+  // The OSI root is the listing class, not the underlying. `SPX` and `SPXW` are two deliverables
+  // with different settlement, and a root of `SPX` for both makes one identity out of two
+  // contracts. A definition with no class reports its underlying, which is what a
+  // single-listing name lists.
+  const tradingClass = input.tradingClass?.trim().toUpperCase();
+  const underlying = input.symbol.trim().toUpperCase();
+  const root = tradingClass && tradingClass.length > 0 ? tradingClass : underlying;
   return {
     conid: input.conid,
-    underlying: input.symbol.trim().toUpperCase(),
+    underlying,
+    tradingClass: root,
     expiry,
     strike,
     right,
     symbol: formatOsiOptionSymbol({
-      underlying: input.symbol,
+      underlying: root,
       expiry,
       strike,
       right,

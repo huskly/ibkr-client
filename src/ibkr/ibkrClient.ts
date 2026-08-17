@@ -4583,8 +4583,11 @@ export class IbkrClient
     if (!raw) return null;
     return normalizeOptionContract({
       conid: raw.conid ?? conid,
-      // `symbol` is absent on this payload; IBKR names the underlying `ticker`/`undSym` here.
-      symbol: raw.symbol ?? raw.ticker ?? raw.undSym,
+      // `symbol` is absent on this payload; IBKR names the underlying `undSym` and the listing
+      // class `ticker` here. `ticker` is the class - `SPXW` where `undSym` is `SPX` - so it is the
+      // trading class, and the underlying falls back to it for a single-listing name.
+      symbol: raw.undSym ?? raw.symbol ?? raw.ticker,
+      tradingClass: raw.tradingClass ?? raw.ticker,
       maturityDate: raw.expiry ?? raw.maturityDate,
       right: raw.putOrCall,
       strike: raw.strike,
@@ -4594,7 +4597,13 @@ export class IbkrClient
   private resolveOptionContract(input: OptionQuoteRequest): Promise<OptionContract | null> {
     const underlying = input.symbol.trim().toUpperCase();
     const month = monthCode(input.expiry);
-    const key = [underlying, input.expiry, String(input.strike), input.right].join(":");
+    const key = [
+      underlying,
+      input.expiry,
+      String(input.strike),
+      input.right,
+      input.tradingClass?.trim().toUpperCase() ?? "*",
+    ].join(":");
     let pending = this.optionContractResolution.get(key);
     if (!pending) {
       pending = this.loadExactOptionContract({ ...input, symbol: underlying }, month).then(
@@ -4647,6 +4656,7 @@ export class IbkrClient
       }
       const rawConid = raw["conid"];
       const rawSymbol = raw["symbol"];
+      const rawTradingClass = raw["tradingClass"];
       const rawMaturityDate = raw["maturityDate"];
       const rawRight = raw["right"];
       const rawStrike = raw["strike"];
@@ -4656,6 +4666,7 @@ export class IbkrClient
         contract = normalizeOptionContract({
           conid: typeof rawConid === "number" ? rawConid : undefined,
           symbol: typeof rawSymbol === "string" ? rawSymbol : underlying.symbol,
+          tradingClass: typeof rawTradingClass === "string" ? rawTradingClass : undefined,
           maturityDate: typeof rawMaturityDate === "string" ? rawMaturityDate : undefined,
           right: typeof rawRight === "string" ? rawRight : undefined,
           strike:
@@ -4672,11 +4683,13 @@ export class IbkrClient
         malformed = true;
         continue;
       }
+      const requestedClass = input.tradingClass?.trim().toUpperCase();
       if (
         contract.underlying === input.symbol &&
         contract.expiry === input.expiry &&
         contract.right === input.right &&
-        contract.strike === input.strike
+        contract.strike === input.strike &&
+        (requestedClass === undefined || contract.tradingClass === requestedClass)
       ) {
         matches.push(contract);
       }
@@ -4686,8 +4699,16 @@ export class IbkrClient
     }
     const unique = [...new Map(matches.map((contract) => [contract.conid, contract])).values()];
     if (unique.length > 1) {
+      // Two listing classes of one underlying are two products, and the caller must say which one
+      // it means. Two contracts inside one class are a collision the client cannot resolve; both
+      // stay a refusal rather than a guess.
+      const classes = [...new Set(unique.map((contract) => contract.tradingClass))].sort();
+      const detail =
+        classes.length > 1
+          ? `; listing classes: ${classes.join(", ")}. Name one in 'tradingClass'.`
+          : "";
       throw new Error(
-        `IBKR returned ambiguous option definitions for ${input.symbol} ${input.expiry}`
+        `IBKR returned ambiguous option definitions for ${input.symbol} ${input.expiry}${detail}`
       );
     }
     return unique[0] ?? null;
@@ -5100,6 +5121,8 @@ export class IbkrClient
               contract = normalizeOptionContract({
                 conid: typeof raw["conid"] === "number" ? raw["conid"] : undefined,
                 symbol: typeof raw["symbol"] === "string" ? raw["symbol"] : underlying.symbol,
+                tradingClass:
+                  typeof raw["tradingClass"] === "string" ? raw["tradingClass"] : undefined,
                 maturityDate:
                   typeof raw["maturityDate"] === "string" ? raw["maturityDate"] : undefined,
                 right: typeof raw["right"] === "string" ? raw["right"] : undefined,

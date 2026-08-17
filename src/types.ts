@@ -784,6 +784,14 @@ export interface OptionContract {
   conid: number;
   symbol: string;
   underlying: string;
+  /**
+   * The IBKR listing class of this contract, for example `SPX` or `SPXW`.
+   *
+   * Two classes of one underlying list the same expiry, strike, and right as different products
+   * with different settlement, so the class is part of contract identity and is the root of
+   * {@link symbol}. A single-listing underlying reports its own root here.
+   */
+  tradingClass: string;
   expiry: string;
   strike: number;
   right: OptionRight;
@@ -898,6 +906,14 @@ export interface OptionQuoteRequest {
   expiry: string;
   strike: number;
   right: OptionRight;
+  /**
+   * The IBKR listing class to resolve, for example `SPXW`.
+   *
+   * Required only where one underlying lists the same expiry, strike, and right in more than one
+   * class. Omitted, the request accepts any class and refuses when more than one answers, because
+   * two classes are two products with different settlement.
+   */
+  tradingClass?: string;
 }
 
 /** Safe phase timing for option discovery. It never contains account or credential data. */
