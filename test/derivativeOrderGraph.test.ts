@@ -2697,6 +2697,115 @@ test("recovers a filled combo entry and its armed combo STOP from real IBKR fiel
   );
 });
 
+test("recovers a single-leg graph member when IBKR reports a scalar conidex", async () => {
+  const request: DerivativeOrderGraphRequest = {
+    accountId: "U1",
+    rootClientOrderId: "single-42",
+    nodes: [
+      {
+        memberId: "entry",
+        accountId: "U1",
+        contract: contract(1),
+        side: "BUY",
+        quantity: 1,
+        orderType: "LMT",
+        limit: 1.2,
+        tif: "DAY",
+        session: "REGULAR",
+      },
+    ],
+  };
+  const order = {
+    account: "U1",
+    order_id: "10",
+    order_status: "Submitted",
+    cOID: "single-42",
+    conid: 1,
+    conidex: "1",
+    orderType: "LMT",
+    side: "BUY",
+    totalSize: 1,
+    limitPrice: 1.2,
+    tif: "DAY",
+    outsideRTH: false,
+  };
+  const client = new Fake((input) =>
+    input.path === "iserver/account/orders" ? { orders: [order] } : session(input)
+  );
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "single-42" },
+    request
+  );
+
+  assert.equal(result.state, "accepted");
+  assert.equal(result.members[0]?.orderId, "10");
+});
+
+test("recovers an exact combo graph when IBKR reverses the reported leg order", async () => {
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      const [entry, stop] = liveComboSnapshot();
+      const reversedEntry = { ...entry, conidex: "28812380;;;2/1,1/-1" };
+      const reversedStop = { ...stop, conidex: "28812380;;;2/-1,1/1" };
+      return input.params?.["filters"] === "filled"
+        ? { orders: [reversedEntry] }
+        : input.params?.["filters"] === undefined
+          ? { orders: [reversedEntry, reversedStop] }
+          : { orders: [] };
+    }
+    if (input.path === "iserver/account/order/status/980150331") {
+      // The exact endpoint can keep the request order while the active snapshot reverses it.
+      return liveComboStatus();
+    }
+    if (input.path === "iserver/account/trades") return [];
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", orderId: "980150331" },
+    comboStopGraph()
+  );
+
+  assert.equal(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map(({ memberId, orderId, status, parentOrderId }) => [
+      memberId,
+      orderId,
+      status,
+      parentOrderId,
+    ]),
+    [
+      ["entry", "980150331", "FILLED", null],
+      ["stop", "980150332", "WORKING", "980150331"],
+    ]
+  );
+});
+
+test("graph recovery fails closed when a reordered combo contains a malformed extra leg", async () => {
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      const [entry, stop] = liveComboSnapshot();
+      const malformedEntry = { ...entry, conidex: "28812380;;;2/1,1/-1,bad/1" };
+      return input.params?.["filters"] === "filled"
+        ? { orders: [malformedEntry] }
+        : input.params?.["filters"] === undefined
+          ? { orders: [malformedEntry, stop] }
+          : { orders: [] };
+    }
+    if (input.path === "iserver/account/order/status/980150331") return liveComboStatus();
+    if (input.path === "iserver/account/trades") return [];
+    return session(input);
+  });
+
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", orderId: "980150331" },
+    comboStopGraph()
+  );
+
+  assert.equal(result.state, "recovery_required");
+});
+
 test("graph recovery still fails closed when a parent order ID names no member of the graph", async () => {
   const client = new Fake((input) => {
     if (input.path === "iserver/account/orders") {

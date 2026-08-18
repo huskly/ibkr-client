@@ -1600,6 +1600,35 @@ export class IbkrClient
     );
   }
 
+  private exactComboLegs(conidex: unknown): readonly { conid: number; ratio: number }[] | null {
+    if (typeof conidex !== "string") return null;
+    const sections = conidex.split(";;;");
+    const encoded = sections.length === 2 ? sections[1] : undefined;
+    if (!encoded) return null;
+    const rawLegs = encoded.split(",");
+    if (
+      rawLegs.some((rawLeg) => {
+        const values = rawLeg.split("/");
+        if (values.length !== 2) return true;
+        const conid = Number(values[0]);
+        const ratio = Number(values[1]);
+        return (
+          !Number.isSafeInteger(conid) || conid <= 0 || !Number.isSafeInteger(ratio) || ratio === 0
+        );
+      })
+    ) {
+      return null;
+    }
+    const legs = this.parseComboLegs(conidex);
+    return legs.length === rawLegs.length ? legs : null;
+  }
+
+  private comboLegFingerprint(legs: readonly { conid: number; ratio: number }[]): string {
+    return JSON.stringify(
+      [...legs].sort((left, right) => left.conid - right.conid || left.ratio - right.ratio)
+    );
+  }
+
   private terminalOrderTicketFingerprint(order: IbkrLiveOrder): Record<string, string | boolean> {
     const ticket: Record<string, string | boolean> = {};
     const malformed = "__MALFORMED_TERMINAL_TICKET_FIELD__";
@@ -1633,10 +1662,19 @@ export class IbkrClient
 
     addAliases("conid", [order.conid], normalizeNumber);
     if (order.conidex !== undefined) {
-      ticket["conidex"] =
-        typeof order.conidex === "string"
-          ? JSON.stringify(this.parseComboLegs(order.conidex))
-          : malformed;
+      if (typeof order.conidex !== "string") {
+        ticket["conidex"] = malformed;
+      } else if (order.conidex.includes(";;;")) {
+        const legs = this.exactComboLegs(order.conidex);
+        ticket["conidex"] = legs === null ? malformed : this.comboLegFingerprint(legs);
+      } else {
+        const scalarConid = normalizeNumber(order.conidex);
+        const orderConid = normalizeNumber(order.conid);
+        ticket["conidex"] =
+          scalarConid !== undefined && (orderConid === undefined || orderConid === scalarConid)
+            ? `single:${scalarConid}`
+            : malformed;
+      }
     }
     addAliases("orderType", [order.order_type, order.orderType], (value) =>
       typeof value === "string" ? this.normalizeOrderType(value) : undefined
@@ -2461,7 +2499,12 @@ export class IbkrClient
       if (parentIdentity.value !== undefined) return false;
     } else if (parentIdentity.value !== expectedParentClientOrderId) return false;
     if ("legs" in node) {
-      const liveLegs = this.parseComboLegs(order.conidex);
+      const liveLegs = this.exactComboLegs(order.conidex);
+      if (liveLegs === null) return false;
+      const liveLegFingerprint = this.comboLegFingerprint(liveLegs);
+      const requestedLegFingerprint = this.comboLegFingerprint(
+        node.legs.map(({ contract, ratio }) => ({ conid: contract.conid, ratio }))
+      );
       const orderType = this.normalizeOrderType(order.order_type ?? order.orderType);
       const side = this.normalizeOrderSide(order.side);
       const quantity = this.firstPositiveNumber(order.total_size, order.totalSize, order.size);
@@ -2474,11 +2517,7 @@ export class IbkrClient
       const outsideRth = order.outsideRTH ?? order.outside_rth;
       const tif = this.canonicalTimeInForce(order.tif ?? order.timeInForce);
       return (
-        liveLegs.length === node.legs.length &&
-        node.legs.every((leg, index) => {
-          const liveLeg = liveLegs[index];
-          return liveLeg?.conid === leg.contract.conid && liveLeg.ratio === leg.ratio;
-        }) &&
+        liveLegFingerprint === requestedLegFingerprint &&
         orderType === this.normalizeOrderType(node.orderType) &&
         side === "BUY" &&
         quantity === node.quantity &&
