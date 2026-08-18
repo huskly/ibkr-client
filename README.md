@@ -601,7 +601,10 @@ collection aliases, and rejects contradictory aliases within a broker response b
 It correlates the root by the transmitted client ID and its complete ticket. It correlates each
 descendant by the deterministic client order ID of its exact parent, plus the contract or complete
 combo legs, order type, side, quantity, applicable signed limit or stop price, TIF, and
-regular/overnight session. Recovery accepts terminal members when the evidence is
+regular/overnight session. IBKR can report combo legs in a different order on each endpoint, so
+recovery compares the complete signed `(conid, ratio)` multiset without using response order.
+Recovery
+accepts terminal members when the evidence is
 non-ambiguous and complete, preserves broker terminal states for each member, and fails closed when
 evidence is partial, duplicated, ambiguous, unknown, includes an unexpected attached order, or cannot
 prove required account, broker ID, or parent identity links.
