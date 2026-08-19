@@ -4537,6 +4537,9 @@ export class IbkrClient
     const bid = snapshot ? (this.snapshotNumber(snapshot, "84") ?? null) : null;
     const ask = snapshot ? (this.snapshotNumber(snapshot, "86") ?? null) : null;
     const suppliedMark = snapshot ? (this.snapshotNumber(snapshot, "7635") ?? null) : null;
+    const trade = snapshot
+      ? this.snapshotTradePrice(snapshot)
+      : { last: undefined, close: undefined };
     return {
       conid: referenceConid,
       symbol: String(snapshot?.["55"] ?? detail?.undSym ?? contract.underlying),
@@ -4544,7 +4547,8 @@ export class IbkrClient
       timestamp: snapshot ? this.snapshotTimestamp(snapshot) : null,
       bid,
       ask,
-      last: snapshot ? (this.snapshotNumber(snapshot, "31") ?? null) : null,
+      last: trade.last ?? null,
+      close: trade.close ?? null,
       mark: suppliedMark ?? (bid !== null && ask !== null ? (bid + ask) / 2 : null),
     };
   }
@@ -4972,13 +4976,17 @@ export class IbkrClient
       );
       for (const contract of batch) {
         const snapshot = byConid.get(contract.conid);
+        const trade = snapshot
+          ? this.snapshotTradePrice(snapshot)
+          : { last: undefined, close: undefined };
         result.push({
           contract,
           availability: normalizeDerivativeDataAvailability(snapshot?.["6509"]),
           timestamp: snapshot ? this.snapshotTimestamp(snapshot) : null,
           bid: snapshot ? (this.snapshotNumber(snapshot, "84") ?? null) : null,
           ask: snapshot ? (this.snapshotNumber(snapshot, "86") ?? null) : null,
-          last: snapshot ? (this.snapshotNumber(snapshot, "31") ?? null) : null,
+          last: trade.last ?? null,
+          close: trade.close ?? null,
           mark: snapshot ? (this.snapshotNumber(snapshot, "7635") ?? null) : null,
           delta: snapshot ? (this.snapshotNumber(snapshot, "7308") ?? null) : null,
           impliedVolatility: snapshot ? (this.snapshotNumber(snapshot, "7633") ?? null) : null,
@@ -6166,13 +6174,11 @@ export class IbkrClient
     const exchange = this.snapshotString(snapshot, "6004") ?? contract.exchange;
     const latestBar = this.latestHistoryBar(history);
     const previousBar = this.previousHistoryBar(history);
-    const snapshotLastPrice = this.snapshotNumber(snapshot, "31");
-    const lastPrice = this.snapshotHasPrefix(snapshot, "31", "C")
-      ? (latestBar?.c ?? snapshotLastPrice)
-      : (snapshotLastPrice ?? latestBar?.c);
+    const snapshotTrade = this.snapshotTradePrice(snapshot);
+    const lastPrice = snapshotTrade.last ?? latestBar?.c;
     const bidPrice = this.snapshotNumber(snapshot, "84");
     const askPrice = this.snapshotNumber(snapshot, "86");
-    const closePrice = previousBar?.c;
+    const closePrice = previousBar?.c ?? snapshotTrade.close;
     const highPrice = this.snapshotNumber(snapshot, "70") ?? latestBar?.h;
     const lowPrice = this.snapshotNumber(snapshot, "71") ?? latestBar?.l;
     const openPrice = latestBar?.o;
@@ -6261,6 +6267,25 @@ export class IbkrClient
     const updatedMs = updated < 100_000_000_000 ? updated * 1000 : updated;
     const date = new Date(updatedMs);
     return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  /**
+   * Split IBKR snapshot field `31` into a traded last price and a previous close.
+   *
+   * IBKR marks the value with a `C` prefix when the contract has not traded in the current
+   * session and the number is the previous close. The prefix is the only signal that separates a
+   * close from a trade, so the close is reported as `close` and `last` stays undefined. A value
+   * with no `C` prefix is a real last trade.
+   */
+  private snapshotTradePrice(snapshot: IbkrMarketDataSnapshot): {
+    last: number | undefined;
+    close: number | undefined;
+  } {
+    const value = this.snapshotNumber(snapshot, "31");
+    if (value === undefined) return { last: undefined, close: undefined };
+    return this.snapshotHasPrefix(snapshot, "31", "C")
+      ? { last: undefined, close: value }
+      : { last: value, close: undefined };
   }
 
   private snapshotHasPrefix(

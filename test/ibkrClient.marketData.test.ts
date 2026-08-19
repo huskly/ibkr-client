@@ -2657,9 +2657,9 @@ void test("getQuotes can return snapshots without price-history requests", async
     timestamp: "2026-08-17T20:53:20.000Z",
     reference: {},
     quote: {
-      lastPrice: 100.5,
       bidPrice: 100,
       askPrice: 101,
+      closePrice: 100.5,
       highPrice: 102,
       lowPrice: 98,
       netChange: 1.5,
@@ -2667,12 +2667,87 @@ void test("getQuotes can return snapshots without price-history requests", async
       totalVolume: 700,
     },
   });
-  assert.equal(quotes["TEST"]?.quote.closePrice, undefined);
+  assert.equal(quotes["TEST"]?.quote.lastPrice, undefined);
   assert.equal(quotes["TEST"]?.quote.openPrice, undefined);
   assert.equal(
     client.calls.some((call) => call.path === "iserver/marketdata/history"),
     false
   );
+});
+
+void test("a C-prefixed field 31 becomes closePrice and leaves lastPrice unset", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path !== "iserver/marketdata/snapshot") {
+      throw new Error(`Snapshot-only quotes must not request ${input.path}`);
+    }
+    snapshots += 1;
+    return snapshots === 1
+      ? []
+      : [
+          {
+            conid: 555,
+            "31": "C22.30",
+            "55": "TEST",
+            "84": "17.20",
+            "86": "17.40",
+            "6509": "RpBd",
+          },
+        ];
+  });
+
+  const quotes = await client.getQuotes([{ symbol: "TEST", brokerId: "555" }], {
+    includeHistory: false,
+  });
+
+  assert.equal(quotes["TEST"]?.quote.lastPrice, undefined);
+  assert.equal(quotes["TEST"]?.quote.closePrice, 22.3);
+  assert.equal(quotes["TEST"]?.quote.bidPrice, 17.2);
+  assert.equal(quotes["TEST"]?.quote.askPrice, 17.4);
+});
+
+void test("a field 31 with no prefix stays a last trade and adds no close", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path !== "iserver/marketdata/snapshot") {
+      throw new Error(`Snapshot-only quotes must not request ${input.path}`);
+    }
+    snapshots += 1;
+    return snapshots === 1
+      ? []
+      : [{ conid: 556, "31": "1.50", "55": "TEST", "84": "1.46", "86": "1.52" }];
+  });
+
+  const quotes = await client.getQuotes([{ symbol: "TEST", brokerId: "556" }], {
+    includeHistory: false,
+  });
+
+  assert.equal(quotes["TEST"]?.quote.lastPrice, 1.5);
+  assert.equal(quotes["TEST"]?.quote.closePrice, undefined);
+});
+
+void test("price history keeps priority over a C-prefixed snapshot close", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return snapshots === 1 ? [] : [{ conid: 557, "31": "C22.30", "84": "17.20", "86": "17.40" }];
+    }
+    if (input.path === "iserver/marketdata/history") {
+      return {
+        data: [
+          { t: 1, o: 20, h: 23, l: 19, c: 21, v: 10 },
+          { t: 2, o: 21, h: 24, l: 20, c: 23, v: 12 },
+        ],
+      };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const quotes = await client.getQuotes([{ symbol: "TEST", brokerId: "557" }]);
+
+  assert.equal(quotes["TEST"]?.quote.closePrice, 21);
+  assert.equal(quotes["TEST"]?.quote.lastPrice, 23);
 });
 
 void test("known broker ids quote held options without symbol rediscovery", async () => {

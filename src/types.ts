@@ -146,9 +146,17 @@ export interface BrokerQuoteReference {
 }
 
 export interface BrokerQuoteData {
+  /**
+   * Last traded price of the current session. Absent when the contract has not traded and IBKR
+   * only sends a previous close, which it marks with a `C` prefix on snapshot field 31.
+   */
   lastPrice?: number;
   bidPrice?: number;
   askPrice?: number;
+  /**
+   * Previous close. It comes from price history when history is present, and otherwise from a
+   * `C`-prefixed snapshot field 31.
+   */
   closePrice?: number;
   highPrice?: number;
   lowPrice?: number;
@@ -258,7 +266,10 @@ export interface DerivativeQuote {
   timestamp: string | null;
   bid: number | null;
   ask: number | null;
+  /** Last traded price of the current session; null when the contract has not traded. */
   last: number | null;
+  /** Previous close, which IBKR sends with a `C` prefix on field 31; null when absent. */
+  close: number | null;
   mark: number | null;
   delta: number | null;
   impliedVolatility: number | null;
@@ -274,7 +285,10 @@ export interface DerivativeReferenceQuote {
   timestamp: string | null;
   bid: number | null;
   ask: number | null;
+  /** Last traded price of the current session; null when the contract has not traded. */
   last: number | null;
+  /** Previous close, which IBKR sends with a `C` prefix on field 31; null when absent. */
+  close: number | null;
   mark: number | null;
 }
 

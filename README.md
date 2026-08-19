@@ -80,8 +80,13 @@ validated at runtime. Its broker-neutral account API includes:
   `iserver/marketdata/history`. Snapshot warm-up, market-data availability, and timestamps do not
   change. Without history, `reference.description`, `quote.lastPrice`, `quote.highPrice`,
   `quote.lowPrice`, `quote.netChange`, `quote.netPercentChange`, and `quote.totalVolume` are present
-  only if contract or snapshot data supplies them. `quote.closePrice` and `quote.openPrice` are not
-  present. A symbol request resolves the contract from `iserver/secdef/search`, and it selects the
+  only if contract or snapshot data supplies them. `quote.openPrice` is not present.
+  `quote.lastPrice` is a last traded price only. When a contract has not traded in the current
+  session, IBKR sends the previous close on snapshot field `31` with a `C` prefix. The client then
+  reports that value as `quote.closePrice` and leaves `quote.lastPrice` absent, so a caller cannot
+  read a close as a trade. Price history stays the better source: with history, `quote.closePrice`
+  is the close of the previous daily bar, and the snapshot close is used only if history gives no
+  previous bar. A symbol request resolves the contract from `iserver/secdef/search`, and it selects the
   one contract of that exact symbol which lists options on SMART. This is the same rule the
   price-history path uses, so an index root such as `SPX` reads the CBOE index. `trsrv/stocks` is
   equity-only and answers index roots with unrelated foreign stocks that share the ticker, so stock
@@ -277,6 +282,11 @@ derivative operations to the smaller account-oriented `BrokerClient`:
 - `getDerivativeChain(...)` prices one exact expiration and fails when no usable bid/ask exists.
 - `getDerivativeReferenceQuote(...)` follows IBKR's `undConid` to quote the actual linked
   underlying contract, such as the September NQ future behind an August QN3 option.
+
+Derivative quotes and derivative reference quotes carry `last` and `close` as separate values.
+`last` holds a traded price of the current session, and it is `null` when the contract has not
+traded. `close` holds the previous close that IBKR marks with a `C` prefix on snapshot field `31`,
+and it is `null` when IBKR sends no such value.
 
 Both `OPT` and `FOP` use the stateful `secdef/search` -> `secdef/strikes` -> `secdef/info`
 sequence. Derivative discovery selects the underlying listing the same way option discovery and
