@@ -233,6 +233,43 @@ void test("NDX and NDXP at the same expiry and strike remain distinct and ambigu
   assert.equal(ndxp.multiplier, 100);
 });
 
+void test("a C-prefixed field 31 reports a derivative close, not a last trade", async () => {
+  let snapshots = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/secdef/search") return nqSearch;
+    if (input.path === "iserver/secdef/strikes") return { call: [], put: [26600] };
+    if (input.path === "iserver/secdef/info") return nqAug26600Definitions;
+    if (input.path === "iserver/marketdata/snapshot") {
+      snapshots += 1;
+      return snapshots === 1
+        ? []
+        : [
+            {
+              conid: 892767774,
+              "31": "C383.00",
+              "84": "330.50",
+              "86": "337.50",
+              "6509": "RBd",
+              "7635": "331.33",
+            },
+          ];
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const quotes = await client.getDerivativeChain({
+    assetClass: "FOP",
+    underlying: "NQ",
+    expiration: "2026-08-21",
+    tradingClass: "QN3",
+    right: "P",
+  });
+
+  assert.equal(quotes[0]?.last, null);
+  assert.equal(quotes[0]?.close, 383);
+  assert.equal(quotes[0]?.bid, 330.5);
+});
+
 void test("derivative chains retain unavailable fields and require at least one usable market", async () => {
   let snapshots = 0;
   const client = new FakeIbkrClient((input) => {
@@ -286,6 +323,7 @@ void test("derivative chains retain unavailable fields and require at least one 
     bid: 330.5,
     ask: 337.5,
     last: 383,
+    close: null,
     mark: 331.33,
     delta: -0.257,
     impliedVolatility: null,
@@ -421,6 +459,7 @@ void test("FOP reference quotes follow the broker-linked futures conid", async (
     bid: 27865,
     ask: 27866.5,
     last: 27865.5,
+    close: null,
     mark: 27864.25,
   });
   assert.equal(client.calls[0]?.params?.["conids"], "892767774");
