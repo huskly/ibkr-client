@@ -3428,7 +3428,12 @@ export class IbkrClient
           order.average_price,
           order.averagePrice
         ) ?? null,
+      // The exact read and the active snapshot must describe one order the same way, so both
+      // carry the order type and the stop trigger from the same broker fields. Nothing is
+      // inferred: each stays `null` when IBKR sends no value.
+      orderType: this.normalizeOrderType(order.order_type ?? order.orderType) ?? null,
       limitPrice: this.firstNumber(order.limitPrice, order.limit_price, order.price) ?? null,
+      stopPrice: this.firstNumber(order.stopPrice, order.stop_price) ?? null,
       commissionAndFees:
         typeof order.commissionAndFees === "number"
           ? order.commissionAndFees

@@ -701,3 +701,88 @@ void test("equity-option cancellation omits CME operator metadata", async () => 
     method: "DELETE",
   });
 });
+
+void test("the exact read describes a resting combo stop with its type and trigger", async () => {
+  // Real payload shape of a resting protective combo stop: the trigger lives in `stop_price`,
+  // and no limit price is present at all.
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["DUR318631"], selectedAccount: "DUR318631" };
+    }
+    if (input.path === "iserver/account/order/status/980150332") {
+      return {
+        account: "DUR318631",
+        order_id: 980150332,
+        order_status: "PreSubmitted",
+        order_type: "STP",
+        stop_price: "2.22",
+        size: "1.0",
+        total_size: "1.0",
+        cum_fill: "0.0",
+        parent_order_id: "980150331",
+        order_desc: "Buy 1 Stop 2.22, GTC",
+        conidex: "28812380;;;906570511/-1,907108616/1",
+      };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+  const result = await client.getDerivativeOrderStatus("DUR318631", "980150332");
+  assert.equal(result.orderType, "STOP");
+  assert.equal(result.stopPrice, 2.22);
+  assert.equal(result.limitPrice, null);
+  assert.equal(result.status, "WORKING");
+});
+
+void test("the exact read leaves the stop trigger null when IBKR sends none", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["DUR318631"], selectedAccount: "DUR318631" };
+    }
+    if (input.path === "iserver/account/order/status/980150331") {
+      return {
+        account: "DUR318631",
+        order_id: 980150331,
+        order_status: "Submitted",
+        order_type: "LIMIT",
+        limit_price: "-1.11",
+        size: "1.0",
+        total_size: "1.0",
+        cum_fill: "0.0",
+        conidex: "28812380;;;906570511/-1,907108616/1",
+      };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+  const result = await client.getDerivativeOrderStatus("DUR318631", "980150331");
+  assert.equal(result.orderType, "LIMIT");
+  assert.equal(result.limitPrice, -1.11);
+  assert.equal(result.stopPrice, null);
+});
+
+void test("the exact read and the active snapshot agree on one resting stop", async () => {
+  const stopRow = {
+    account: "DUR318631",
+    order_id: 980150332,
+    orderId: "980150332",
+    order_status: "PreSubmitted",
+    order_type: "STP",
+    stop_price: "2.22",
+    size: "1.0",
+    total_size: "1.0",
+    cum_fill: "0.0",
+    side: "B",
+    conidex: "28812380;;;906570511/-1,907108616/1",
+  };
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["DUR318631"], selectedAccount: "DUR318631" };
+    }
+    if (input.path === "iserver/account/order/status/980150332") return stopRow;
+    if (input.path === "iserver/account/orders") return { snapshot: true, orders: [stopRow] };
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+  const exact = await client.getDerivativeOrderStatus("DUR318631", "980150332");
+  const [active] = await client.listActiveDerivativeOrders("DUR318631");
+  assert.equal(exact.orderType, active?.orderType);
+  assert.equal(exact.stopPrice, active?.stopPrice);
+});

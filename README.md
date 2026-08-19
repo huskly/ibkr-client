@@ -411,7 +411,10 @@ return `recovery_required`, because they do not prove that every submitted ticke
 - `getDerivativeOrderStatus(...)` uses IBKR's exact order-ID status endpoint so fast terminal
   orders remain visible after live-list eviction. It normalizes pending, working, partial-fill,
   fill, canceled, and rejected lifecycle states with leg ratios and order economics, and fails
-  closed on identity mismatch, unknown status, or missing aggregate quantities.
+  closed on identity mismatch, unknown status, or missing aggregate quantities. The result also
+  carries `orderType` and `stopPrice`, normalized from the same broker fields as the active-order
+  snapshot, so an exact read describes a resting stop by its trigger. Both stay `null` when IBKR
+  sends no value.
 - `findDerivativeOrder(...)` accepts exactly one broker order ID or caller-supplied customer order
   ID (`cOID`/`order_ref`). Broker IDs go directly to the exact endpoint; a customer ID is resolved
   through the live list and then read by exact broker ID.

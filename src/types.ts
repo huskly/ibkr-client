@@ -612,7 +612,14 @@ export interface DerivativeOrderLifecycle {
   filledQuantity: number;
   remainingQuantity: number;
   averagePrice: number | null;
+  /**
+   * The normalized IBKR order type, for example `LIMIT` or `STOP`, or `null` when the broker
+   * stated none. This is the same normalization the active-order snapshot applies.
+   */
+  orderType: string | null;
   limitPrice: number | null;
+  /** The stop trigger price, or `null` when the broker stated none. */
+  stopPrice: number | null;
   commissionAndFees: number | null;
   legs: DerivativeOrderLegStatus[];
   updatedAt: string | null;
