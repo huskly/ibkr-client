@@ -101,6 +101,36 @@ validated at runtime. Its broker-neutral account API includes:
 - `fetchOrders()` for normalized live orders, including aggregate `WORKING`
   matching across IBKR's active order states.
 
+### Brokerage session lifecycle
+
+Use the explicit session lifecycle API for gateways and long-running processes:
+
+```ts
+await client.initializeBrokerageSession({ compete: false, publish: true });
+const evidence = await client.getSessionEvidence();
+await client.tickle();
+await client.renewBrokerageSession({ compete: false, publish: true });
+await client.logout();
+await client.close();
+```
+
+Initialization and renewal pass both flags to IBKR once. Renewal only accepts `compete: false`.
+`tickle()` is a safe read and can use the read scheduler retry policy. `logout()` makes at most one
+broker request for each client, including when that request fails. `close()` only closes local
+admission. It does not invent a transport close operation and does not log out implicitly. After
+`close()`, the client rejects new lifecycle operations and broker requests.
+
+`getSessionEvidence()` returns authentication, connection, competition, account, selected-account,
+and paper-account evidence. `getAuthStatus()` returns the authentication, connection, and
+competition subset. Missing or malformed evidence stays `null`. An explicit empty account list stays
+an empty list. `getTradingDiagnostics()` also returns `null` for an unknown environment,
+authentication state, or competition state. Mutation gates require `authenticated === true` and
+`competingSession === false`.
+
+The deprecated `init()` method remains for compatibility. It uses `compete: true` and
+`publish: true`, and it stays idempotent. New code must use `initializeBrokerageSession()` with
+explicit flags.
+
 ### Strategy market data
 
 The reusable `IbkrClient` also exposes typed, read-only strategy data:
@@ -508,7 +538,7 @@ node --input-type=module <<'NODE'
 import { IbkrClient, buildOauthConfig } from "./dist/index.js";
 
 const client = new IbkrClient(buildOauthConfig());
-await client.init();
+await client.initializeBrokerageSession({ compete: false, publish: true });
 const symbol = process.env.IBKR_SMOKE_SYMBOL;
 const from = process.env.IBKR_SMOKE_FROM;
 const to = process.env.IBKR_SMOKE_TO;
@@ -539,7 +569,7 @@ import { IbkrClient, buildOauthConfig } from "./dist/index.js";
 const client = new IbkrClient(buildOauthConfig(), {
   onPriceHistoryTelemetry: (event) => console.log(event),
 });
-await client.init();
+await client.initializeBrokerageSession({ compete: false, publish: true });
 const result = await client.getPriceHistory({
   symbol: "SPX",
   contract: { conid: 416904, assetClass: "IND", exchange: "CBOE" },

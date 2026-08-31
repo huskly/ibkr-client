@@ -137,9 +137,24 @@ void test("diagnostics require an exact account and distinguish live from paper"
   await assert.rejects(() => live.getTradingDiagnostics(""), /explicit IBKR account ID/);
 });
 
-void test("What-If response is authoritative and incomplete success fails closed", async () => {
+void test("What-If fails closed when competition evidence is missing", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/auth/status") return { authenticated: true };
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  await assert.rejects(() => client.previewDerivativeCombo(request()), /not safely authenticated/);
+  assert.ok(client.calls.every(({ path }) => !path.endsWith("/orders/whatif")));
+});
+
+void test("What-If response is authoritative and incomplete success fails closed", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, competing: false };
+    }
     if (input.path === "iserver/accounts") {
       return {
         accounts: ["U123"],

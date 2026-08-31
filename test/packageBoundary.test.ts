@@ -12,6 +12,8 @@ import {
   type IbkrClient,
   type IbkrClientOptions,
   type IbkrHttpErrorResponse,
+  type IbkrSessionEvidence,
+  type IbkrSessionLifecycleClient,
   type IbkrRequestSchedulerOptions,
   type IbkrRequestTelemetry,
   type OptionChainSnapshot,
@@ -190,6 +192,26 @@ test("package exposes only the library and no CLI entry point", async () => {
   }
   assert.equal(manifest.dependencies?.["chalk"], undefined);
   assert.equal(manifest.dependencies?.["commander"], undefined);
+});
+
+void test("package exports the explicit session lifecycle contract", () => {
+  const evidence: IbkrSessionEvidence = {
+    authenticated: null,
+    competing: null,
+    connected: null,
+    accountIds: null,
+    selectedAccountId: null,
+    isPaper: null,
+  };
+  const lifecycle = undefined as IbkrSessionLifecycleClient | undefined;
+  const initialize: IbkrSessionLifecycleClient["initializeBrokerageSession"] | undefined =
+    lifecycle?.initializeBrokerageSession;
+  const renew: IbkrSessionLifecycleClient["renewBrokerageSession"] | undefined =
+    lifecycle?.renewBrokerageSession;
+
+  assert.equal(evidence.connected, null);
+  assert.equal(initialize, undefined);
+  assert.equal(renew, undefined);
 });
 
 void test("package exports structured HTTP error evidence", () => {

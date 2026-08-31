@@ -7,6 +7,8 @@ import type {
   ActiveDerivativeOrderLeg,
   ActiveDerivativeOrderUncertainty,
   AuthStatus,
+  IbkrSessionEvidence,
+  IbkrSessionLifecycleClient,
   BrokerAccountOrders,
   BrokerClient,
   BrokerInstrument,
@@ -83,8 +85,6 @@ import type {
 } from "../types.js";
 import { ASSET_CLASS_LABELS, toNullableNumber, toNumber } from "../helpers.js";
 import type {
-  IbkrAuthStatus,
-  IbkrBrokerageAccountsResponse,
   IbkrContractInfo,
   IbkrLiveOrder,
   IbkrLiveOrdersResponse,
@@ -688,12 +688,15 @@ export class IbkrInsufficientHistoryError extends Error {
 export class IbkrClient
   implements
     BrokerClient,
+    IbkrSessionLifecycleClient,
     DerivativeDiscoveryClient,
     DerivativePreviewClient,
     DerivativeExecutionClient
 {
   private readonly raw: RawIbkrClient;
   private initPromise?: Promise<void>;
+  private logoutPromise?: Promise<void>;
+  private closed = false;
   private accountIdPromise?: Promise<string>;
   private readonly optionDiscovery = new Map<string, Promise<OptionDiscoveryResult>>();
   private readonly optionDefinitionCache: OptionDefinitionCache | undefined;
@@ -730,52 +733,126 @@ export class IbkrClient
     });
   }
 
-  /** Obtain the live session token (idempotent — safe to await repeatedly). */
+  /**
+   * Obtain the live session token with the legacy competing-session behavior.
+   *
+   * @deprecated Use {@link initializeBrokerageSession} with explicit flags.
+   */
   init(): Promise<void> {
-    this.initPromise ??= (async () => {
-      try {
-        await this.raw.init();
-      } catch (error) {
-        throw this.normalizeHttpError(error);
-      }
-      // IBKR is slow right after init; give the session a moment to settle.
-      await this.wait(1000);
-    })();
+    if (this.closed) return Promise.reject(this.closedError());
+    this.initPromise ??= this.initializeBrokerageSession({ compete: true, publish: true });
     return this.initPromise;
   }
 
+  async initializeBrokerageSession(input: { compete: boolean; publish: boolean }): Promise<void> {
+    this.assertOpen();
+    try {
+      await this.raw.init(input.compete, input.publish);
+    } catch (error) {
+      throw this.normalizeHttpError(error);
+    }
+    // IBKR is slow right after initialization; give the session a moment to settle.
+    await this.wait(1000);
+  }
+
+  async renewBrokerageSession(input: { compete: false; publish: boolean }): Promise<void> {
+    this.assertOpen();
+    if ((input.compete as boolean) !== false) {
+      throw new TypeError("IBKR brokerage session renewal cannot compete with another session");
+    }
+    try {
+      await this.raw.init(input.compete, input.publish);
+    } catch (error) {
+      throw this.normalizeHttpError(error);
+    }
+    await this.wait(1000);
+  }
+
+  async getSessionEvidence(): Promise<IbkrSessionEvidence> {
+    this.assertOpen();
+    const [status, rawAccounts] = await Promise.all([
+      this.getAuthStatus(),
+      this.req<unknown>({ path: "iserver/accounts" }),
+    ]);
+    const accounts = isUnknownRecord(rawAccounts) ? rawAccounts : {};
+    return {
+      authenticated: status.authenticated,
+      competing: status.competing,
+      connected: status.connected,
+      accountIds: this.accountIdsOrNull(accounts["accounts"]),
+      selectedAccountId:
+        typeof accounts["selectedAccount"] === "string" ? accounts["selectedAccount"] : null,
+      isPaper: this.booleanOrNull(accounts["isPaper"]),
+    };
+  }
+
+  tickle(): Promise<void> {
+    return this.req<unknown>({ path: "tickle", method: "POST" }).then(() => undefined);
+  }
+
+  logout(): Promise<void> {
+    if (this.closed) return Promise.reject(this.closedError());
+    this.logoutPromise ??= this.singleAttemptRequest<unknown>({
+      path: "logout",
+      method: "POST",
+    }).then(() => undefined);
+    return this.logoutPromise;
+  }
+
+  close(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    this.closed = true;
+    delete this.accountIdPromise;
+    this.optionDiscovery.clear();
+    this.optionContractResolution.clear();
+    this.priceHistoryContractResolution.clear();
+    this.derivativeDiscovery.clear();
+    return Promise.resolve();
+  }
+
   async getAuthStatus(): Promise<AuthStatus> {
-    const status = await this.req<IbkrAuthStatus>({
+    const rawStatus = await this.req<unknown>({
       path: "iserver/auth/status",
       method: "POST",
     });
+    const status = isUnknownRecord(rawStatus) ? rawStatus : {};
     return {
-      authenticated: status.authenticated ?? false,
-      competing: status.competing ?? false,
+      authenticated: this.booleanOrNull(status["authenticated"]),
+      competing: this.booleanOrNull(status["competing"]),
+      connected: this.booleanOrNull(status["connected"]),
     };
   }
 
   async getTradingDiagnostics(accountId: string): Promise<TradingDiagnostics> {
     if (!accountId.trim()) throw new Error("An explicit IBKR account ID is required");
-    const [status, accounts] = await Promise.all([
+    const [status, rawAccounts] = await Promise.all([
       this.getAuthStatus(),
-      this.req<IbkrBrokerageAccountsResponse>({ path: "iserver/accounts" }),
+      this.req<unknown>({ path: "iserver/accounts" }),
     ]);
-    if (!accounts.accounts?.includes(accountId)) {
+    const accounts = isUnknownRecord(rawAccounts) ? rawAccounts : {};
+    const accountIds = this.accountIdsOrNull(accounts["accounts"]);
+    if (accountIds === null || !accountIds.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available to this session`);
     }
+    const rawFeatures = accounts["allowFeatures"];
+    const features = isUnknownRecord(rawFeatures) ? rawFeatures : {};
+    const rawAssetTypes = features["allowedAssetTypes"];
     return {
       accountId,
-      selectedAccountId: accounts.selectedAccount ?? null,
-      environment: accounts.isPaper === true ? "paper" : "live",
+      selectedAccountId:
+        typeof accounts["selectedAccount"] === "string" ? accounts["selectedAccount"] : null,
+      environment:
+        accounts["isPaper"] === true ? "paper" : accounts["isPaper"] === false ? "live" : null,
       authenticated: status.authenticated,
       competingSession: status.competing,
-      marketDataAvailable: accounts.allowFeatures?.showGFIS ?? null,
+      marketDataAvailable: this.booleanOrNull(features["showGFIS"]),
       advisoryAssetPermissions:
-        accounts.allowFeatures?.allowedAssetTypes
-          ?.split(",")
-          .map((value) => value.trim())
-          .filter(Boolean) ?? [],
+        typeof rawAssetTypes === "string"
+          ? rawAssetTypes
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean)
+          : [],
     };
   }
 
@@ -784,7 +861,7 @@ export class IbkrClient
   ): Promise<DerivativeComboPreviewResult> {
     this.validateComboPreview(request);
     const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (!diagnostics.authenticated || diagnostics.competingSession) {
+    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
       throw new Error("IBKR brokerage session is not safely authenticated for What-If");
     }
     await this.prepareBrokerageAccount(request.accountId);
@@ -815,7 +892,7 @@ export class IbkrClient
       request
     );
     const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (!diagnostics.authenticated || diagnostics.competingSession) {
+    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(request.accountId);
@@ -843,7 +920,7 @@ export class IbkrClient
     this.validateSingleOrder(request);
     const cmeOperatorMetadata = this.cmeOperatorMetadata(request.contract.assetClass, request);
     const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (!diagnostics.authenticated || diagnostics.competingSession) {
+    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(request.accountId);
@@ -891,7 +968,7 @@ export class IbkrClient
     const parentMetadata = this.cmeOperatorMetadata(parent.contract.assetClass, parent);
     const childMetadata = this.cmeOperatorMetadata(child.contract.assetClass, child);
     const diagnostics = await this.getTradingDiagnostics(accountId);
-    if (!diagnostics.authenticated || diagnostics.competingSession) {
+    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(accountId);
@@ -923,7 +1000,7 @@ export class IbkrClient
   ): Promise<DerivativeOrderGraphResult> {
     this.validateOrderGraph(request);
     const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (!diagnostics.authenticated || diagnostics.competingSession) {
+    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(request.accountId);
@@ -947,7 +1024,7 @@ export class IbkrClient
     if (!input.continuation.replyId.trim())
       throw new Error("An exact warning reply ID is required");
     const diagnostics = await this.getTradingDiagnostics(input.continuation.request.accountId);
-    if (!diagnostics.authenticated || diagnostics.competingSession) {
+    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(input.continuation.request.accountId);
@@ -4027,12 +4104,33 @@ export class IbkrClient
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  private assertOpen(): void {
+    if (this.closed) throw this.closedError();
+  }
+
+  private closedError(): Error {
+    return new Error("This IBKR client is closed");
+  }
+
+  private booleanOrNull(value: unknown): boolean | null {
+    return typeof value === "boolean" ? value : null;
+  }
+
+  private accountIdsOrNull(value: unknown): readonly string[] | null {
+    return Array.isArray(value) &&
+      Array.from(value).every((accountId) => typeof accountId === "string")
+      ? value
+      : null;
+  }
+
   private async prepareBrokerageAccount(accountId: string): Promise<void> {
-    const brokerageAccounts = await this.req<IbkrBrokerageAccountsResponse>({
+    const rawBrokerageAccounts = await this.req<unknown>({
       path: "iserver/accounts",
     });
-    if (brokerageAccounts.selectedAccount === accountId) return;
-    if (brokerageAccounts.accounts && !brokerageAccounts.accounts.includes(accountId)) {
+    const brokerageAccounts = isUnknownRecord(rawBrokerageAccounts) ? rawBrokerageAccounts : {};
+    if (brokerageAccounts["selectedAccount"] === accountId) return;
+    const accountIds = this.accountIdsOrNull(brokerageAccounts["accounts"]);
+    if (accountIds === null || !accountIds.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available for trading/order queries.`);
     }
     const switchedAccount = await this.singleAttemptRequest<IbkrSwitchAccountResponse>({
@@ -6359,6 +6457,7 @@ export class IbkrClient
     signal?: AbortSignal,
     onTerminalFailure?: (error: unknown) => void
   ): Promise<T> {
+    if (this.closed) return Promise.reject(this.closedError());
     return this.requestScheduler.schedule(
       {
         endpoint: this.requestEndpoint(input.path),

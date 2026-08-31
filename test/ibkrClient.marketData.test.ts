@@ -3153,7 +3153,11 @@ void test("safe POST reads remain retryable after a 429", async () => {
     }
   );
 
-  assert.deepEqual(await client.getAuthStatus(), { authenticated: true, competing: false });
+  assert.deepEqual(await client.getAuthStatus(), {
+    authenticated: true,
+    competing: false,
+    connected: null,
+  });
   assert.equal(calls, 2);
   assert.deepEqual(sleeps, [1_000]);
 });

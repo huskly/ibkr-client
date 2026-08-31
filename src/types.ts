@@ -10,8 +10,29 @@ export type BrokerInstrumentSearchProjection =
   "symbol-search" | "symbol-regex" | "desc-search" | "desc-regex" | "search" | "fundamental";
 
 export interface AuthStatus {
-  authenticated: boolean;
-  competing: boolean;
+  authenticated: boolean | null;
+  competing: boolean | null;
+  connected: boolean | null;
+}
+
+/** Broker evidence for the current authenticated session. Unknown fields stay null. */
+export interface IbkrSessionEvidence {
+  authenticated: boolean | null;
+  competing: boolean | null;
+  connected: boolean | null;
+  accountIds: readonly string[] | null;
+  selectedAccountId: string | null;
+  isPaper: boolean | null;
+}
+
+/** Explicit lifecycle operations for one IBKR brokerage session. */
+export interface IbkrSessionLifecycleClient {
+  initializeBrokerageSession(input: { compete: boolean; publish: boolean }): Promise<void>;
+  renewBrokerageSession(input: { compete: false; publish: boolean }): Promise<void>;
+  getSessionEvidence(): Promise<IbkrSessionEvidence>;
+  tickle(): Promise<void>;
+  logout(): Promise<void>;
+  close(): Promise<void>;
 }
 
 export interface AccountMarginSnapshot {
@@ -308,9 +329,9 @@ export type BrokerEnvironment = "live" | "paper";
 export interface TradingDiagnostics {
   accountId: string;
   selectedAccountId: string | null;
-  environment: BrokerEnvironment;
-  authenticated: boolean;
-  competingSession: boolean;
+  environment: BrokerEnvironment | null;
+  authenticated: boolean | null;
+  competingSession: boolean | null;
   marketDataAvailable: boolean | null;
   advisoryAssetPermissions: string[];
 }
@@ -349,7 +370,7 @@ export interface MarginImpact {
 
 export interface DerivativeComboPreviewResult {
   accountId: string;
-  environment: BrokerEnvironment;
+  environment: BrokerEnvironment | null;
   accepted: boolean;
   submitted: false;
   commission: number | null;
