@@ -738,12 +738,27 @@ export interface DerivativeExecution {
   executedAt: string | null;
 }
 
-export interface DerivativeOrderCancellationResult {
-  state: "requested";
-  accountId: string;
-  orderId: string;
+export interface DerivativeOrderCancellationEvidence {
   message: string | null;
+  accountId: string | null;
+  orderId: string | null;
+  error: string | null;
 }
+
+export type DerivativeOrderCancellationResult =
+  | {
+      state: "requested";
+      accountId: string;
+      orderId: string;
+      message: string;
+    }
+  | {
+      state: "recovery_required";
+      accountId: string;
+      orderId: string;
+      reason: string;
+      evidence: DerivativeOrderCancellationEvidence;
+    };
 
 export type DerivativeExecutionSide = "BUY" | "SELL";
 

@@ -57,6 +57,17 @@ Optional environment variables:
 - `IBKR_ACCOUNT_ID` — target a specific account (otherwise the first is used).
 - `IBKR_TRANSACTION_CURRENCY` — transaction-query currency (defaults to `USD`).
 
+## Version 2 migration
+
+Version 2.0.0 makes session and write safety evidence explicit:
+
+- Use `initializeBrokerageSession(...)` and the other explicit lifecycle methods instead of `init()`.
+- Handle nullable `AuthStatus` and `TradingDiagnostics` fields, including `connected`.
+- Pass an exact `accountId` to legacy warning acknowledgements and keep it in contingent warning
+  continuations.
+- Handle both `requested` and `recovery_required` cancellation results. Only an unambiguous broker
+  acknowledgement returns `requested`.
+
 ## Library API
 
 `IbkrClient` owns IBKR authentication, requests, raw response types, and
@@ -473,13 +484,15 @@ return `recovery_required`, because they do not prove that every submitted ticke
   gross option points, multiplier-adjusted gross dollars, commission, and net dollars without
   exposing account or execution IDs.
 - `cancelDerivativeOrder(...)` uses its exact account ID and sends one exact cancellation request.
-  It returns only a typed `requested` acknowledgement. Its required `assetClass` lets the client
-  apply the same
-  product-aware CME metadata rule without guessing from an order ID. Callers remain responsible
-  for reading until a terminal state and verifying that cancellation reached `CANCELED`.
+  It returns `requested` only for a nonblank success acknowledgement with no conflicting identity
+  or error evidence. Other 2xx payloads return `recovery_required` with normalized evidence and a
+  reason. Its required `assetClass` lets the client apply the same product-aware CME metadata rule
+  without guessing from an order ID. Callers remain responsible for reading until a terminal state
+  and verifying that cancellation reached `CANCELED`.
 
 Placement, warning replies, and cancellation use one common fail-closed session and exact-account
-check. They deliberately use single-attempt HTTP writes so a transport retry cannot duplicate a
+check. One FIFO gate keeps account preparation and the related outbound request in one critical
+section. They deliberately use single-attempt HTTP writes so a transport retry cannot duplicate a
 broker action. A BUY-oriented net credit remains negative at
 the IBKR boundary, matching the What-If ticket exactly. Every write requires the exact account ID;
 the library never falls back to the first account. Broker-declared order rejections retain their

@@ -576,6 +576,15 @@ void test("legacy warning acknowledgement requires an exact safe account", async
   });
   await assert.rejects(
     missingAccount.acknowledgeOrderWarning({
+      accountId: "U123",
+      replyId: "reply",
+      confirmed: false,
+    } as unknown as Parameters<IbkrClient["acknowledgeOrderWarning"]>[0]),
+    /confirmation must be true/
+  );
+  assert.deepEqual(missingAccount.calls, []);
+  await assert.rejects(
+    missingAccount.acknowledgeOrderWarning({
       accountId: "",
       replyId: "reply",
       confirmed: true,
@@ -604,6 +613,97 @@ void test("legacy warning acknowledgement requires an exact safe account", async
   assert.ok(disconnected.calls.every(({ path }) => !path.startsWith("iserver/reply/")));
 });
 
+void test("trading mutations serialize account selection through accountless replies", async () => {
+  let selectedAccount = "U1";
+  const firstReplyStarted = Promise.withResolvers<void>();
+  const firstReply = Promise.withResolvers<unknown>();
+  const replyAccounts: string[] = [];
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U1", "U2"], selectedAccount, isPaper: true };
+    }
+    if (input.path === "iserver/account") {
+      selectedAccount = String((input.data as { acctId: string }).acctId);
+      return { set: true, acctId: selectedAccount };
+    }
+    if (input.path === "iserver/reply/first") {
+      replyAccounts.push(selectedAccount);
+      firstReplyStarted.resolve();
+      return firstReply.promise;
+    }
+    if (input.path === "iserver/reply/second") {
+      replyAccounts.push(selectedAccount);
+      return { order_id: "2", order_status: "PreSubmitted" };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  const first = client.acknowledgeOrderWarning({
+    accountId: "U1",
+    replyId: "first",
+    confirmed: true,
+  });
+  await firstReplyStarted.promise;
+  const second = client.acknowledgeOrderWarning({
+    accountId: "U2",
+    replyId: "second",
+    confirmed: true,
+  });
+  await Promise.resolve();
+  assert.deepEqual(replyAccounts, ["U1"]);
+  assert.equal(selectedAccount, "U1");
+
+  firstReply.resolve({ order_id: "1", order_status: "PreSubmitted" });
+  await first;
+  await second;
+  assert.deepEqual(replyAccounts, ["U1", "U2"]);
+});
+
+void test("close rejects a queued mutation before broker access", async () => {
+  const firstReplyStarted = Promise.withResolvers<void>();
+  const firstReply = Promise.withResolvers<unknown>();
+  const replyIds: string[] = [];
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U1", "U2"], selectedAccount: "U1", isPaper: true };
+    }
+    if (input.path === "iserver/reply/first") {
+      replyIds.push("first");
+      firstReplyStarted.resolve();
+      return firstReply.promise;
+    }
+    if (input.path.startsWith("iserver/reply/")) {
+      replyIds.push(input.path.slice("iserver/reply/".length));
+      return { order_id: "2", order_status: "PreSubmitted" };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  const first = client.acknowledgeOrderWarning({
+    accountId: "U1",
+    replyId: "first",
+    confirmed: true,
+  });
+  await firstReplyStarted.promise;
+  const queued = client.acknowledgeOrderWarning({
+    accountId: "U2",
+    replyId: "second",
+    confirmed: true,
+  });
+  await client.close();
+  firstReply.resolve({ order_id: "1", order_status: "PreSubmitted" });
+
+  await first;
+  await assert.rejects(queued, /closed/iu);
+  assert.deepEqual(replyIds, ["first"]);
+});
+
 void test("account preparation rejects a selected account without valid account-list evidence", async () => {
   let accountReads = 0;
   const client = new FakeIbkrClient((input) => {
@@ -624,6 +724,68 @@ void test("account preparation rejects a selected account without valid account-
     /not available for trading/
   );
   assert.ok(client.calls.every(({ method }) => method !== "DELETE"));
+});
+
+void test("cancellation requires unambiguous documented success evidence", async () => {
+  const cases = [
+    {
+      name: "empty",
+      response: {},
+      reason: /did not confirm/,
+      evidence: { message: null, accountId: null, orderId: null, error: null },
+    },
+    {
+      name: "error",
+      response: { error: "Order cannot be cancelled" },
+      reason: /error evidence/,
+      evidence: {
+        message: null,
+        accountId: null,
+        orderId: null,
+        error: "error: Order cannot be cancelled",
+      },
+    },
+    {
+      name: "malformed",
+      response: "accepted",
+      reason: /malformed cancellation response/,
+      evidence: { message: null, accountId: null, orderId: null, error: null },
+    },
+    {
+      name: "identity mismatch",
+      response: { msg: "Request was submitted", account: "U999", order_id: "888" },
+      reason: /account evidence conflicts/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: "U999",
+        orderId: "888",
+        error: null,
+      },
+    },
+  ] as const;
+
+  for (const scenario of cases) {
+    let cancellationCalls = 0;
+    const client = new FakeIbkrClient((input) => {
+      if (input.method === "DELETE") {
+        cancellationCalls += 1;
+        return scenario.response;
+      }
+      return sessionResponse(input);
+    });
+    const result = await client.cancelDerivativeOrder({
+      accountId: "U123",
+      orderId: "777",
+      assetClass: "OPT",
+    });
+
+    assert.equal(result.state, "recovery_required", scenario.name);
+    if (result.state === "recovery_required") {
+      assert.match(result.reason, scenario.reason, scenario.name);
+      assert.deepEqual(result.evidence, scenario.evidence, scenario.name);
+    }
+    assert.equal(cancellationCalls, 1, scenario.name);
+  }
 });
 
 void test("cancel sends one explicit request and returns a typed request acknowledgement", async () => {

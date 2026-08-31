@@ -72,6 +72,7 @@ export type {
   DerivativeExecution,
   DerivativeExecutionQuery,
   DerivativeOrderCancellationResult,
+  DerivativeOrderCancellationEvidence,
   DerivativeOrderGraphLookup,
   DerivativeOrderGraphMemberEvidence,
   DerivativeOrderGraphNode,

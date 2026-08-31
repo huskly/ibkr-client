@@ -48,6 +48,7 @@ import type {
   DerivativeOrderGraphResult,
   DerivativeOrderGraphWarningContinuation,
   DerivativeOrderCancellationResult,
+  DerivativeOrderCancellationEvidence,
   DerivativeOrderCancelRequest,
   DerivativeOrderLifecycle,
   DerivativeOrderLookup,
@@ -89,7 +90,6 @@ import type {
   IbkrLiveOrder,
   IbkrLiveOrdersResponse,
   IbkrOrderSubmissionResponse,
-  IbkrOrderCancellationResponse,
   IbkrMarketDataHistoryBar,
   IbkrMarketDataHistoryResponse,
   IbkrMarketDataSnapshot,
@@ -705,6 +705,7 @@ export class IbkrClient
   private initPromise?: Promise<void>;
   private logoutPromise?: Promise<void>;
   private closed = false;
+  private mutationTail: Promise<void> = Promise.resolve();
   private accountIdPromise?: Promise<string>;
   private readonly optionDiscovery = new Map<string, Promise<OptionDiscoveryResult>>();
   private readonly optionDefinitionCache: OptionDefinitionCache | undefined;
@@ -880,23 +881,23 @@ export class IbkrClient
   ): Promise<DerivativeComboPreviewResult> {
     this.assertOpen();
     this.validateComboPreview(request);
-    const diagnostics = await this.requireSafeTradingAccount(
+    return this.withTradingMutation(
       request.accountId,
-      "IBKR brokerage session is not safely authenticated for What-If"
+      "IBKR brokerage session is not safely authenticated for What-If",
+      async (diagnostics) => {
+        const conids = request.legs.map(({ contract }) => contract.conid).join(",");
+        await this.req<unknown>({
+          path: "iserver/marketdata/snapshot",
+          params: { conids, fields: "6509" },
+        });
+        const response = await this.singleAttemptRequest<IbkrWhatIfResponse>({
+          path: `iserver/account/${request.accountId}/orders/whatif`,
+          method: "POST",
+          data: { orders: [this.comboOrderTicket(request)] },
+        });
+        return this.normalizeComboPreview(request.accountId, diagnostics, response);
+      }
     );
-    const conids = request.legs.map(({ contract }) => contract.conid).join(",");
-    await this.req<unknown>({
-      path: "iserver/marketdata/snapshot",
-      params: { conids, fields: "6509" },
-    });
-    const response = await this.singleAttemptRequest<IbkrWhatIfResponse>({
-      path: `iserver/account/${request.accountId}/orders/whatif`,
-      method: "POST",
-      data: {
-        orders: [this.comboOrderTicket(request)],
-      },
-    });
-    return this.normalizeComboPreview(request.accountId, diagnostics, response);
   }
 
   async submitDerivativeCombo(
@@ -911,26 +912,28 @@ export class IbkrClient
       request.legs[0].contract.assetClass,
       request
     );
-    await this.requireSafeTradingAccount(
+    return this.withTradingMutation(
       request.accountId,
-      "IBKR brokerage session is not safely authenticated for submission"
-    );
-    const response = await this.singleAttemptRequest<
-      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
-    >({
-      path: `iserver/account/${request.accountId}/orders`,
-      method: "POST",
-      data: {
-        orders: [
-          {
-            ...this.comboOrderTicket(request),
-            cOID: request.clientOrderId,
-            ...cmeOperatorMetadata,
+      "IBKR brokerage session is not safely authenticated for submission",
+      async () => {
+        const response = await this.singleAttemptRequest<
+          IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+        >({
+          path: `iserver/account/${request.accountId}/orders`,
+          method: "POST",
+          data: {
+            orders: [
+              {
+                ...this.comboOrderTicket(request),
+                cOID: request.clientOrderId,
+                ...cmeOperatorMetadata,
+              },
+            ],
           },
-        ],
-      },
-    });
-    return this.normalizeOrderSubmission(response, request.clientOrderId);
+        });
+        return this.normalizeOrderSubmission(response, request.clientOrderId);
+      }
+    );
   }
 
   async submitDerivativeSingleOrder(
@@ -939,27 +942,29 @@ export class IbkrClient
     this.assertOpen();
     this.validateSingleOrder(request);
     const cmeOperatorMetadata = this.cmeOperatorMetadata(request.contract.assetClass, request);
-    await this.requireSafeTradingAccount(
+    return this.withTradingMutation(
       request.accountId,
-      "IBKR brokerage session is not safely authenticated for submission"
-    );
-    const response = await this.singleAttemptRequest<
-      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
-    >({
-      path: `iserver/account/${request.accountId}/orders`,
-      method: "POST",
-      data: {
-        orders: [
-          {
-            ...this.singleOrderTicket(request),
-            ...(request.clientOrderId !== undefined ? { cOID: request.clientOrderId } : {}),
-            ...(request.parentId !== undefined ? { parentId: request.parentId } : {}),
-            ...cmeOperatorMetadata,
+      "IBKR brokerage session is not safely authenticated for submission",
+      async () => {
+        const response = await this.singleAttemptRequest<
+          IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+        >({
+          path: `iserver/account/${request.accountId}/orders`,
+          method: "POST",
+          data: {
+            orders: [
+              {
+                ...this.singleOrderTicket(request),
+                ...(request.clientOrderId !== undefined ? { cOID: request.clientOrderId } : {}),
+                ...(request.parentId !== undefined ? { parentId: request.parentId } : {}),
+                ...cmeOperatorMetadata,
+              },
+            ],
           },
-        ],
-      },
-    });
-    return this.normalizeOrderSubmission(response, request.clientOrderId ?? null);
+        });
+        return this.normalizeOrderSubmission(response, request.clientOrderId ?? null);
+      }
+    );
   }
 
   async submitDerivativeContingentOrders(request: {
@@ -987,31 +992,33 @@ export class IbkrClient
     }
     const parentMetadata = this.cmeOperatorMetadata(parent.contract.assetClass, parent);
     const childMetadata = this.cmeOperatorMetadata(child.contract.assetClass, child);
-    await this.requireSafeTradingAccount(
+    return this.withTradingMutation(
       accountId,
-      "IBKR brokerage session is not safely authenticated for submission"
+      "IBKR brokerage session is not safely authenticated for submission",
+      async () => {
+        const response = await this.singleAttemptRequest<
+          IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+        >({
+          path: `iserver/account/${accountId}/orders`,
+          method: "POST",
+          data: {
+            orders: [
+              {
+                ...this.singleOrderTicket(parent),
+                cOID: parent.clientOrderId,
+                ...parentMetadata,
+              },
+              {
+                ...this.singleOrderTicket(child),
+                parentId: parent.clientOrderId,
+                ...childMetadata,
+              },
+            ],
+          },
+        });
+        return this.normalizeMultiOrderSubmission(response, parent.clientOrderId, accountId);
+      }
     );
-    const response = await this.singleAttemptRequest<
-      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
-    >({
-      path: `iserver/account/${accountId}/orders`,
-      method: "POST",
-      data: {
-        orders: [
-          {
-            ...this.singleOrderTicket(parent),
-            cOID: parent.clientOrderId,
-            ...parentMetadata,
-          },
-          {
-            ...this.singleOrderTicket(child),
-            parentId: parent.clientOrderId,
-            ...childMetadata,
-          },
-        ],
-      },
-    });
-    return this.normalizeMultiOrderSubmission(response, parent.clientOrderId, accountId);
   }
 
   async submitDerivativeOrderGraph(
@@ -1019,18 +1026,20 @@ export class IbkrClient
   ): Promise<DerivativeOrderGraphResult> {
     this.assertOpen();
     this.validateOrderGraph(request);
-    await this.requireSafeTradingAccount(
+    return this.withTradingMutation(
       request.accountId,
-      "IBKR brokerage session is not safely authenticated for submission"
+      "IBKR brokerage session is not safely authenticated for submission",
+      async () => {
+        const response = await this.singleAttemptRequest<
+          IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+        >({
+          path: `iserver/account/${request.accountId}/orders`,
+          method: "POST",
+          data: { orders: request.nodes.map((node) => this.graphOrderTicket(request, node)) },
+        });
+        return this.normalizeOrderGraphSubmission(response, request, []);
+      }
     );
-    const response = await this.singleAttemptRequest<
-      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
-    >({
-      path: `iserver/account/${request.accountId}/orders`,
-      method: "POST",
-      data: { orders: request.nodes.map((node) => this.graphOrderTicket(request, node)) },
-    });
-    return this.normalizeOrderGraphSubmission(response, request, []);
   }
 
   async acknowledgeDerivativeOrderGraphWarning(input: {
@@ -1043,21 +1052,23 @@ export class IbkrClient
     this.validateOrderGraph(input.continuation.request);
     if (!input.continuation.replyId.trim())
       throw new Error("An exact warning reply ID is required");
-    await this.requireSafeTradingAccount(
+    return this.withTradingMutation(
       input.continuation.request.accountId,
-      "IBKR brokerage session is not safely authenticated for submission"
-    );
-    const response = await this.singleAttemptRequest<
-      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
-    >({
-      path: `iserver/reply/${encodeURIComponent(input.continuation.replyId)}`,
-      method: "POST",
-      data: { confirmed: true },
-    });
-    return this.normalizeOrderGraphSubmission(
-      response,
-      input.continuation.request,
-      input.continuation.members
+      "IBKR brokerage session is not safely authenticated for submission",
+      async () => {
+        const response = await this.singleAttemptRequest<
+          IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+        >({
+          path: `iserver/reply/${encodeURIComponent(input.continuation.replyId)}`,
+          method: "POST",
+          data: { confirmed: true },
+        });
+        return this.normalizeOrderGraphSubmission(
+          response,
+          input.continuation.request,
+          input.continuation.members
+        );
+      }
     );
   }
 
@@ -1865,20 +1876,24 @@ export class IbkrClient
     confirmed: true;
   }): Promise<DerivativeOrderSubmissionResult> {
     this.assertOpen();
+    const confirmed: unknown = input.confirmed;
+    if (confirmed !== true) throw new Error("Order warning confirmation must be true");
     if (!input.accountId.trim()) throw new Error("An exact account ID is required");
     if (!input.replyId.trim()) throw new Error("An exact warning reply ID is required");
-    await this.requireSafeTradingAccount(
+    return this.withTradingMutation(
       input.accountId,
-      "IBKR brokerage session is not safely authenticated for warning acknowledgement"
+      "IBKR brokerage session is not safely authenticated for warning acknowledgement",
+      async () => {
+        const response = await this.singleAttemptRequest<
+          IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+        >({
+          path: `iserver/reply/${encodeURIComponent(input.replyId)}`,
+          method: "POST",
+          data: { confirmed: true },
+        });
+        return this.normalizeOrderSubmission(response, null);
+      }
     );
-    const response = await this.singleAttemptRequest<
-      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
-    >({
-      path: `iserver/reply/${encodeURIComponent(input.replyId)}`,
-      method: "POST",
-      data: { confirmed: true },
-    });
-    return this.normalizeOrderSubmission(response, null);
   }
 
   async acknowledgeContingentOrderWarning(input: {
@@ -1899,21 +1914,23 @@ export class IbkrClient
     if (!input.continuation.parentClientOrderId.trim()) {
       throw new Error("An exact parent client order ID is required");
     }
-    await this.requireSafeTradingAccount(
+    return this.withTradingMutation(
       input.continuation.accountId,
-      "IBKR brokerage session is not safely authenticated for warning acknowledgement"
-    );
-    const response = await this.singleAttemptRequest<
-      IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
-    >({
-      path: `iserver/reply/${encodeURIComponent(input.continuation.replyId)}`,
-      method: "POST",
-      data: { confirmed: true },
-    });
-    return this.normalizeMultiOrderSubmission(
-      response,
-      input.continuation.parentClientOrderId,
-      input.continuation.accountId
+      "IBKR brokerage session is not safely authenticated for warning acknowledgement",
+      async () => {
+        const response = await this.singleAttemptRequest<
+          IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+        >({
+          path: `iserver/reply/${encodeURIComponent(input.continuation.replyId)}`,
+          method: "POST",
+          data: { confirmed: true },
+        });
+        return this.normalizeMultiOrderSubmission(
+          response,
+          input.continuation.parentClientOrderId,
+          input.continuation.accountId
+        );
+      }
     );
   }
 
@@ -2094,21 +2111,18 @@ export class IbkrClient
       throw new Error("Exact account and order IDs are required");
     }
     const cmeOperatorMetadata = this.cmeOperatorMetadata(input.assetClass, input);
-    await this.requireSafeTradingAccount(
+    return this.withTradingMutation(
       input.accountId,
-      "IBKR brokerage session is not safely authenticated for cancellation"
+      "IBKR brokerage session is not safely authenticated for cancellation",
+      async () => {
+        const response = await this.singleAttemptRequest<unknown>({
+          path: `iserver/account/${input.accountId}/order/${encodeURIComponent(input.orderId)}`,
+          method: "DELETE",
+          ...(Object.keys(cmeOperatorMetadata).length > 0 ? { params: cmeOperatorMetadata } : {}),
+        });
+        return this.normalizeOrderCancellation(input, response);
+      }
     );
-    const response = await this.singleAttemptRequest<IbkrOrderCancellationResponse>({
-      path: `iserver/account/${input.accountId}/order/${encodeURIComponent(input.orderId)}`,
-      method: "DELETE",
-      ...(Object.keys(cmeOperatorMetadata).length > 0 ? { params: cmeOperatorMetadata } : {}),
-    });
-    return {
-      state: "requested",
-      accountId: input.accountId,
-      orderId: input.orderId,
-      message: this.trimmedString(response.msg),
-    };
   }
 
   async getAccountId(): Promise<string> {
@@ -3107,6 +3121,81 @@ export class IbkrClient
           .map((order) => decoded.rawOrderResponses.get(order) ?? order),
       ],
     };
+  }
+
+  private normalizeOrderCancellation(
+    input: DerivativeOrderCancelRequest,
+    response: unknown
+  ): DerivativeOrderCancellationResult {
+    const record = isUnknownRecord(response) ? response : null;
+    const message = this.trimmedString(record?.["msg"]);
+    const accountId = this.trimmedString(record?.["account"]);
+    const orderId = this.cancellationOrderId(record?.["order_id"]);
+    const errorParts = record === null ? [] : this.cancellationErrorParts(record);
+    const evidence: DerivativeOrderCancellationEvidence = {
+      message,
+      accountId,
+      orderId,
+      error: errorParts.length > 0 ? errorParts.join("; ").slice(0, 4_096) : null,
+    };
+    const accountProvided = record !== null && "account" in record;
+    const orderProvided = record !== null && "order_id" in record;
+    let reason: string | null = null;
+    if (record === null) reason = "IBKR returned a malformed cancellation response";
+    else if (errorParts.length > 0) reason = "IBKR returned cancellation error evidence";
+    else if (message !== "Request was submitted")
+      reason = "IBKR did not confirm the cancellation request";
+    else if (accountProvided && accountId === null)
+      reason = "IBKR returned malformed cancellation account evidence";
+    else if (orderProvided && orderId === null)
+      reason = "IBKR returned malformed cancellation order evidence";
+    else if (accountId !== null && accountId !== input.accountId)
+      reason = "IBKR cancellation account evidence conflicts with the request";
+    else if (orderId !== null && orderId !== input.orderId)
+      reason = "IBKR cancellation order evidence conflicts with the request";
+
+    if (reason !== null || message === null) {
+      return {
+        state: "recovery_required",
+        accountId: input.accountId,
+        orderId: input.orderId,
+        reason: reason ?? "IBKR did not confirm the cancellation request",
+        evidence,
+      };
+    }
+    return {
+      state: "requested",
+      accountId: input.accountId,
+      orderId: input.orderId,
+      message,
+    };
+  }
+
+  private cancellationOrderId(value: unknown): string | null {
+    if (typeof value === "string") return this.trimmedString(value);
+    return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+      ? String(value)
+      : null;
+  }
+
+  private cancellationErrorParts(record: Readonly<Record<string, unknown>>): string[] {
+    const parts: string[] = [];
+    for (const key of ["error", "message", "text"] as const) {
+      if (!(key in record)) continue;
+      const text = this.trimmedString(record[key]);
+      parts.push(text === null ? `${key}: present` : `${key}: ${text}`);
+    }
+    for (const key of ["statusCode", "code"] as const) {
+      if (!(key in record)) continue;
+      const value = record[key];
+      parts.push(
+        typeof value === "string" || typeof value === "number"
+          ? `${key}: ${String(value)}`
+          : `${key}: present`
+      );
+    }
+    if (record["success"] === false) parts.push("success: false");
+    return parts;
   }
 
   private normalizeMultiOrderSubmission(
@@ -4160,14 +4249,24 @@ export class IbkrClient
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  private async requireSafeTradingAccount(
+  private withTradingMutation<T>(
     accountId: string,
-    unsafeMessage: string
-  ): Promise<TradingDiagnostics> {
-    const diagnostics = await this.getTradingDiagnostics(accountId);
-    if (!this.isSafeForTradingMutation(diagnostics)) throw new Error(unsafeMessage);
-    await this.prepareBrokerageAccount(accountId);
-    return diagnostics;
+    unsafeMessage: string,
+    operation: (diagnostics: TradingDiagnostics) => Promise<T>
+  ): Promise<T> {
+    this.assertOpen();
+    const result = this.mutationTail.then(async () => {
+      this.assertOpen();
+      const diagnostics = await this.getTradingDiagnostics(accountId);
+      if (!this.isSafeForTradingMutation(diagnostics)) throw new Error(unsafeMessage);
+      await this.prepareBrokerageAccount(accountId);
+      return operation(diagnostics);
+    });
+    this.mutationTail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
   }
 
   private isSafeForTradingMutation(diagnostics: TradingDiagnostics): boolean {

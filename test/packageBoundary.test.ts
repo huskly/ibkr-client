@@ -8,6 +8,8 @@ import {
   type AccountBalances,
   type BrokerClient,
   type DerivativeExecutionClient,
+  type DerivativeOrderCancellationEvidence,
+  type DerivativeOrderCancellationResult,
   type DerivativeContingentWarningContinuation,
   type BrokerQuoteOptions,
   type BrokerQuoteRequest,
@@ -38,6 +40,7 @@ import {
 } from "../src/index.js";
 
 interface PackageManifest {
+  version?: unknown;
   bin?: unknown;
   dependencies?: Record<string, string>;
   scripts?: Record<string, string>;
@@ -189,12 +192,32 @@ test("package exposes only the library and no CLI entry point", async () => {
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   ) as PackageManifest;
 
+  assert.equal(manifest.version, "2.0.0");
   assert.equal(manifest.bin, undefined);
   for (const script of Object.values(manifest.scripts ?? {})) {
     assert.doesNotMatch(script, /(?:src|dist)\/cli(?:\/|\s|$)/);
   }
   assert.equal(manifest.dependencies?.["chalk"], undefined);
   assert.equal(manifest.dependencies?.["commander"], undefined);
+});
+
+void test("public cancellation results require explicit recovery handling", () => {
+  const evidence: DerivativeOrderCancellationEvidence = {
+    message: null,
+    accountId: null,
+    orderId: null,
+    error: "error: unknown state",
+  };
+  const result: DerivativeOrderCancellationResult = {
+    state: "recovery_required",
+    accountId: "U1",
+    orderId: "1",
+    reason: "IBKR returned cancellation error evidence",
+    evidence,
+  };
+
+  assert.equal(result.state, "recovery_required");
+  assert.equal(result.evidence.error, "error: unknown state");
 });
 
 void test("public legacy warning acknowledgements require explicit account identity", () => {
