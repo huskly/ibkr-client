@@ -7,11 +7,20 @@ import {
   IbkrPriceHistoryContractError,
   type AccountBalances,
   type BrokerClient,
+  type BrokerEnvironment,
+  type DerivativeComboPreviewResult,
+  type DerivativeExecutionClient,
+  type DerivativeOrderCancellationEvidence,
+  type DerivativeOrderCancellationResult,
+  type DerivativeContingentWarningContinuation,
   type BrokerQuoteOptions,
   type BrokerQuoteRequest,
   type IbkrClient,
   type IbkrClientOptions,
   type IbkrHttpErrorResponse,
+  type IbkrJsonEvidence,
+  type IbkrSessionEvidence,
+  type IbkrSessionLifecycleClient,
   type IbkrRequestSchedulerOptions,
   type IbkrRequestTelemetry,
   type OptionChainSnapshot,
@@ -30,9 +39,11 @@ import {
   type PriceHistoryResult,
   type PriceHistorySecurityType,
   type PriceHistoryTelemetry,
+  type TradingDiagnostics,
 } from "../src/index.js";
 
 interface PackageManifest {
+  version?: unknown;
   bin?: unknown;
   dependencies?: Record<string, string>;
   scripts?: Record<string, string>;
@@ -184,12 +195,94 @@ test("package exposes only the library and no CLI entry point", async () => {
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   ) as PackageManifest;
 
+  assert.equal(manifest.version, "2.0.0");
   assert.equal(manifest.bin, undefined);
   for (const script of Object.values(manifest.scripts ?? {})) {
     assert.doesNotMatch(script, /(?:src|dist)\/cli(?:\/|\s|$)/);
   }
   assert.equal(manifest.dependencies?.["chalk"], undefined);
   assert.equal(manifest.dependencies?.["commander"], undefined);
+});
+
+void test("public What-If results always carry a known environment", () => {
+  const environment = (result: DerivativeComboPreviewResult): BrokerEnvironment =>
+    result.environment;
+
+  assert.equal(typeof environment, "function");
+});
+
+void test("public cancellation results require explicit recovery handling", () => {
+  const response: IbkrJsonEvidence = { error: "unknown state" };
+  const evidence: DerivativeOrderCancellationEvidence = {
+    message: null,
+    accountId: null,
+    orderId: null,
+    error: "error: unknown state",
+    response,
+  };
+  const result: DerivativeOrderCancellationResult = {
+    state: "recovery_required",
+    accountId: "U1",
+    orderId: "1",
+    reason: "IBKR returned cancellation error evidence",
+    evidence,
+  };
+
+  assert.equal(result.state, "recovery_required");
+  assert.equal(result.evidence.error, "error: unknown state");
+});
+
+void test("public legacy warning acknowledgements require explicit account identity", () => {
+  const input: Parameters<DerivativeExecutionClient["acknowledgeOrderWarning"]>[0] = {
+    accountId: "U1",
+    replyId: "reply-1",
+    confirmed: true,
+  };
+
+  const continuation: DerivativeContingentWarningContinuation = {
+    accountId: "U1",
+    replyId: "reply-2",
+    parentClientOrderId: "parent-1",
+  };
+
+  assert.equal(input.accountId, "U1");
+  assert.equal(continuation.accountId, "U1");
+});
+
+void test("public trading diagnostics preserve unknown connection evidence", () => {
+  const diagnostics: TradingDiagnostics = {
+    accountId: "U1",
+    selectedAccountId: null,
+    environment: null,
+    authenticated: null,
+    connected: null,
+    competingSession: null,
+    marketDataAvailable: null,
+    advisoryAssetPermissions: [],
+  };
+
+  assert.equal(diagnostics.connected, null);
+  assert.equal(diagnostics.environment, null);
+});
+
+void test("package exports the explicit session lifecycle contract", () => {
+  const evidence: IbkrSessionEvidence = {
+    authenticated: null,
+    competing: null,
+    connected: null,
+    accountIds: null,
+    selectedAccountId: null,
+    isPaper: null,
+  };
+  const lifecycle = undefined as IbkrSessionLifecycleClient | undefined;
+  const initialize: IbkrSessionLifecycleClient["initializeBrokerageSession"] | undefined =
+    lifecycle?.initializeBrokerageSession;
+  const renew: IbkrSessionLifecycleClient["renewBrokerageSession"] | undefined =
+    lifecycle?.renewBrokerageSession;
+
+  assert.equal(evidence.connected, null);
+  assert.equal(initialize, undefined);
+  assert.equal(renew, undefined);
 });
 
 void test("package exports structured HTTP error evidence", () => {

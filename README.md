@@ -57,6 +57,18 @@ Optional environment variables:
 - `IBKR_ACCOUNT_ID` — target a specific account (otherwise the first is used).
 - `IBKR_TRANSACTION_CURRENCY` — transaction-query currency (defaults to `USD`).
 
+## Version 2 migration
+
+Version 2.0.0 makes session and write safety evidence explicit:
+
+- Use `initializeBrokerageSession(...)` and the other explicit lifecycle methods instead of `init()`.
+- Handle nullable `AuthStatus` and `TradingDiagnostics` fields, including `connected`. A successful
+  What-If result still has a non-null environment because its safety gate requires that evidence.
+- Pass an exact `accountId` to legacy warning acknowledgements and keep it in contingent warning
+  continuations.
+- Handle both `requested` and `recovery_required` cancellation results. Only an unambiguous broker
+  acknowledgement returns `requested`.
+
 ## Library API
 
 `IbkrClient` owns IBKR authentication, requests, raw response types, and
@@ -100,6 +112,38 @@ validated at runtime. Its broker-neutral account API includes:
 - `fetchTransactionHistory()` for normalized portfolio transactions.
 - `fetchOrders()` for normalized live orders, including aggregate `WORKING`
   matching across IBKR's active order states.
+
+### Brokerage session lifecycle
+
+Use the explicit session lifecycle API for gateways and long-running processes:
+
+```ts
+await client.initializeBrokerageSession({ compete: false, publish: true });
+const evidence = await client.getSessionEvidence();
+await client.tickle();
+await client.renewBrokerageSession({ compete: false, publish: true });
+await client.logout();
+await client.close();
+```
+
+Initialization and renewal pass both flags to IBKR once. Both flags must be exact booleans, and
+renewal only accepts `compete: false`. Invalid or missing flags fail before raw client access.
+`tickle()` is a safe read and can use the read scheduler retry policy. `logout()` makes at most one
+broker request for each client, including when that request fails. `close()` only closes local
+admission. It does not invent a transport close operation and does not log out implicitly. After
+`close()`, the client rejects new lifecycle operations and broker requests.
+
+`getSessionEvidence()` returns authentication, connection, competition, account, selected-account,
+and paper-account evidence. `getAuthStatus()` returns the authentication, connection, and
+competition subset. Missing or malformed evidence stays `null`. An explicit empty account list stays
+an empty list. `getTradingDiagnostics()` also returns `null` for an unknown environment,
+authentication state, connection state, or competition state. Mutation gates require
+`authenticated === true`,
+`connected === true`, `competingSession === false`, and a known environment.
+
+The deprecated `init()` method remains for compatibility. It uses `compete: true` and
+`publish: true`, and it stays idempotent. New code must use `initializeBrokerageSession()` with
+explicit flags.
 
 ### Strategy market data
 
@@ -400,11 +444,11 @@ return `recovery_required`, because they do not prove that every submitted ticke
   all-or-none response: `accepted` therefore requires exactly two non-failure acknowledgements,
   while mixed, incomplete, pending-cancel, canceled, rejected, unknown, or malformed evidence is
   returned as `recovery_required` with every observed broker order ID retained.
-- `acknowledgeOrderWarning(...)` replies once to an exact broker warning ID. Warnings with a
-  non-empty array of string message IDs are marked `known`; callers must still approve exact IDs,
-  and malformed or missing IDs remain unknown.
+- `acknowledgeOrderWarning(...)` requires an exact account ID and replies once to an exact broker
+  warning ID. Warnings with a non-empty array of string message IDs are marked `known`; callers must
+  still approve exact IDs, and malformed or missing IDs remain unknown.
 - A warning from `submitDerivativeContingentOrders(...)` includes a typed `continuation` containing
-  the exact reply ID and parent client ID. Pass that object unchanged to
+  the exact account ID, reply ID, and parent client ID. Pass that object unchanged to
   `acknowledgeContingentOrderWarning(...)`; its result retains both broker acknowledgements or
   returns all partial evidence as `recovery_required`. Do not route contingent warnings through the
   single-order acknowledgement method.
@@ -440,13 +484,17 @@ return `recovery_required`, because they do not prove that every submitted ticke
   validates each expected leg's side and ratio-derived quantity. Its sanitized result separates
   gross option points, multiplier-adjusted gross dollars, commission, and net dollars without
   exposing account or execution IDs.
-- `cancelDerivativeOrder(...)` sends one exact cancellation request and returns only a typed
-  `requested` acknowledgement. Its required `assetClass` lets the client apply the same
-  product-aware CME metadata rule without guessing from an order ID. Callers remain responsible
-  for reading until a terminal state and verifying that cancellation reached `CANCELED`.
+- `cancelDerivativeOrder(...)` uses its exact account ID and sends one exact cancellation request.
+  It returns `requested` only for the exact documented success shape with no conflicting identity
+  or error evidence. Other 2xx payloads return `recovery_required` with bounded, sanitized complete
+  JSON evidence and a reason. Its required `assetClass` lets the client apply the same product-aware
+  CME metadata rule without guessing from an order ID. Callers remain responsible for reading until
+  a terminal state and verifying that cancellation reached `CANCELED`.
 
-Placement, warning replies, and cancellation deliberately use single-attempt HTTP writes so a
-transport retry cannot duplicate a broker action. A BUY-oriented net credit remains negative at
+Placement, warning replies, and cancellation use one common fail-closed session and exact-account
+check. One FIFO gate keeps account preparation and the related outbound request in one critical
+section. They deliberately use single-attempt HTTP writes so a transport retry cannot duplicate a
+broker action. A BUY-oriented net credit remains negative at
 the IBKR boundary, matching the What-If ticket exactly. Every write requires the exact account ID;
 the library never falls back to the first account. Broker-declared order rejections retain their
 structured response in `BrokerErrorDetail.details`; transport exceptions are rethrown intact.
@@ -508,7 +556,7 @@ node --input-type=module <<'NODE'
 import { IbkrClient, buildOauthConfig } from "./dist/index.js";
 
 const client = new IbkrClient(buildOauthConfig());
-await client.init();
+await client.initializeBrokerageSession({ compete: false, publish: true });
 const symbol = process.env.IBKR_SMOKE_SYMBOL;
 const from = process.env.IBKR_SMOKE_FROM;
 const to = process.env.IBKR_SMOKE_TO;
@@ -539,7 +587,7 @@ import { IbkrClient, buildOauthConfig } from "./dist/index.js";
 const client = new IbkrClient(buildOauthConfig(), {
   onPriceHistoryTelemetry: (event) => console.log(event),
 });
-await client.init();
+await client.initializeBrokerageSession({ compete: false, publish: true });
 const result = await client.getPriceHistory({
   symbol: "SPX",
   contract: { conid: 416904, assetClass: "IND", exchange: "CBOE" },

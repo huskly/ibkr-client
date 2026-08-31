@@ -10,8 +10,29 @@ export type BrokerInstrumentSearchProjection =
   "symbol-search" | "symbol-regex" | "desc-search" | "desc-regex" | "search" | "fundamental";
 
 export interface AuthStatus {
-  authenticated: boolean;
-  competing: boolean;
+  authenticated: boolean | null;
+  competing: boolean | null;
+  connected: boolean | null;
+}
+
+/** Broker evidence for the current authenticated session. Unknown fields stay null. */
+export interface IbkrSessionEvidence {
+  authenticated: boolean | null;
+  competing: boolean | null;
+  connected: boolean | null;
+  accountIds: readonly string[] | null;
+  selectedAccountId: string | null;
+  isPaper: boolean | null;
+}
+
+/** Explicit lifecycle operations for one IBKR brokerage session. */
+export interface IbkrSessionLifecycleClient {
+  initializeBrokerageSession(input: { compete: boolean; publish: boolean }): Promise<void>;
+  renewBrokerageSession(input: { compete: false; publish: boolean }): Promise<void>;
+  getSessionEvidence(): Promise<IbkrSessionEvidence>;
+  tickle(): Promise<void>;
+  logout(): Promise<void>;
+  close(): Promise<void>;
 }
 
 export interface AccountMarginSnapshot {
@@ -308,9 +329,10 @@ export type BrokerEnvironment = "live" | "paper";
 export interface TradingDiagnostics {
   accountId: string;
   selectedAccountId: string | null;
-  environment: BrokerEnvironment;
-  authenticated: boolean;
-  competingSession: boolean;
+  environment: BrokerEnvironment | null;
+  authenticated: boolean | null;
+  connected: boolean | null;
+  competingSession: boolean | null;
   marketDataAvailable: boolean | null;
   advisoryAssetPermissions: string[];
 }
@@ -422,6 +444,7 @@ export interface DerivativeContingentOrderEvidence extends DerivativeSubmittedOr
 }
 
 export interface DerivativeContingentWarningContinuation {
+  accountId: string;
   replyId: string;
   parentClientOrderId: string;
 }
@@ -715,12 +738,36 @@ export interface DerivativeExecution {
   executedAt: string | null;
 }
 
-export interface DerivativeOrderCancellationResult {
-  state: "requested";
-  accountId: string;
-  orderId: string;
+export type IbkrJsonEvidence =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly IbkrJsonEvidence[]
+  | { readonly [key: string]: IbkrJsonEvidence };
+
+export interface DerivativeOrderCancellationEvidence {
   message: string | null;
+  accountId: string | null;
+  orderId: string | null;
+  error: string | null;
+  response: IbkrJsonEvidence;
 }
+
+export type DerivativeOrderCancellationResult =
+  | {
+      state: "requested";
+      accountId: string;
+      orderId: string;
+      message: string;
+    }
+  | {
+      state: "recovery_required";
+      accountId: string;
+      orderId: string;
+      reason: string;
+      evidence: DerivativeOrderCancellationEvidence;
+    };
 
 export type DerivativeExecutionSide = "BUY" | "SELL";
 
@@ -784,6 +831,7 @@ export interface DerivativeExecutionClient {
     child: DerivativeContingentChildOrderRequest;
   }): Promise<DerivativeMultiOrderResult>;
   acknowledgeOrderWarning(input: {
+    accountId: string;
     replyId: string;
     confirmed: true;
   }): Promise<DerivativeOrderSubmissionResult>;

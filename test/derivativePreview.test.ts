@@ -69,7 +69,8 @@ function request(): DerivativeComboPreviewRequest {
 }
 
 function responder(input: RequestInput): unknown {
-  if (input.path === "iserver/auth/status") return { authenticated: true, competing: false };
+  if (input.path === "iserver/auth/status")
+    return { authenticated: true, connected: true, competing: false };
   if (input.path === "iserver/accounts") {
     return {
       accounts: ["U123"],
@@ -137,9 +138,64 @@ void test("diagnostics require an exact account and distinguish live from paper"
   await assert.rejects(() => live.getTradingDiagnostics(""), /explicit IBKR account ID/);
 });
 
+void test("What-If fails closed when competition evidence is missing", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true };
+    }
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  await assert.rejects(() => client.previewDerivativeCombo(request()), /not safely authenticated/);
+  assert.ok(client.calls.every(({ path }) => !path.endsWith("/orders/whatif")));
+});
+
+void test("What-If fails closed on unknown connection or environment evidence", async () => {
+  const cases = [
+    {
+      name: "disconnected",
+      status: { authenticated: true, connected: false, competing: false },
+      accounts: { accounts: ["U123"], selectedAccount: "U123", isPaper: true },
+    },
+    {
+      name: "unknown connection",
+      status: { authenticated: true, competing: false },
+      accounts: { accounts: ["U123"], selectedAccount: "U123", isPaper: true },
+    },
+    {
+      name: "unknown environment",
+      status: { authenticated: true, connected: true, competing: false },
+      accounts: { accounts: ["U123"], selectedAccount: "U123" },
+    },
+  ] as const;
+
+  for (const scenario of cases) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/auth/status") return scenario.status;
+      if (input.path === "iserver/accounts") return scenario.accounts;
+      throw new Error(`Unexpected request ${input.path}`);
+    });
+
+    await assert.rejects(
+      () => client.previewDerivativeCombo(request()),
+      /not safely authenticated/,
+      scenario.name
+    );
+    assert.ok(
+      client.calls.every(({ path }) => !path.endsWith("/orders/whatif")),
+      scenario.name
+    );
+  }
+});
+
 void test("What-If response is authoritative and incomplete success fails closed", async () => {
   const client = new FakeIbkrClient((input) => {
-    if (input.path === "iserver/auth/status") return { authenticated: true };
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
     if (input.path === "iserver/accounts") {
       return {
         accounts: ["U123"],

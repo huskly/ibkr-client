@@ -62,7 +62,8 @@ function contract(
 }
 
 function sessionResponse(input: RequestInput): unknown {
-  if (input.path === "iserver/auth/status") return { authenticated: true, competing: false };
+  if (input.path === "iserver/auth/status")
+    return { authenticated: true, connected: true, competing: false };
   if (input.path === "iserver/accounts") {
     return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
   }
@@ -556,6 +557,7 @@ void test("contingent order warning and rejection outcomes", async () => {
     }
     if (result.state === "warning" && fixture.expected.state === "warning") {
       assert.deepEqual(result.continuation, {
+        accountId: "U123",
         replyId: "warn-1",
         parentClientOrderId: "parent-warning",
       });
@@ -708,11 +710,11 @@ void test("acknowledgeContingentOrderWarning returns multi-order result", async 
   ];
   const client = new FakeIbkrClient((input) => {
     if (input.path.startsWith("iserver/reply/")) return responses.shift();
-    throw new Error(`Unexpected request ${input.path}`);
+    return sessionResponse(input);
   });
 
   const result = await client.acknowledgeContingentOrderWarning({
-    continuation: { replyId: "cont-reply", parentClientOrderId: "parent-ack" },
+    continuation: { accountId: "U123", replyId: "cont-reply", parentClientOrderId: "parent-ack" },
     confirmed: true,
   });
   assert.equal(result.state, "accepted");
@@ -730,11 +732,11 @@ void test("acknowledgeContingentOrderWarning rejects when only one order recogni
   const client = new FakeIbkrClient((input) => {
     if (input.path.startsWith("iserver/reply/"))
       return [{ order_id: "777", order_status: "PreSubmitted" }];
-    throw new Error(`Unexpected request ${input.path}`);
+    return sessionResponse(input);
   });
 
   const result = await client.acknowledgeContingentOrderWarning({
-    continuation: { replyId: "partial", parentClientOrderId: "parent-partial" },
+    continuation: { accountId: "U123", replyId: "partial", parentClientOrderId: "parent-partial" },
     confirmed: true,
   });
   assert.equal(result.state, "recovery_required");
@@ -887,7 +889,11 @@ void test("contingent acknowledgement rejects false confirmation before broker a
   await assert.rejects(
     () =>
       client.acknowledgeContingentOrderWarning({
-        continuation: { replyId: "declined", parentClientOrderId: "parent-declined" },
+        continuation: {
+          accountId: "U123",
+          replyId: "declined",
+          parentClientOrderId: "parent-declined",
+        },
         confirmed: false,
       } as unknown as Parameters<IbkrClient["acknowledgeContingentOrderWarning"]>[0]),
     /Order warning confirmation must be true/
@@ -947,10 +953,14 @@ void test("malformed primitive broker replies retain recovery evidence", async (
 
   const contingent = new FakeIbkrClient((input) => {
     if (input.path.startsWith("iserver/reply/")) return "malformed-reply";
-    throw new Error(`Unexpected request ${input.path}`);
+    return sessionResponse(input);
   });
   const contingentResult = await contingent.acknowledgeContingentOrderWarning({
-    continuation: { replyId: "malformed", parentClientOrderId: "parent-malformed" },
+    continuation: {
+      accountId: "U123",
+      replyId: "malformed",
+      parentClientOrderId: "parent-malformed",
+    },
     confirmed: true,
   });
   assert.equal(contingentResult.state, "recovery_required");

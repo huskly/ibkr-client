@@ -93,7 +93,8 @@ function executionRequest(): DerivativeComboExecutionRequest {
 }
 
 function sessionResponse(input: RequestInput): unknown {
-  if (input.path === "iserver/auth/status") return { authenticated: true, competing: false };
+  if (input.path === "iserver/auth/status")
+    return { authenticated: true, connected: true, competing: false };
   if (input.path === "iserver/accounts") {
     return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
   }
@@ -255,19 +256,32 @@ void test("warning replies classify well-formed IDs and reject malformed IDs", a
   ];
   const client = new FakeIbkrClient((input) => {
     if (input.path.startsWith("iserver/reply/")) return responses.shift();
-    throw new Error(`Unexpected request ${input.path}`);
+    return sessionResponse(input);
   });
 
-  const malformed = await client.acknowledgeOrderWarning({ replyId: "malformed", confirmed: true });
+  const malformed = await client.acknowledgeOrderWarning({
+    accountId: "U123",
+    replyId: "malformed",
+    confirmed: true,
+  });
   assert.equal(malformed.state === "warning" && malformed.warnings[0]?.known, false);
   const otherKnown = await client.acknowledgeOrderWarning({
+    accountId: "U123",
     replyId: "other-known",
     confirmed: true,
   });
   assert.equal(otherKnown.state === "warning" && otherKnown.warnings[0]?.known, true);
-  const known = await client.acknowledgeOrderWarning({ replyId: "known", confirmed: true });
+  const known = await client.acknowledgeOrderWarning({
+    accountId: "U123",
+    replyId: "known",
+    confirmed: true,
+  });
   assert.equal(known.state === "warning" && known.warnings[0]?.known, true);
-  const accepted = await client.acknowledgeOrderWarning({ replyId: "final", confirmed: true });
+  const accepted = await client.acknowledgeOrderWarning({
+    accountId: "U123",
+    replyId: "final",
+    confirmed: true,
+  });
   assert.deepEqual(accepted, {
     state: "accepted",
     orderId: "777",
@@ -556,10 +570,428 @@ void test("exact lifecycle lookup fails closed on identity or status mismatch", 
   }
 });
 
+void test("legacy warning acknowledgement requires an exact safe account", async () => {
+  const missingAccount = new FakeIbkrClient(() => {
+    throw new Error("Broker access was not expected");
+  });
+  await assert.rejects(
+    missingAccount.acknowledgeOrderWarning({
+      accountId: "U123",
+      replyId: "reply",
+      confirmed: false,
+    } as unknown as Parameters<IbkrClient["acknowledgeOrderWarning"]>[0]),
+    /confirmation must be true/
+  );
+  assert.deepEqual(missingAccount.calls, []);
+  await assert.rejects(
+    missingAccount.acknowledgeOrderWarning({
+      accountId: "",
+      replyId: "reply",
+      confirmed: true,
+    }),
+    /exact account ID/
+  );
+  assert.deepEqual(missingAccount.calls, []);
+
+  const disconnected = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: false, competing: false };
+    }
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+  await assert.rejects(
+    disconnected.acknowledgeOrderWarning({
+      accountId: "U123",
+      replyId: "reply",
+      confirmed: true,
+    }),
+    /not safely authenticated/
+  );
+  assert.ok(disconnected.calls.every(({ path }) => !path.startsWith("iserver/reply/")));
+});
+
+void test("trading mutations serialize account selection through accountless replies", async () => {
+  let selectedAccount = "U1";
+  const firstReplyStarted = Promise.withResolvers<void>();
+  const firstReply = Promise.withResolvers<unknown>();
+  const replyAccounts: string[] = [];
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U1", "U2"], selectedAccount, isPaper: true };
+    }
+    if (input.path === "iserver/account") {
+      selectedAccount = String((input.data as { acctId: string }).acctId);
+      return { set: true, acctId: selectedAccount };
+    }
+    if (input.path === "iserver/reply/first") {
+      replyAccounts.push(selectedAccount);
+      firstReplyStarted.resolve();
+      return firstReply.promise;
+    }
+    if (input.path === "iserver/reply/second") {
+      replyAccounts.push(selectedAccount);
+      return { order_id: "2", order_status: "PreSubmitted" };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  const first = client.acknowledgeOrderWarning({
+    accountId: "U1",
+    replyId: "first",
+    confirmed: true,
+  });
+  await firstReplyStarted.promise;
+  const second = client.acknowledgeOrderWarning({
+    accountId: "U2",
+    replyId: "second",
+    confirmed: true,
+  });
+  await Promise.resolve();
+  assert.deepEqual(replyAccounts, ["U1"]);
+  assert.equal(selectedAccount, "U1");
+
+  firstReply.resolve({ order_id: "1", order_status: "PreSubmitted" });
+  await first;
+  await second;
+  assert.deepEqual(replyAccounts, ["U1", "U2"]);
+});
+
+void test("account-switching reads cannot interleave with an accountless warning reply", async () => {
+  let selectedAccount = "U1";
+  const firstReplyStarted = Promise.withResolvers<void>();
+  const firstReply = Promise.withResolvers<unknown>();
+  const accountOrderReads: string[] = [];
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U1", "U2"], selectedAccount, isPaper: true };
+    }
+    if (input.path === "iserver/account") {
+      selectedAccount = String((input.data as { acctId: string }).acctId);
+      return { set: true, acctId: selectedAccount };
+    }
+    if (input.path === "iserver/reply/first") {
+      firstReplyStarted.resolve();
+      return firstReply.promise;
+    }
+    if (input.path === "iserver/account/orders") {
+      accountOrderReads.push(selectedAccount);
+      return { orders: [], snapshot: true };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  const warning = client.acknowledgeOrderWarning({
+    accountId: "U1",
+    replyId: "first",
+    confirmed: true,
+  });
+  await firstReplyStarted.promise;
+  const activeOrders = client.listActiveDerivativeOrders("U2");
+  await Promise.resolve();
+  assert.equal(selectedAccount, "U1");
+  assert.deepEqual(accountOrderReads, []);
+
+  firstReply.resolve({ order_id: "1", order_status: "PreSubmitted" });
+  await warning;
+  assert.deepEqual(await activeOrders, []);
+  assert.equal(selectedAccount, "U2");
+  assert.deepEqual(accountOrderReads, ["U2"]);
+});
+
+void test("close rejects a queued mutation before broker access", async () => {
+  const firstReplyStarted = Promise.withResolvers<void>();
+  const firstReply = Promise.withResolvers<unknown>();
+  const replyIds: string[] = [];
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U1", "U2"], selectedAccount: "U1", isPaper: true };
+    }
+    if (input.path === "iserver/reply/first") {
+      replyIds.push("first");
+      firstReplyStarted.resolve();
+      return firstReply.promise;
+    }
+    if (input.path.startsWith("iserver/reply/")) {
+      replyIds.push(input.path.slice("iserver/reply/".length));
+      return { order_id: "2", order_status: "PreSubmitted" };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  const first = client.acknowledgeOrderWarning({
+    accountId: "U1",
+    replyId: "first",
+    confirmed: true,
+  });
+  await firstReplyStarted.promise;
+  const queued = client.acknowledgeOrderWarning({
+    accountId: "U2",
+    replyId: "second",
+    confirmed: true,
+  });
+  await client.close();
+  firstReply.resolve({ order_id: "1", order_status: "PreSubmitted" });
+
+  await first;
+  await assert.rejects(queued, /closed/iu);
+  assert.deepEqual(replyIds, ["first"]);
+});
+
+void test("account preparation rejects a selected account without valid account-list evidence", async () => {
+  let accountReads = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
+    if (input.path === "iserver/accounts") {
+      accountReads += 1;
+      return accountReads === 1
+        ? { accounts: ["U123"], selectedAccount: "U123", isPaper: true }
+        : { selectedAccount: "U123" };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  await assert.rejects(
+    client.cancelDerivativeOrder({ accountId: "U123", orderId: "777", assetClass: "OPT" }),
+    /not available for trading/
+  );
+  assert.ok(client.calls.every(({ method }) => method !== "DELETE"));
+});
+
+void test("cancellation requires unambiguous documented success evidence", async () => {
+  const cases = [
+    {
+      name: "empty",
+      response: {},
+      reason: /did not confirm/,
+      evidence: { message: null, accountId: null, orderId: null, error: null, response: {} },
+    },
+    {
+      name: "error",
+      response: { error: "Order cannot be cancelled" },
+      reason: /error evidence/,
+      evidence: {
+        message: null,
+        accountId: null,
+        orderId: null,
+        error: "error: Order cannot be cancelled",
+        response: { error: "Order cannot be cancelled" },
+      },
+    },
+    {
+      name: "malformed",
+      response: "accepted",
+      reason: /malformed cancellation response/,
+      evidence: {
+        message: null,
+        accountId: null,
+        orderId: null,
+        error: null,
+        response: "accepted",
+      },
+    },
+    {
+      name: "identity mismatch",
+      response: { msg: "Request was submitted", account: "U999", order_id: "888" },
+      reason: /account evidence conflicts/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: "U999",
+        orderId: "888",
+        error: null,
+        response: { msg: "Request was submitted", account: "U999", order_id: "888" },
+      },
+    },
+    {
+      name: "rejected status",
+      response: { msg: "Request was submitted", status: "Rejected" },
+      reason: /undocumented cancellation fields/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: null,
+        orderId: null,
+        error: null,
+        response: { msg: "Request was submitted", status: "Rejected" },
+      },
+    },
+    {
+      name: "unknown order status",
+      response: { msg: "Request was submitted", order_status: "Pending" },
+      reason: /undocumented cancellation fields/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: null,
+        orderId: null,
+        error: null,
+        response: { msg: "Request was submitted", order_status: "Pending" },
+      },
+    },
+    {
+      name: "unknown success flag",
+      response: { msg: "Request was submitted", success: true },
+      reason: /undocumented cancellation fields/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: null,
+        orderId: null,
+        error: null,
+        response: { msg: "Request was submitted", success: true },
+      },
+    },
+    {
+      name: "nested error",
+      response: { msg: "Request was submitted", error: { code: "cannot_cancel" } },
+      reason: /error evidence/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: null,
+        orderId: null,
+        error: "error: present",
+        response: { msg: "Request was submitted", error: { code: "cannot_cancel" } },
+      },
+    },
+    {
+      name: "non-JSON conid",
+      response: { msg: "Request was submitted", conid: undefined },
+      reason: /malformed cancellation conid evidence/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: null,
+        orderId: null,
+        error: null,
+        response: { msg: "Request was submitted", conid: "[non-json undefined]" },
+      },
+    },
+    {
+      name: "partial identity without acknowledgement",
+      response: { account: "U123", order_id: "777" },
+      reason: /did not confirm/,
+      evidence: {
+        message: null,
+        accountId: "U123",
+        orderId: "777",
+        error: null,
+        response: { account: "U123", order_id: "777" },
+      },
+    },
+  ] as const;
+
+  for (const scenario of cases) {
+    let cancellationCalls = 0;
+    const client = new FakeIbkrClient((input) => {
+      if (input.method === "DELETE") {
+        cancellationCalls += 1;
+        return scenario.response;
+      }
+      return sessionResponse(input);
+    });
+    const result = await client.cancelDerivativeOrder({
+      accountId: "U123",
+      orderId: "777",
+      assetClass: "OPT",
+    });
+
+    assert.equal(result.state, "recovery_required", scenario.name);
+    if (result.state === "recovery_required") {
+      assert.match(result.reason, scenario.reason, scenario.name);
+      const { response: actualResponse, ...actualEvidence } = result.evidence;
+      const { response: expectedResponse, ...expectedEvidence } = scenario.evidence;
+      assert.deepEqual(actualEvidence, expectedEvidence, scenario.name);
+      assert.equal(JSON.stringify(actualResponse), JSON.stringify(expectedResponse), scenario.name);
+    }
+    assert.equal(cancellationCalls, 1, scenario.name);
+  }
+});
+
+void test("cancellation JSON evidence is collision-safe, bounded, and deterministic", async () => {
+  const evidenceFor = async (response: unknown) => {
+    const client = new FakeIbkrClient((input) => {
+      if (input.method === "DELETE") return response;
+      return sessionResponse(input);
+    });
+    const result = await client.cancelDerivativeOrder({
+      accountId: "U123",
+      orderId: "777",
+      assetClass: "OPT",
+    });
+    if (result.state !== "recovery_required") throw new Error("Expected cancellation recovery");
+    return result.evidence.response;
+  };
+
+  const protoPayload = JSON.parse(
+    '{"msg":"Request was submitted","__proto__":{"polluted":true}}'
+  ) as unknown;
+  const protoEvidence = await evidenceFor(protoPayload);
+  assert.equal(Object.getPrototypeOf(protoEvidence), null);
+  assert.equal(Object.prototype.hasOwnProperty.call(protoEvidence, "__proto__"), true);
+  const protoValue = (protoEvidence as Record<string, unknown>)["__proto__"];
+  assert.equal(Object.getPrototypeOf(protoValue), null);
+
+  const prefix = "x".repeat(300);
+  const firstKey = `${prefix}-first`;
+  const secondKey = `${prefix}-second`;
+  const collisionEvidence = await evidenceFor({
+    msg: "Request was submitted",
+    [firstKey]: 1,
+    [secondKey]: 2,
+  });
+  const collisionRecord = collisionEvidence as Record<string, unknown>;
+  assert.equal(collisionRecord[firstKey], 1);
+  assert.equal(collisionRecord[secondKey], 2);
+
+  const escapeEvidence = await evidenceFor({
+    msg: "Request was submitted",
+    error: '\\"\n'.repeat(10_000),
+  });
+  const escapeRecord = escapeEvidence as Record<string, unknown>;
+  assert.equal(Object.getPrototypeOf(escapeRecord), null);
+  assert.equal(escapeRecord["[truncated: evidence size]"], true);
+  assert.equal(typeof escapeRecord["originalSerializedLength"], "number");
+  assert.equal(typeof escapeRecord["preview"], "string");
+  assert.ok(JSON.stringify(escapeEvidence).length <= 8_192);
+
+  let deep: Record<string, unknown> = { leaf: true };
+  for (let index = 0; index < 12; index += 1) deep = { child: deep };
+  const depthEvidence = await evidenceFor({ msg: "Request was submitted", deep });
+  assert.match(JSON.stringify(depthEvidence), /\[truncated: depth\]/);
+
+  const many: Record<string, unknown> = { msg: "Request was submitted" };
+  for (let index = 0; index < 600; index += 1) many[`field-${String(index)}`] = index;
+  const entryEvidence = await evidenceFor(many);
+  assert.match(JSON.stringify(entryEvidence), /\[truncated: entry count\]/);
+
+  const shared: Record<string, unknown> = { value: 1 };
+  shared["self"] = shared;
+  const references = { msg: "Request was submitted", first: shared, second: shared };
+  const firstReferences = await evidenceFor(references);
+  const secondReferences = await evidenceFor(references);
+  assert.equal(JSON.stringify(firstReferences), JSON.stringify(secondReferences));
+  const referenceRecord = firstReferences as Record<string, unknown>;
+  const firstReference = referenceRecord["first"] as Record<string, unknown>;
+  assert.equal(firstReference["self"], '[reference: $."first"]');
+  assert.equal(referenceRecord["second"], '[reference: $."first"]');
+});
+
 void test("cancel sends one explicit request and returns a typed request acknowledgement", async () => {
   const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
     if (input.path === "iserver/accounts") {
-      return { accounts: ["U123"], selectedAccount: "U123" };
+      return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
     }
     if (input.method === "DELETE") {
       return { msg: "Request was submitted", order_id: "777", account: "U123", conid: 123 };
@@ -684,8 +1116,11 @@ void test("combo submission requires exactly one warning continuation", async ()
 
 void test("equity-option cancellation omits CME operator metadata", async () => {
   const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
     if (input.path === "iserver/accounts") {
-      return { accounts: ["U123"], selectedAccount: "U123" };
+      return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
     }
     if (input.method === "DELETE") return { msg: "Request was submitted" };
     throw new Error(`Unexpected request ${input.path}`);
