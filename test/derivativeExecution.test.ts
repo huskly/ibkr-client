@@ -907,10 +907,82 @@ void test("cancellation requires unambiguous documented success evidence", async
     assert.equal(result.state, "recovery_required", scenario.name);
     if (result.state === "recovery_required") {
       assert.match(result.reason, scenario.reason, scenario.name);
-      assert.deepEqual(result.evidence, scenario.evidence, scenario.name);
+      const { response: actualResponse, ...actualEvidence } = result.evidence;
+      const { response: expectedResponse, ...expectedEvidence } = scenario.evidence;
+      assert.deepEqual(actualEvidence, expectedEvidence, scenario.name);
+      assert.equal(JSON.stringify(actualResponse), JSON.stringify(expectedResponse), scenario.name);
     }
     assert.equal(cancellationCalls, 1, scenario.name);
   }
+});
+
+void test("cancellation JSON evidence is collision-safe, bounded, and deterministic", async () => {
+  const evidenceFor = async (response: unknown) => {
+    const client = new FakeIbkrClient((input) => {
+      if (input.method === "DELETE") return response;
+      return sessionResponse(input);
+    });
+    const result = await client.cancelDerivativeOrder({
+      accountId: "U123",
+      orderId: "777",
+      assetClass: "OPT",
+    });
+    if (result.state !== "recovery_required") throw new Error("Expected cancellation recovery");
+    return result.evidence.response;
+  };
+
+  const protoPayload = JSON.parse(
+    '{"msg":"Request was submitted","__proto__":{"polluted":true}}'
+  ) as unknown;
+  const protoEvidence = await evidenceFor(protoPayload);
+  assert.equal(Object.getPrototypeOf(protoEvidence), null);
+  assert.equal(Object.prototype.hasOwnProperty.call(protoEvidence, "__proto__"), true);
+  const protoValue = (protoEvidence as Record<string, unknown>)["__proto__"];
+  assert.equal(Object.getPrototypeOf(protoValue), null);
+
+  const prefix = "x".repeat(300);
+  const firstKey = `${prefix}-first`;
+  const secondKey = `${prefix}-second`;
+  const collisionEvidence = await evidenceFor({
+    msg: "Request was submitted",
+    [firstKey]: 1,
+    [secondKey]: 2,
+  });
+  const collisionRecord = collisionEvidence as Record<string, unknown>;
+  assert.equal(collisionRecord[firstKey], 1);
+  assert.equal(collisionRecord[secondKey], 2);
+
+  const escapeEvidence = await evidenceFor({
+    msg: "Request was submitted",
+    error: '\\"\n'.repeat(10_000),
+  });
+  const escapeRecord = escapeEvidence as Record<string, unknown>;
+  assert.equal(Object.getPrototypeOf(escapeRecord), null);
+  assert.equal(escapeRecord["[truncated: evidence size]"], true);
+  assert.equal(typeof escapeRecord["originalSerializedLength"], "number");
+  assert.equal(typeof escapeRecord["preview"], "string");
+  assert.ok(JSON.stringify(escapeEvidence).length <= 8_192);
+
+  let deep: Record<string, unknown> = { leaf: true };
+  for (let index = 0; index < 12; index += 1) deep = { child: deep };
+  const depthEvidence = await evidenceFor({ msg: "Request was submitted", deep });
+  assert.match(JSON.stringify(depthEvidence), /\[truncated: depth\]/);
+
+  const many: Record<string, unknown> = { msg: "Request was submitted" };
+  for (let index = 0; index < 600; index += 1) many[`field-${String(index)}`] = index;
+  const entryEvidence = await evidenceFor(many);
+  assert.match(JSON.stringify(entryEvidence), /\[truncated: entry count\]/);
+
+  const shared: Record<string, unknown> = { value: 1 };
+  shared["self"] = shared;
+  const references = { msg: "Request was submitted", first: shared, second: shared };
+  const firstReferences = await evidenceFor(references);
+  const secondReferences = await evidenceFor(references);
+  assert.equal(JSON.stringify(firstReferences), JSON.stringify(secondReferences));
+  const referenceRecord = firstReferences as Record<string, unknown>;
+  const firstReference = referenceRecord["first"] as Record<string, unknown>;
+  assert.equal(firstReference["self"], '[reference: $."first"]');
+  assert.equal(referenceRecord["second"], '[reference: $."first"]');
 });
 
 void test("cancel sends one explicit request and returns a typed request acknowledgement", async () => {

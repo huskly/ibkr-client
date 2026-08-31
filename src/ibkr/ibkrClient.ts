@@ -3216,47 +3216,88 @@ export class IbkrClient
   }
 
   private sanitizeJsonEvidence(value: unknown): IbkrJsonEvidence {
-    const seen = new WeakSet<object>();
+    const seen = new WeakMap<object, string>();
     let remainingEntries = 500;
-    const sanitize = (item: unknown, depth: number): IbkrJsonEvidence => {
-      if (item === null || typeof item === "boolean" || typeof item === "string") {
-        return typeof item === "string" ? item.slice(0, 2_048) : item;
+    const dictionary = (): Record<string, IbkrJsonEvidence> =>
+      Object.create(null) as Record<string, IbkrJsonEvidence>;
+    const markerKey = (
+      source: object,
+      result: Readonly<Record<string, IbkrJsonEvidence>>,
+      label: string
+    ): string => {
+      let key = label;
+      while (
+        Object.prototype.hasOwnProperty.call(source, key) ||
+        Object.prototype.hasOwnProperty.call(result, key)
+      ) {
+        key += "#";
       }
+      return key;
+    };
+    const sanitize = (item: unknown, depth: number, path: string): IbkrJsonEvidence => {
+      if (item === null || typeof item === "boolean" || typeof item === "string") return item;
       if (typeof item === "number") {
         return Number.isFinite(item) ? item : `[non-json number: ${String(item)}]`;
       }
       if (typeof item !== "object") return `[non-json ${typeof item}]`;
-      if (seen.has(item)) return "[circular]";
-      if (depth >= 8 || remainingEntries <= 0) return "[truncated]";
-      seen.add(item);
+      const priorPath = seen.get(item);
+      if (priorPath !== undefined) return `[reference: ${priorPath}]`;
+      seen.set(item, path);
+      if (depth >= 8) {
+        const result = dictionary();
+        result[markerKey(item, result, "[truncated: depth]")] = true;
+        return result;
+      }
       if (Array.isArray(item)) {
         const result: IbkrJsonEvidence[] = [];
-        for (const member of item) {
+        for (const [index, member] of item.entries()) {
           if (remainingEntries <= 0) {
-            result.push("[truncated]");
+            result.push("[truncated: entry count]");
             break;
           }
           remainingEntries -= 1;
-          result.push(sanitize(member, depth + 1));
+          result.push(sanitize(member, depth + 1, `${path}[${String(index)}]`));
         }
         return result;
       }
-      const result: Record<string, IbkrJsonEvidence> = {};
-      for (const [key, member] of Object.entries(item)) {
+      const result = dictionary();
+      for (const ownKey of Reflect.ownKeys(item)) {
         if (remainingEntries <= 0) {
-          result["[truncated]"] = true;
+          result[markerKey(item, result, "[truncated: entry count]")] = true;
           break;
         }
         remainingEntries -= 1;
-        result[key.slice(0, 256)] = sanitize(member, depth + 1);
+        const key =
+          typeof ownKey === "string"
+            ? ownKey
+            : markerKey(item, result, `[non-json symbol key: ${ownKey.description ?? ""}]`);
+        let member: unknown;
+        try {
+          member = Reflect.get(item, ownKey);
+        } catch {
+          member = "[unreadable property]";
+        }
+        result[key] = sanitize(member, depth + 1, `${path}.${JSON.stringify(key)}`);
       }
       return result;
     };
-    const sanitized = sanitize(value, 0);
+    const sanitized = sanitize(value, 0, "$");
     const encoded = JSON.stringify(sanitized);
-    return encoded.length <= 8_192
-      ? sanitized
-      : { "[truncated]": true, preview: encoded.slice(0, 8_000) };
+    if (encoded.length <= 8_192) return sanitized;
+
+    const fallback = dictionary();
+    fallback["[truncated: evidence size]"] = true;
+    fallback["originalSerializedLength"] = encoded.length;
+    let low = 0;
+    let high = encoded.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      fallback["preview"] = encoded.slice(0, middle);
+      if (JSON.stringify(fallback).length <= 8_192) low = middle;
+      else high = middle - 1;
+    }
+    fallback["preview"] = encoded.slice(0, low);
+    return fallback;
   }
 
   private cancellationOrderId(value: unknown): string | null {
