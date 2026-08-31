@@ -32,6 +32,7 @@ import {
   type PriceHistoryResult,
   type PriceHistorySecurityType,
   type PriceHistoryTelemetry,
+  type TradingDiagnostics,
 } from "../src/index.js";
 
 interface PackageManifest {
@@ -192,6 +193,22 @@ test("package exposes only the library and no CLI entry point", async () => {
   }
   assert.equal(manifest.dependencies?.["chalk"], undefined);
   assert.equal(manifest.dependencies?.["commander"], undefined);
+});
+
+void test("public trading diagnostics preserve unknown connection evidence", () => {
+  const diagnostics: TradingDiagnostics = {
+    accountId: "U1",
+    selectedAccountId: null,
+    environment: null,
+    authenticated: null,
+    connected: null,
+    competingSession: null,
+    marketDataAvailable: null,
+    advisoryAssetPermissions: [],
+  };
+
+  assert.equal(diagnostics.connected, null);
+  assert.equal(diagnostics.environment, null);
 });
 
 void test("package exports the explicit session lifecycle contract", () => {

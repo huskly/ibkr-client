@@ -152,6 +152,7 @@ void test("auth status and trading diagnostics preserve unknown safety evidence"
     selectedAccountId: "U1",
     environment: null,
     authenticated: null,
+    connected: null,
     competingSession: null,
     marketDataAvailable: null,
     advisoryAssetPermissions: [],

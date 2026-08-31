@@ -844,6 +844,7 @@ export class IbkrClient
       environment:
         accounts["isPaper"] === true ? "paper" : accounts["isPaper"] === false ? "live" : null,
       authenticated: status.authenticated,
+      connected: status.connected,
       competingSession: status.competing,
       marketDataAvailable: this.booleanOrNull(features["showGFIS"]),
       advisoryAssetPermissions:
@@ -861,7 +862,7 @@ export class IbkrClient
   ): Promise<DerivativeComboPreviewResult> {
     this.validateComboPreview(request);
     const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
+    if (!this.isSafeForTradingMutation(diagnostics)) {
       throw new Error("IBKR brokerage session is not safely authenticated for What-If");
     }
     await this.prepareBrokerageAccount(request.accountId);
@@ -892,7 +893,7 @@ export class IbkrClient
       request
     );
     const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
+    if (!this.isSafeForTradingMutation(diagnostics)) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(request.accountId);
@@ -920,7 +921,7 @@ export class IbkrClient
     this.validateSingleOrder(request);
     const cmeOperatorMetadata = this.cmeOperatorMetadata(request.contract.assetClass, request);
     const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
+    if (!this.isSafeForTradingMutation(diagnostics)) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(request.accountId);
@@ -968,7 +969,7 @@ export class IbkrClient
     const parentMetadata = this.cmeOperatorMetadata(parent.contract.assetClass, parent);
     const childMetadata = this.cmeOperatorMetadata(child.contract.assetClass, child);
     const diagnostics = await this.getTradingDiagnostics(accountId);
-    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
+    if (!this.isSafeForTradingMutation(diagnostics)) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(accountId);
@@ -1000,7 +1001,7 @@ export class IbkrClient
   ): Promise<DerivativeOrderGraphResult> {
     this.validateOrderGraph(request);
     const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
+    if (!this.isSafeForTradingMutation(diagnostics)) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(request.accountId);
@@ -1024,7 +1025,7 @@ export class IbkrClient
     if (!input.continuation.replyId.trim())
       throw new Error("An exact warning reply ID is required");
     const diagnostics = await this.getTradingDiagnostics(input.continuation.request.accountId);
-    if (diagnostics.authenticated !== true || diagnostics.competingSession !== false) {
+    if (!this.isSafeForTradingMutation(diagnostics)) {
       throw new Error("IBKR brokerage session is not safely authenticated for submission");
     }
     await this.prepareBrokerageAccount(input.continuation.request.accountId);
@@ -4102,6 +4103,15 @@ export class IbkrClient
     if (match === null) return null;
     const parsed = Number(match[0].replace(/,/g, ""));
     return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private isSafeForTradingMutation(diagnostics: TradingDiagnostics): boolean {
+    return (
+      diagnostics.authenticated === true &&
+      diagnostics.connected === true &&
+      diagnostics.competingSession === false &&
+      diagnostics.environment !== null
+    );
   }
 
   private assertOpen(): void {

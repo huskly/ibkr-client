@@ -62,7 +62,8 @@ function contract(
 }
 
 function sessionResponse(input: RequestInput): unknown {
-  if (input.path === "iserver/auth/status") return { authenticated: true, competing: false };
+  if (input.path === "iserver/auth/status")
+    return { authenticated: true, connected: true, competing: false };
   if (input.path === "iserver/accounts") {
     return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
   }

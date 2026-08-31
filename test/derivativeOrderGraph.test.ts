@@ -194,7 +194,7 @@ const liveRoot = (): Record<string, unknown> => ({
 });
 const session = (input: Input): unknown =>
   input.path === "iserver/auth/status"
-    ? { authenticated: true, competing: false }
+    ? { authenticated: true, connected: true, competing: false }
     : input.path === "iserver/accounts"
       ? { accounts: ["U1"], selectedAccount: "U1", isPaper: true }
       : undefined;
@@ -410,7 +410,8 @@ test("warning continuation is restart-safe and supports chained replies", async 
 test("warning acknowledgement rechecks brokerage session safety before replying", async () => {
   let competing = false;
   const client = new Fake((input) => {
-    if (input.path === "iserver/auth/status") return { authenticated: true, competing };
+    if (input.path === "iserver/auth/status")
+      return { authenticated: true, connected: true, competing };
     if (input.path.endsWith("/orders") && input.method === "POST")
       return [{ id: "w1", message: ["warning"] }];
     if (input.path.startsWith("iserver/reply/")) throw new Error("unsafe reply attempted");

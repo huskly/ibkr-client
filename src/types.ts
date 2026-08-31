@@ -331,6 +331,7 @@ export interface TradingDiagnostics {
   selectedAccountId: string | null;
   environment: BrokerEnvironment | null;
   authenticated: boolean | null;
+  connected: boolean | null;
   competingSession: boolean | null;
   marketDataAvailable: boolean | null;
   advisoryAssetPermissions: string[];

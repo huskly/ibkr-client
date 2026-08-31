@@ -124,8 +124,9 @@ admission. It does not invent a transport close operation and does not log out i
 and paper-account evidence. `getAuthStatus()` returns the authentication, connection, and
 competition subset. Missing or malformed evidence stays `null`. An explicit empty account list stays
 an empty list. `getTradingDiagnostics()` also returns `null` for an unknown environment,
-authentication state, or competition state. Mutation gates require `authenticated === true` and
-`competingSession === false`.
+authentication state, connection state, or competition state. Mutation gates require
+`authenticated === true`,
+`connected === true`, `competingSession === false`, and a known environment.
 
 The deprecated `init()` method remains for compatibility. It uses `compete: true` and
 `publish: true`, and it stays idempotent. New code must use `initializeBrokerageSession()` with
