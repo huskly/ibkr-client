@@ -274,6 +274,14 @@ function isUnknownRecord(input: unknown): input is Readonly<Record<string, unkno
   return typeof input === "object" && input !== null && !Array.isArray(input);
 }
 
+function isBrokerageSessionInput(input: unknown): input is { compete: boolean; publish: boolean } {
+  return (
+    isUnknownRecord(input) &&
+    typeof input["compete"] === "boolean" &&
+    typeof input["publish"] === "boolean"
+  );
+}
+
 /**
  * One listing that `iserver/secdef/search` reports under an exact symbol (#671).
  *
@@ -738,27 +746,20 @@ export class IbkrClient
    *
    * @deprecated Use {@link initializeBrokerageSession} with explicit flags.
    */
-  init(): Promise<void> {
-    try {
-      this.assertOpen();
-    } catch (error) {
-      return Promise.reject(error);
-    }
+  async init(): Promise<void> {
+    this.assertOpen();
     this.initPromise ??= this.initializeBrokerageSession({ compete: true, publish: true });
     return this.initPromise;
   }
 
   async initializeBrokerageSession(input: { compete: boolean; publish: boolean }): Promise<void> {
     this.assertOpen();
-    if (
-      !isUnknownRecord(input) ||
-      typeof input["compete"] !== "boolean" ||
-      typeof input["publish"] !== "boolean"
-    ) {
+    const rawInput: unknown = input;
+    if (!isBrokerageSessionInput(rawInput)) {
       throw new TypeError("IBKR brokerage session initialization flags must be exact booleans");
     }
     try {
-      await this.raw.init(input["compete"], input["publish"]);
+      await this.raw.init(rawInput.compete, rawInput.publish);
     } catch (error) {
       throw this.normalizeHttpError(error);
     }
@@ -768,17 +769,14 @@ export class IbkrClient
 
   async renewBrokerageSession(input: { compete: false; publish: boolean }): Promise<void> {
     this.assertOpen();
-    if (
-      !isUnknownRecord(input) ||
-      input["compete"] !== false ||
-      typeof input["publish"] !== "boolean"
-    ) {
+    const rawInput: unknown = input;
+    if (!isBrokerageSessionInput(rawInput) || rawInput.compete) {
       throw new TypeError(
         "IBKR brokerage session renewal requires compete false and an exact publish boolean"
       );
     }
     try {
-      await this.raw.init(false, input["publish"]);
+      await this.raw.init(false, rawInput.publish);
     } catch (error) {
       throw this.normalizeHttpError(error);
     }
@@ -803,21 +801,13 @@ export class IbkrClient
     };
   }
 
-  tickle(): Promise<void> {
-    try {
-      this.assertOpen();
-    } catch (error) {
-      return Promise.reject(error);
-    }
-    return this.req<unknown>({ path: "tickle", method: "POST" }).then(() => undefined);
+  async tickle(): Promise<void> {
+    this.assertOpen();
+    await this.req<unknown>({ path: "tickle", method: "POST" });
   }
 
-  logout(): Promise<void> {
-    try {
-      this.assertOpen();
-    } catch (error) {
-      return Promise.reject(error);
-    }
+  async logout(): Promise<void> {
+    this.assertOpen();
     this.logoutPromise ??= this.singleAttemptRequest<unknown>({
       path: "logout",
       method: "POST",
@@ -859,7 +849,7 @@ export class IbkrClient
     ]);
     const accounts = isUnknownRecord(rawAccounts) ? rawAccounts : {};
     const accountIds = this.accountIdsOrNull(accounts["accounts"]);
-    if (accountIds === null || !accountIds.includes(accountId)) {
+    if (!accountIds?.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available to this session`);
     }
     const rawFeatures = accounts["allowFeatures"];
@@ -4214,7 +4204,7 @@ export class IbkrClient
     });
     const brokerageAccounts = isUnknownRecord(rawBrokerageAccounts) ? rawBrokerageAccounts : {};
     const accountIds = this.accountIdsOrNull(brokerageAccounts["accounts"]);
-    if (accountIds === null || !accountIds.includes(accountId)) {
+    if (!accountIds?.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available for trading/order queries.`);
     }
     if (brokerageAccounts["selectedAccount"] === accountId) return;
