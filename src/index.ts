@@ -29,6 +29,7 @@ export type {
   ActiveDerivativeOrderUncertainty,
   AuthStatus,
   IbkrSessionEvidence,
+  IbkrJsonEvidence,
   IbkrSessionLifecycleClient,
   BrokerClient,
   BrokerAccountOrders,

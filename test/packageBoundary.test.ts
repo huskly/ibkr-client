@@ -7,6 +7,8 @@ import {
   IbkrPriceHistoryContractError,
   type AccountBalances,
   type BrokerClient,
+  type BrokerEnvironment,
+  type DerivativeComboPreviewResult,
   type DerivativeExecutionClient,
   type DerivativeOrderCancellationEvidence,
   type DerivativeOrderCancellationResult,
@@ -16,6 +18,7 @@ import {
   type IbkrClient,
   type IbkrClientOptions,
   type IbkrHttpErrorResponse,
+  type IbkrJsonEvidence,
   type IbkrSessionEvidence,
   type IbkrSessionLifecycleClient,
   type IbkrRequestSchedulerOptions,
@@ -201,12 +204,21 @@ test("package exposes only the library and no CLI entry point", async () => {
   assert.equal(manifest.dependencies?.["commander"], undefined);
 });
 
+void test("public What-If results always carry a known environment", () => {
+  const environment = (result: DerivativeComboPreviewResult): BrokerEnvironment =>
+    result.environment;
+
+  assert.equal(typeof environment, "function");
+});
+
 void test("public cancellation results require explicit recovery handling", () => {
+  const response: IbkrJsonEvidence = { error: "unknown state" };
   const evidence: DerivativeOrderCancellationEvidence = {
     message: null,
     accountId: null,
     orderId: null,
     error: "error: unknown state",
+    response,
   };
   const result: DerivativeOrderCancellationResult = {
     state: "recovery_required",

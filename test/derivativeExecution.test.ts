@@ -662,6 +662,51 @@ void test("trading mutations serialize account selection through accountless rep
   assert.deepEqual(replyAccounts, ["U1", "U2"]);
 });
 
+void test("account-switching reads cannot interleave with an accountless warning reply", async () => {
+  let selectedAccount = "U1";
+  const firstReplyStarted = Promise.withResolvers<void>();
+  const firstReply = Promise.withResolvers<unknown>();
+  const accountOrderReads: string[] = [];
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U1", "U2"], selectedAccount, isPaper: true };
+    }
+    if (input.path === "iserver/account") {
+      selectedAccount = String((input.data as { acctId: string }).acctId);
+      return { set: true, acctId: selectedAccount };
+    }
+    if (input.path === "iserver/reply/first") {
+      firstReplyStarted.resolve();
+      return firstReply.promise;
+    }
+    if (input.path === "iserver/account/orders") {
+      accountOrderReads.push(selectedAccount);
+      return { orders: [], snapshot: true };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  const warning = client.acknowledgeOrderWarning({
+    accountId: "U1",
+    replyId: "first",
+    confirmed: true,
+  });
+  await firstReplyStarted.promise;
+  const activeOrders = client.listActiveDerivativeOrders("U2");
+  await Promise.resolve();
+  assert.equal(selectedAccount, "U1");
+  assert.deepEqual(accountOrderReads, []);
+
+  firstReply.resolve({ order_id: "1", order_status: "PreSubmitted" });
+  await warning;
+  assert.deepEqual(await activeOrders, []);
+  assert.equal(selectedAccount, "U2");
+  assert.deepEqual(accountOrderReads, ["U2"]);
+});
+
 void test("close rejects a queued mutation before broker access", async () => {
   const firstReplyStarted = Promise.withResolvers<void>();
   const firstReply = Promise.withResolvers<unknown>();
@@ -732,7 +777,7 @@ void test("cancellation requires unambiguous documented success evidence", async
       name: "empty",
       response: {},
       reason: /did not confirm/,
-      evidence: { message: null, accountId: null, orderId: null, error: null },
+      evidence: { message: null, accountId: null, orderId: null, error: null, response: {} },
     },
     {
       name: "error",
@@ -743,13 +788,20 @@ void test("cancellation requires unambiguous documented success evidence", async
         accountId: null,
         orderId: null,
         error: "error: Order cannot be cancelled",
+        response: { error: "Order cannot be cancelled" },
       },
     },
     {
       name: "malformed",
       response: "accepted",
       reason: /malformed cancellation response/,
-      evidence: { message: null, accountId: null, orderId: null, error: null },
+      evidence: {
+        message: null,
+        accountId: null,
+        orderId: null,
+        error: null,
+        response: "accepted",
+      },
     },
     {
       name: "identity mismatch",
@@ -760,6 +812,79 @@ void test("cancellation requires unambiguous documented success evidence", async
         accountId: "U999",
         orderId: "888",
         error: null,
+        response: { msg: "Request was submitted", account: "U999", order_id: "888" },
+      },
+    },
+    {
+      name: "rejected status",
+      response: { msg: "Request was submitted", status: "Rejected" },
+      reason: /undocumented cancellation fields/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: null,
+        orderId: null,
+        error: null,
+        response: { msg: "Request was submitted", status: "Rejected" },
+      },
+    },
+    {
+      name: "unknown order status",
+      response: { msg: "Request was submitted", order_status: "Pending" },
+      reason: /undocumented cancellation fields/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: null,
+        orderId: null,
+        error: null,
+        response: { msg: "Request was submitted", order_status: "Pending" },
+      },
+    },
+    {
+      name: "unknown success flag",
+      response: { msg: "Request was submitted", success: true },
+      reason: /undocumented cancellation fields/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: null,
+        orderId: null,
+        error: null,
+        response: { msg: "Request was submitted", success: true },
+      },
+    },
+    {
+      name: "nested error",
+      response: { msg: "Request was submitted", error: { code: "cannot_cancel" } },
+      reason: /error evidence/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: null,
+        orderId: null,
+        error: "error: present",
+        response: { msg: "Request was submitted", error: { code: "cannot_cancel" } },
+      },
+    },
+    {
+      name: "non-JSON conid",
+      response: { msg: "Request was submitted", conid: undefined },
+      reason: /malformed cancellation conid evidence/,
+      evidence: {
+        message: "Request was submitted",
+        accountId: null,
+        orderId: null,
+        error: null,
+        response: { msg: "Request was submitted", conid: "[non-json undefined]" },
+      },
+    },
+    {
+      name: "partial identity without acknowledgement",
+      response: { account: "U123", order_id: "777" },
+      reason: /did not confirm/,
+      evidence: {
+        message: null,
+        accountId: "U123",
+        orderId: "777",
+        error: null,
+        response: { account: "U123", order_id: "777" },
       },
     },
   ] as const;

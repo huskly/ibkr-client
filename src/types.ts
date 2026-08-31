@@ -371,7 +371,7 @@ export interface MarginImpact {
 
 export interface DerivativeComboPreviewResult {
   accountId: string;
-  environment: BrokerEnvironment | null;
+  environment: BrokerEnvironment;
   accepted: boolean;
   submitted: false;
   commission: number | null;
@@ -738,11 +738,20 @@ export interface DerivativeExecution {
   executedAt: string | null;
 }
 
+export type IbkrJsonEvidence =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly IbkrJsonEvidence[]
+  | { readonly [key: string]: IbkrJsonEvidence };
+
 export interface DerivativeOrderCancellationEvidence {
   message: string | null;
   accountId: string | null;
   orderId: string | null;
   error: string | null;
+  response: IbkrJsonEvidence;
 }
 
 export type DerivativeOrderCancellationResult =

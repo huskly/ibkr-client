@@ -62,7 +62,8 @@ Optional environment variables:
 Version 2.0.0 makes session and write safety evidence explicit:
 
 - Use `initializeBrokerageSession(...)` and the other explicit lifecycle methods instead of `init()`.
-- Handle nullable `AuthStatus` and `TradingDiagnostics` fields, including `connected`.
+- Handle nullable `AuthStatus` and `TradingDiagnostics` fields, including `connected`. A successful
+  What-If result still has a non-null environment because its safety gate requires that evidence.
 - Pass an exact `accountId` to legacy warning acknowledgements and keep it in contingent warning
   continuations.
 - Handle both `requested` and `recovery_required` cancellation results. Only an unambiguous broker
@@ -484,11 +485,11 @@ return `recovery_required`, because they do not prove that every submitted ticke
   gross option points, multiplier-adjusted gross dollars, commission, and net dollars without
   exposing account or execution IDs.
 - `cancelDerivativeOrder(...)` uses its exact account ID and sends one exact cancellation request.
-  It returns `requested` only for a nonblank success acknowledgement with no conflicting identity
-  or error evidence. Other 2xx payloads return `recovery_required` with normalized evidence and a
-  reason. Its required `assetClass` lets the client apply the same product-aware CME metadata rule
-  without guessing from an order ID. Callers remain responsible for reading until a terminal state
-  and verifying that cancellation reached `CANCELED`.
+  It returns `requested` only for the exact documented success shape with no conflicting identity
+  or error evidence. Other 2xx payloads return `recovery_required` with bounded, sanitized complete
+  JSON evidence and a reason. Its required `assetClass` lets the client apply the same product-aware
+  CME metadata rule without guessing from an order ID. Callers remain responsible for reading until
+  a terminal state and verifying that cancellation reached `CANCELED`.
 
 Placement, warning replies, and cancellation use one common fail-closed session and exact-account
 check. One FIFO gate keeps account preparation and the related outbound request in one critical
