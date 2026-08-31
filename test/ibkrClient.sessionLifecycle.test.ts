@@ -68,6 +68,38 @@ void test("explicit initialization and renewal pass exact flags once", async () 
   ]);
 });
 
+void test("session initialization rejects missing or malformed flags before raw defaults", async () => {
+  const client = new LifecycleClient();
+  const initialize = client.initializeBrokerageSession.bind(client) as (
+    input: unknown
+  ) => Promise<void>;
+  const renew = client.renewBrokerageSession.bind(client) as (input: unknown) => Promise<void>;
+
+  for (const input of [
+    undefined,
+    null,
+    {},
+    { compete: undefined, publish: true },
+    { compete: false, publish: undefined },
+    { compete: 0, publish: true },
+    { compete: false, publish: "true" },
+  ]) {
+    await assert.rejects(initialize(input), TypeError);
+  }
+  for (const input of [
+    undefined,
+    null,
+    {},
+    { compete: undefined, publish: true },
+    { compete: true, publish: true },
+    { compete: false, publish: undefined },
+    { compete: false, publish: 1 },
+  ]) {
+    await assert.rejects(renew(input), TypeError);
+  }
+  assert.deepEqual(client.initCalls, []);
+});
+
 void test("deprecated init keeps compete=true and remains idempotent", async () => {
   const client = new LifecycleClient();
 
@@ -178,12 +210,22 @@ void test("tickle is a safe read and logout is a single idempotent broker attemp
   assert.equal(logoutCalls, 1);
 });
 
-void test("close is local, idempotent, and prevents later lifecycle and request use", async () => {
+void test("close blocks environment, cache-backed, local, lifecycle, and request paths", async (t) => {
+  const previousAccountId = process.env["IBKR_ACCOUNT_ID"];
+  t.after(() => {
+    if (previousAccountId === undefined) delete process.env["IBKR_ACCOUNT_ID"];
+    else process.env["IBKR_ACCOUNT_ID"] = previousAccountId;
+  });
+  process.env["IBKR_ACCOUNT_ID"] = "U-CACHED";
   const client = new LifecycleClient();
+  assert.equal(await client.getAccountId(), "U-CACHED");
 
   await client.close();
   await client.close();
 
+  await assert.rejects(client.getAccountId(), /closed/iu);
+  await assert.rejects(client.getPriceHistory({ symbol: "", days: 0 }), /closed/iu);
+  await assert.rejects(client.getOptionContract(123), /closed/iu);
   await assert.rejects(client.getAuthStatus(), /closed/iu);
   await assert.rejects(client.init(), /closed/iu);
   await assert.rejects(

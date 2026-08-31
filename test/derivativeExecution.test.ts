@@ -256,19 +256,32 @@ void test("warning replies classify well-formed IDs and reject malformed IDs", a
   ];
   const client = new FakeIbkrClient((input) => {
     if (input.path.startsWith("iserver/reply/")) return responses.shift();
-    throw new Error(`Unexpected request ${input.path}`);
+    return sessionResponse(input);
   });
 
-  const malformed = await client.acknowledgeOrderWarning({ replyId: "malformed", confirmed: true });
+  const malformed = await client.acknowledgeOrderWarning({
+    accountId: "U123",
+    replyId: "malformed",
+    confirmed: true,
+  });
   assert.equal(malformed.state === "warning" && malformed.warnings[0]?.known, false);
   const otherKnown = await client.acknowledgeOrderWarning({
+    accountId: "U123",
     replyId: "other-known",
     confirmed: true,
   });
   assert.equal(otherKnown.state === "warning" && otherKnown.warnings[0]?.known, true);
-  const known = await client.acknowledgeOrderWarning({ replyId: "known", confirmed: true });
+  const known = await client.acknowledgeOrderWarning({
+    accountId: "U123",
+    replyId: "known",
+    confirmed: true,
+  });
   assert.equal(known.state === "warning" && known.warnings[0]?.known, true);
-  const accepted = await client.acknowledgeOrderWarning({ replyId: "final", confirmed: true });
+  const accepted = await client.acknowledgeOrderWarning({
+    accountId: "U123",
+    replyId: "final",
+    confirmed: true,
+  });
   assert.deepEqual(accepted, {
     state: "accepted",
     orderId: "777",
@@ -557,10 +570,69 @@ void test("exact lifecycle lookup fails closed on identity or status mismatch", 
   }
 });
 
+void test("legacy warning acknowledgement requires an exact safe account", async () => {
+  const missingAccount = new FakeIbkrClient(() => {
+    throw new Error("Broker access was not expected");
+  });
+  await assert.rejects(
+    missingAccount.acknowledgeOrderWarning({
+      accountId: "",
+      replyId: "reply",
+      confirmed: true,
+    }),
+    /exact account ID/
+  );
+  assert.deepEqual(missingAccount.calls, []);
+
+  const disconnected = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: false, competing: false };
+    }
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+  await assert.rejects(
+    disconnected.acknowledgeOrderWarning({
+      accountId: "U123",
+      replyId: "reply",
+      confirmed: true,
+    }),
+    /not safely authenticated/
+  );
+  assert.ok(disconnected.calls.every(({ path }) => !path.startsWith("iserver/reply/")));
+});
+
+void test("account preparation rejects a selected account without valid account-list evidence", async () => {
+  let accountReads = 0;
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
+    if (input.path === "iserver/accounts") {
+      accountReads += 1;
+      return accountReads === 1
+        ? { accounts: ["U123"], selectedAccount: "U123", isPaper: true }
+        : { selectedAccount: "U123" };
+    }
+    throw new Error(`Unexpected request ${input.path}`);
+  });
+
+  await assert.rejects(
+    client.cancelDerivativeOrder({ accountId: "U123", orderId: "777", assetClass: "OPT" }),
+    /not available for trading/
+  );
+  assert.ok(client.calls.every(({ method }) => method !== "DELETE"));
+});
+
 void test("cancel sends one explicit request and returns a typed request acknowledgement", async () => {
   const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
     if (input.path === "iserver/accounts") {
-      return { accounts: ["U123"], selectedAccount: "U123" };
+      return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
     }
     if (input.method === "DELETE") {
       return { msg: "Request was submitted", order_id: "777", account: "U123", conid: 123 };
@@ -685,8 +757,11 @@ void test("combo submission requires exactly one warning continuation", async ()
 
 void test("equity-option cancellation omits CME operator metadata", async () => {
   const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/auth/status") {
+      return { authenticated: true, connected: true, competing: false };
+    }
     if (input.path === "iserver/accounts") {
-      return { accounts: ["U123"], selectedAccount: "U123" };
+      return { accounts: ["U123"], selectedAccount: "U123", isPaper: true };
     }
     if (input.method === "DELETE") return { msg: "Request was submitted" };
     throw new Error(`Unexpected request ${input.path}`);

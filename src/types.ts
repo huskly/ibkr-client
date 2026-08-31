@@ -444,6 +444,7 @@ export interface DerivativeContingentOrderEvidence extends DerivativeSubmittedOr
 }
 
 export interface DerivativeContingentWarningContinuation {
+  accountId: string;
   replyId: string;
   parentClientOrderId: string;
 }
@@ -806,6 +807,7 @@ export interface DerivativeExecutionClient {
     child: DerivativeContingentChildOrderRequest;
   }): Promise<DerivativeMultiOrderResult>;
   acknowledgeOrderWarning(input: {
+    accountId: string;
     replyId: string;
     confirmed: true;
   }): Promise<DerivativeOrderSubmissionResult>;

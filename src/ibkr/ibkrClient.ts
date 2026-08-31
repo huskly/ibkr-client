@@ -739,15 +739,26 @@ export class IbkrClient
    * @deprecated Use {@link initializeBrokerageSession} with explicit flags.
    */
   init(): Promise<void> {
-    if (this.closed) return Promise.reject(this.closedError());
+    try {
+      this.assertOpen();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     this.initPromise ??= this.initializeBrokerageSession({ compete: true, publish: true });
     return this.initPromise;
   }
 
   async initializeBrokerageSession(input: { compete: boolean; publish: boolean }): Promise<void> {
     this.assertOpen();
+    if (
+      !isUnknownRecord(input) ||
+      typeof input["compete"] !== "boolean" ||
+      typeof input["publish"] !== "boolean"
+    ) {
+      throw new TypeError("IBKR brokerage session initialization flags must be exact booleans");
+    }
     try {
-      await this.raw.init(input.compete, input.publish);
+      await this.raw.init(input["compete"], input["publish"]);
     } catch (error) {
       throw this.normalizeHttpError(error);
     }
@@ -757,11 +768,17 @@ export class IbkrClient
 
   async renewBrokerageSession(input: { compete: false; publish: boolean }): Promise<void> {
     this.assertOpen();
-    if ((input.compete as boolean) !== false) {
-      throw new TypeError("IBKR brokerage session renewal cannot compete with another session");
+    if (
+      !isUnknownRecord(input) ||
+      input["compete"] !== false ||
+      typeof input["publish"] !== "boolean"
+    ) {
+      throw new TypeError(
+        "IBKR brokerage session renewal requires compete false and an exact publish boolean"
+      );
     }
     try {
-      await this.raw.init(input.compete, input.publish);
+      await this.raw.init(false, input["publish"]);
     } catch (error) {
       throw this.normalizeHttpError(error);
     }
@@ -787,11 +804,20 @@ export class IbkrClient
   }
 
   tickle(): Promise<void> {
+    try {
+      this.assertOpen();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     return this.req<unknown>({ path: "tickle", method: "POST" }).then(() => undefined);
   }
 
   logout(): Promise<void> {
-    if (this.closed) return Promise.reject(this.closedError());
+    try {
+      this.assertOpen();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     this.logoutPromise ??= this.singleAttemptRequest<unknown>({
       path: "logout",
       method: "POST",
@@ -811,6 +837,7 @@ export class IbkrClient
   }
 
   async getAuthStatus(): Promise<AuthStatus> {
+    this.assertOpen();
     const rawStatus = await this.req<unknown>({
       path: "iserver/auth/status",
       method: "POST",
@@ -824,6 +851,7 @@ export class IbkrClient
   }
 
   async getTradingDiagnostics(accountId: string): Promise<TradingDiagnostics> {
+    this.assertOpen();
     if (!accountId.trim()) throw new Error("An explicit IBKR account ID is required");
     const [status, rawAccounts] = await Promise.all([
       this.getAuthStatus(),
@@ -860,12 +888,12 @@ export class IbkrClient
   async previewDerivativeCombo(
     request: DerivativeComboPreviewRequest
   ): Promise<DerivativeComboPreviewResult> {
+    this.assertOpen();
     this.validateComboPreview(request);
-    const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (!this.isSafeForTradingMutation(diagnostics)) {
-      throw new Error("IBKR brokerage session is not safely authenticated for What-If");
-    }
-    await this.prepareBrokerageAccount(request.accountId);
+    const diagnostics = await this.requireSafeTradingAccount(
+      request.accountId,
+      "IBKR brokerage session is not safely authenticated for What-If"
+    );
     const conids = request.legs.map(({ contract }) => contract.conid).join(",");
     await this.req<unknown>({
       path: "iserver/marketdata/snapshot",
@@ -884,6 +912,7 @@ export class IbkrClient
   async submitDerivativeCombo(
     request: DerivativeComboExecutionRequest
   ): Promise<DerivativeOrderSubmissionResult> {
+    this.assertOpen();
     this.validateComboPreview(request);
     if (!request.clientOrderId.trim() || request.clientOrderId.length > 64) {
       throw new Error("Client order ID must contain 1 to 64 characters");
@@ -892,11 +921,10 @@ export class IbkrClient
       request.legs[0].contract.assetClass,
       request
     );
-    const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (!this.isSafeForTradingMutation(diagnostics)) {
-      throw new Error("IBKR brokerage session is not safely authenticated for submission");
-    }
-    await this.prepareBrokerageAccount(request.accountId);
+    await this.requireSafeTradingAccount(
+      request.accountId,
+      "IBKR brokerage session is not safely authenticated for submission"
+    );
     const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
@@ -918,13 +946,13 @@ export class IbkrClient
   async submitDerivativeSingleOrder(
     request: DerivativeSingleOrderRequest
   ): Promise<DerivativeOrderSubmissionResult> {
+    this.assertOpen();
     this.validateSingleOrder(request);
     const cmeOperatorMetadata = this.cmeOperatorMetadata(request.contract.assetClass, request);
-    const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (!this.isSafeForTradingMutation(diagnostics)) {
-      throw new Error("IBKR brokerage session is not safely authenticated for submission");
-    }
-    await this.prepareBrokerageAccount(request.accountId);
+    await this.requireSafeTradingAccount(
+      request.accountId,
+      "IBKR brokerage session is not safely authenticated for submission"
+    );
     const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
@@ -949,6 +977,7 @@ export class IbkrClient
     parent: DerivativeContingentParentOrderRequest;
     child: DerivativeContingentChildOrderRequest;
   }): Promise<DerivativeMultiOrderResult> {
+    this.assertOpen();
     const { accountId, parent, child } = request;
     if (!accountId.trim()) throw new Error("An explicit IBKR account ID is required");
     if (parent.accountId !== accountId || child.accountId !== accountId) {
@@ -968,11 +997,10 @@ export class IbkrClient
     }
     const parentMetadata = this.cmeOperatorMetadata(parent.contract.assetClass, parent);
     const childMetadata = this.cmeOperatorMetadata(child.contract.assetClass, child);
-    const diagnostics = await this.getTradingDiagnostics(accountId);
-    if (!this.isSafeForTradingMutation(diagnostics)) {
-      throw new Error("IBKR brokerage session is not safely authenticated for submission");
-    }
-    await this.prepareBrokerageAccount(accountId);
+    await this.requireSafeTradingAccount(
+      accountId,
+      "IBKR brokerage session is not safely authenticated for submission"
+    );
     const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
@@ -993,18 +1021,18 @@ export class IbkrClient
         ],
       },
     });
-    return this.normalizeMultiOrderSubmission(response, parent.clientOrderId);
+    return this.normalizeMultiOrderSubmission(response, parent.clientOrderId, accountId);
   }
 
   async submitDerivativeOrderGraph(
     request: DerivativeOrderGraphRequest
   ): Promise<DerivativeOrderGraphResult> {
+    this.assertOpen();
     this.validateOrderGraph(request);
-    const diagnostics = await this.getTradingDiagnostics(request.accountId);
-    if (!this.isSafeForTradingMutation(diagnostics)) {
-      throw new Error("IBKR brokerage session is not safely authenticated for submission");
-    }
-    await this.prepareBrokerageAccount(request.accountId);
+    await this.requireSafeTradingAccount(
+      request.accountId,
+      "IBKR brokerage session is not safely authenticated for submission"
+    );
     const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
@@ -1019,16 +1047,16 @@ export class IbkrClient
     continuation: DerivativeOrderGraphWarningContinuation;
     confirmed: true;
   }): Promise<DerivativeOrderGraphResult> {
+    this.assertOpen();
     if ((input.confirmed as unknown) !== true)
       throw new Error("Order warning confirmation must be true");
     this.validateOrderGraph(input.continuation.request);
     if (!input.continuation.replyId.trim())
       throw new Error("An exact warning reply ID is required");
-    const diagnostics = await this.getTradingDiagnostics(input.continuation.request.accountId);
-    if (!this.isSafeForTradingMutation(diagnostics)) {
-      throw new Error("IBKR brokerage session is not safely authenticated for submission");
-    }
-    await this.prepareBrokerageAccount(input.continuation.request.accountId);
+    await this.requireSafeTradingAccount(
+      input.continuation.request.accountId,
+      "IBKR brokerage session is not safely authenticated for submission"
+    );
     const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
@@ -1047,6 +1075,7 @@ export class IbkrClient
     input: DerivativeOrderGraphLookup,
     request: DerivativeOrderGraphRequest
   ): Promise<DerivativeOrderGraphResult> {
+    this.assertOpen();
     this.validateOrderGraph(request);
     if (input.accountId !== request.accountId)
       throw new Error("Graph recovery account does not match request");
@@ -1841,10 +1870,17 @@ export class IbkrClient
   }
 
   async acknowledgeOrderWarning(input: {
+    accountId: string;
     replyId: string;
     confirmed: true;
   }): Promise<DerivativeOrderSubmissionResult> {
+    this.assertOpen();
+    if (!input.accountId.trim()) throw new Error("An exact account ID is required");
     if (!input.replyId.trim()) throw new Error("An exact warning reply ID is required");
+    await this.requireSafeTradingAccount(
+      input.accountId,
+      "IBKR brokerage session is not safely authenticated for warning acknowledgement"
+    );
     const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
@@ -1856,12 +1892,16 @@ export class IbkrClient
   }
 
   async acknowledgeContingentOrderWarning(input: {
-    continuation: { replyId: string; parentClientOrderId: string };
+    continuation: { accountId: string; replyId: string; parentClientOrderId: string };
     confirmed: true;
   }): Promise<DerivativeMultiOrderResult> {
+    this.assertOpen();
     const confirmed: unknown = input.confirmed;
     if (confirmed !== true) {
       throw new Error("Order warning confirmation must be true");
+    }
+    if (!input.continuation.accountId.trim()) {
+      throw new Error("An exact account ID is required");
     }
     if (!input.continuation.replyId.trim()) {
       throw new Error("An exact warning reply ID is required");
@@ -1869,6 +1909,10 @@ export class IbkrClient
     if (!input.continuation.parentClientOrderId.trim()) {
       throw new Error("An exact parent client order ID is required");
     }
+    await this.requireSafeTradingAccount(
+      input.continuation.accountId,
+      "IBKR brokerage session is not safely authenticated for warning acknowledgement"
+    );
     const response = await this.singleAttemptRequest<
       IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
     >({
@@ -1876,13 +1920,18 @@ export class IbkrClient
       method: "POST",
       data: { confirmed: true },
     });
-    return this.normalizeMultiOrderSubmission(response, input.continuation.parentClientOrderId);
+    return this.normalizeMultiOrderSubmission(
+      response,
+      input.continuation.parentClientOrderId,
+      input.continuation.accountId
+    );
   }
 
   async getDerivativeOrderStatus(
     accountId: string,
     orderId: string
   ): Promise<DerivativeOrderLifecycle> {
+    this.assertOpen();
     if (!accountId.trim() || !orderId.trim()) {
       throw new Error("Exact account and order IDs are required");
     }
@@ -1904,6 +1953,7 @@ export class IbkrClient
   }
 
   async findDerivativeOrder(input: DerivativeOrderLookup): Promise<DerivativeOrderLifecycle> {
+    this.assertOpen();
     if (!input.accountId.trim()) throw new Error("An exact account ID is required");
     const identity = input.orderId ?? input.clientOrderId;
     if (!identity.trim()) throw new Error("An exact broker or client order ID is required");
@@ -1928,6 +1978,7 @@ export class IbkrClient
   }
 
   async listActiveDerivativeOrders(accountId: string): Promise<ActiveDerivativeOrder[]> {
+    this.assertOpen();
     if (!accountId.trim()) throw new Error("An exact account ID is required");
     await this.prepareBrokerageAccount(accountId);
     const response = await this.req<IbkrLiveOrdersResponse>({
@@ -1985,6 +2036,7 @@ export class IbkrClient
   }
 
   async getDerivativeExecutions(input: DerivativeExecutionQuery): Promise<DerivativeExecution[]> {
+    this.assertOpen();
     if (!input.accountId.trim()) throw new Error("An exact account ID is required");
     if (
       input.days !== undefined &&
@@ -2018,6 +2070,7 @@ export class IbkrClient
   async reconcileDerivativeComboExecution(
     request: DerivativeComboReconciliationRequest
   ): Promise<DerivativeComboReconciliation> {
+    this.assertOpen();
     this.validateReconciliationRequest(request);
     const lifecycle = await this.getDerivativeOrderStatus(request.accountId, request.orderId);
     const deadline = this.now() + (request.timeoutMs ?? 30_000);
@@ -2046,11 +2099,15 @@ export class IbkrClient
   async cancelDerivativeOrder(
     input: DerivativeOrderCancelRequest
   ): Promise<DerivativeOrderCancellationResult> {
+    this.assertOpen();
     if (!input.accountId.trim() || !input.orderId.trim()) {
       throw new Error("Exact account and order IDs are required");
     }
     const cmeOperatorMetadata = this.cmeOperatorMetadata(input.assetClass, input);
-    await this.prepareBrokerageAccount(input.accountId);
+    await this.requireSafeTradingAccount(
+      input.accountId,
+      "IBKR brokerage session is not safely authenticated for cancellation"
+    );
     const response = await this.singleAttemptRequest<IbkrOrderCancellationResponse>({
       path: `iserver/account/${input.accountId}/order/${encodeURIComponent(input.orderId)}`,
       method: "DELETE",
@@ -2065,6 +2122,7 @@ export class IbkrClient
   }
 
   async getAccountId(): Promise<string> {
+    this.assertOpen();
     this.accountIdPromise ??= (async () => {
       const override = process.env["IBKR_ACCOUNT_ID"];
       if (override) return override;
@@ -2077,6 +2135,7 @@ export class IbkrClient
   }
 
   async getAccountBalances(): Promise<AccountBalances> {
+    this.assertOpen();
     const accountId = await this.getAccountId();
     const summary = await this.req<IbkrPortfolioSummary>({
       path: `portfolio/${accountId}/summary`,
@@ -2128,6 +2187,7 @@ export class IbkrClient
   }
 
   async getPositions(symbol?: string): Promise<BrokerPosition[]> {
+    this.assertOpen();
     const accountId = await this.getAccountId();
     const rows = await this.fetchAllPositions(accountId);
     for (const position of rows) {
@@ -2218,6 +2278,7 @@ export class IbkrClient
     requests: readonly BrokerQuoteRequest[],
     options: BrokerQuoteOptions = {}
   ): Promise<Record<string, BrokerQuote>> {
+    this.assertOpen();
     const unique = new Map<string, BrokerQuoteRequest>();
     for (const request of requests) {
       if (!request.symbol.trim()) throw new Error("A quote request symbol is required");
@@ -2295,6 +2356,7 @@ export class IbkrClient
     symbol: string,
     projection: BrokerInstrumentSearchProjection = "symbol-search"
   ): Promise<BrokerInstrument[]> {
+    this.assertOpen();
     if (projection !== "symbol-search" && projection !== "search") {
       throw new Error(
         `IBKR search currently supports only symbol-search/search projections (got '${projection}').`
@@ -2315,6 +2377,7 @@ export class IbkrClient
     startDate: Date,
     endDate: Date
   ): Promise<BrokerTransactionHistory[]> {
+    this.assertOpen();
     const accountId = await this.getAccountId();
     const rows = await this.fetchAllPositions(accountId);
     const positionsByConid = new Map(
@@ -2351,6 +2414,7 @@ export class IbkrClient
   }
 
   async fetchOrders(options: BrokerOrdersOptions): Promise<BrokerAccountOrders[]> {
+    this.assertOpen();
     const accountId = await this.getAccountId();
     await this.prepareBrokerageAccount(accountId);
 
@@ -3057,7 +3121,8 @@ export class IbkrClient
 
   private normalizeMultiOrderSubmission(
     response: IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[],
-    parentClientOrderId: string
+    parentClientOrderId: string,
+    accountId: string
   ): DerivativeMultiOrderResult {
     const decoded = this.decodeOrderSubmission(response);
     const hasDistinctBrokerOrderIds =
@@ -3088,7 +3153,7 @@ export class IbkrClient
       return {
         state: "warning",
         warnings: decoded.warnings,
-        continuation: { replyId: warning.replyId, parentClientOrderId },
+        continuation: { accountId, replyId: warning.replyId, parentClientOrderId },
       };
     }
     if (
@@ -4105,6 +4170,16 @@ export class IbkrClient
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  private async requireSafeTradingAccount(
+    accountId: string,
+    unsafeMessage: string
+  ): Promise<TradingDiagnostics> {
+    const diagnostics = await this.getTradingDiagnostics(accountId);
+    if (!this.isSafeForTradingMutation(diagnostics)) throw new Error(unsafeMessage);
+    await this.prepareBrokerageAccount(accountId);
+    return diagnostics;
+  }
+
   private isSafeForTradingMutation(diagnostics: TradingDiagnostics): boolean {
     return (
       diagnostics.authenticated === true &&
@@ -4138,11 +4213,11 @@ export class IbkrClient
       path: "iserver/accounts",
     });
     const brokerageAccounts = isUnknownRecord(rawBrokerageAccounts) ? rawBrokerageAccounts : {};
-    if (brokerageAccounts["selectedAccount"] === accountId) return;
     const accountIds = this.accountIdsOrNull(brokerageAccounts["accounts"]);
     if (accountIds === null || !accountIds.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available for trading/order queries.`);
     }
+    if (brokerageAccounts["selectedAccount"] === accountId) return;
     const switchedAccount = await this.singleAttemptRequest<IbkrSwitchAccountResponse>({
       path: "iserver/account",
       method: "POST",
@@ -4300,6 +4375,7 @@ export class IbkrClient
 
   /** Return complete daily history with the exact validated IBKR request context. */
   async getPriceHistory(input: PriceHistoryRequest): Promise<PriceHistoryResult> {
+    this.assertOpen();
     const requestedSymbol = input.symbol.trim().toUpperCase();
     if (!requestedSymbol) {
       throw new IbkrPriceHistoryContractError(
@@ -4503,6 +4579,7 @@ export class IbkrClient
 
   /** Discover listed derivative series over an inclusive calendar range. */
   async getDerivativeExpiries(query: DerivativeExpiryQuery): Promise<DerivativeExpiry[]> {
+    this.assertOpen();
     const contracts: DerivativeContract[] = [];
     for (const month of monthCodes(query.from, query.to)) {
       contracts.push(
@@ -4552,6 +4629,7 @@ export class IbkrClient
 
   /** Discover contracts for one exact expiration, preserving class and venue identity. */
   async getDerivativeContracts(query: DerivativeContractQuery): Promise<DerivativeContract[]> {
+    this.assertOpen();
     const tradingClass = query.tradingClass?.trim().toUpperCase();
     return (
       await this.discoverDerivativeMonth(
@@ -4575,6 +4653,7 @@ export class IbkrClient
   async resolveDerivativeContract(
     query: DerivativeContractQuery & { right: OptionRight; strike: number }
   ): Promise<DerivativeContract> {
+    this.assertOpen();
     const contracts = await this.getDerivativeContracts(query);
     if (!contracts.length) {
       throw new Error(
@@ -4594,6 +4673,7 @@ export class IbkrClient
 
   /** Return an exact-expiration derivative chain with explicit data availability. */
   async getDerivativeChain(query: DerivativeContractQuery): Promise<DerivativeQuote[]> {
+    this.assertOpen();
     const contracts = await this.getDerivativeContracts(query);
     if (!contracts.length) {
       throw new Error(
@@ -4613,6 +4693,7 @@ export class IbkrClient
   async getDerivativeReferenceQuote(
     contract: DerivativeContract
   ): Promise<DerivativeReferenceQuote> {
+    this.assertOpen();
     const detailResponse = await this.req<IbkrSecdefResponse>({
       path: "trsrv/secdef",
       params: { conids: String(contract.conid) },
@@ -4674,6 +4755,7 @@ export class IbkrClient
     toDate: string,
     options: OptionDiscoveryOptions = {}
   ): Promise<string[]> {
+    this.assertOpen();
     const normalized = symbol.trim().toUpperCase();
     const months = monthCodes(fromDate, toDate);
     const contracts: OptionContract[] = [];
@@ -4700,6 +4782,7 @@ export class IbkrClient
     right?: OptionRight,
     options: OptionDiscoveryOptions = {}
   ): Promise<OptionMarketQuote[]> {
+    this.assertOpen();
     const month = monthCode(expiry);
     const normalized = symbol.trim().toUpperCase();
     const discovery = await this.discoverOptions(normalized, month, right, options);
@@ -4727,6 +4810,7 @@ export class IbkrClient
     right: OptionRight,
     options: OptionDiscoveryOptions = {}
   ): Promise<OptionChainSnapshot> {
+    this.assertOpen();
     const month = monthCode(expiry);
     const normalized = symbol.trim().toUpperCase();
     const discovery = await this.discoverOptions(normalized, month, right, options);
@@ -4744,6 +4828,7 @@ export class IbkrClient
 
   /** Fetch one exact option quote; null means the contract is not listed. */
   async getOptionQuote(input: OptionQuoteRequest): Promise<OptionMarketQuote | null> {
+    this.assertOpen();
     const contract = await this.resolveOptionContract(input);
     if (!contract) return null;
     return (await this.fetchOptionQuotes([contract]))[0] ?? null;
@@ -4751,6 +4836,7 @@ export class IbkrClient
 
   /** Resolve a conid back into the canonical OSI-bearing option contract. */
   async getOptionContract(conid: number): Promise<OptionContract | null> {
+    this.assertOpen();
     const response = await this.req<IbkrSecdefByConidResponse>({
       path: "trsrv/secdef",
       params: { conids: String(conid) },

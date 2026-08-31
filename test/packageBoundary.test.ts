@@ -7,6 +7,8 @@ import {
   IbkrPriceHistoryContractError,
   type AccountBalances,
   type BrokerClient,
+  type DerivativeExecutionClient,
+  type DerivativeContingentWarningContinuation,
   type BrokerQuoteOptions,
   type BrokerQuoteRequest,
   type IbkrClient,
@@ -193,6 +195,23 @@ test("package exposes only the library and no CLI entry point", async () => {
   }
   assert.equal(manifest.dependencies?.["chalk"], undefined);
   assert.equal(manifest.dependencies?.["commander"], undefined);
+});
+
+void test("public legacy warning acknowledgements require explicit account identity", () => {
+  const input: Parameters<DerivativeExecutionClient["acknowledgeOrderWarning"]>[0] = {
+    accountId: "U1",
+    replyId: "reply-1",
+    confirmed: true,
+  };
+
+  const continuation: DerivativeContingentWarningContinuation = {
+    accountId: "U1",
+    replyId: "reply-2",
+    parentClientOrderId: "parent-1",
+  };
+
+  assert.equal(input.accountId, "U1");
+  assert.equal(continuation.accountId, "U1");
 });
 
 void test("public trading diagnostics preserve unknown connection evidence", () => {

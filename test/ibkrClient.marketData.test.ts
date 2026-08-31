@@ -2320,8 +2320,11 @@ void test("a cancellation 5xx remains single-attempt", async () => {
   let cancellationCalls = 0;
   const client = new FakeIbkrClient(
     (input) => {
+      if (input.path === "iserver/auth/status") {
+        return { authenticated: true, connected: true, competing: false };
+      }
       if (input.path === "iserver/accounts") {
-        return { accounts: ["DU123"], selectedAccount: "DU123" };
+        return { accounts: ["DU123"], selectedAccount: "DU123", isPaper: true };
       }
       if (input.method === "DELETE") {
         cancellationCalls += 1;
@@ -3262,8 +3265,11 @@ void test("account-selection mutations remain single-attempt after a 429", async
   let cancellationCalls = 0;
   const client = new FakeIbkrClient(
     (input) => {
+      if (input.path === "iserver/auth/status") {
+        return { authenticated: true, connected: true, competing: false };
+      }
       if (input.path === "iserver/accounts") {
-        return { accounts: ["DU123", "DU456"], selectedAccount: "DU456" };
+        return { accounts: ["DU123", "DU456"], selectedAccount: "DU456", isPaper: true };
       }
       if (input.path === "iserver/account") {
         switchCalls += 1;

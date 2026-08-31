@@ -114,7 +114,8 @@ await client.logout();
 await client.close();
 ```
 
-Initialization and renewal pass both flags to IBKR once. Renewal only accepts `compete: false`.
+Initialization and renewal pass both flags to IBKR once. Both flags must be exact booleans, and
+renewal only accepts `compete: false`. Invalid or missing flags fail before raw client access.
 `tickle()` is a safe read and can use the read scheduler retry policy. `logout()` makes at most one
 broker request for each client, including when that request fails. `close()` only closes local
 admission. It does not invent a transport close operation and does not log out implicitly. After
@@ -431,11 +432,11 @@ return `recovery_required`, because they do not prove that every submitted ticke
   all-or-none response: `accepted` therefore requires exactly two non-failure acknowledgements,
   while mixed, incomplete, pending-cancel, canceled, rejected, unknown, or malformed evidence is
   returned as `recovery_required` with every observed broker order ID retained.
-- `acknowledgeOrderWarning(...)` replies once to an exact broker warning ID. Warnings with a
-  non-empty array of string message IDs are marked `known`; callers must still approve exact IDs,
-  and malformed or missing IDs remain unknown.
+- `acknowledgeOrderWarning(...)` requires an exact account ID and replies once to an exact broker
+  warning ID. Warnings with a non-empty array of string message IDs are marked `known`; callers must
+  still approve exact IDs, and malformed or missing IDs remain unknown.
 - A warning from `submitDerivativeContingentOrders(...)` includes a typed `continuation` containing
-  the exact reply ID and parent client ID. Pass that object unchanged to
+  the exact account ID, reply ID, and parent client ID. Pass that object unchanged to
   `acknowledgeContingentOrderWarning(...)`; its result retains both broker acknowledgements or
   returns all partial evidence as `recovery_required`. Do not route contingent warnings through the
   single-order acknowledgement method.
@@ -471,13 +472,15 @@ return `recovery_required`, because they do not prove that every submitted ticke
   validates each expected leg's side and ratio-derived quantity. Its sanitized result separates
   gross option points, multiplier-adjusted gross dollars, commission, and net dollars without
   exposing account or execution IDs.
-- `cancelDerivativeOrder(...)` sends one exact cancellation request and returns only a typed
-  `requested` acknowledgement. Its required `assetClass` lets the client apply the same
+- `cancelDerivativeOrder(...)` uses its exact account ID and sends one exact cancellation request.
+  It returns only a typed `requested` acknowledgement. Its required `assetClass` lets the client
+  apply the same
   product-aware CME metadata rule without guessing from an order ID. Callers remain responsible
   for reading until a terminal state and verifying that cancellation reached `CANCELED`.
 
-Placement, warning replies, and cancellation deliberately use single-attempt HTTP writes so a
-transport retry cannot duplicate a broker action. A BUY-oriented net credit remains negative at
+Placement, warning replies, and cancellation use one common fail-closed session and exact-account
+check. They deliberately use single-attempt HTTP writes so a transport retry cannot duplicate a
+broker action. A BUY-oriented net credit remains negative at
 the IBKR boundary, matching the What-If ticket exactly. Every write requires the exact account ID;
 the library never falls back to the first account. Broker-declared order rejections retain their
 structured response in `BrokerErrorDetail.details`; transport exceptions are rethrown intact.
