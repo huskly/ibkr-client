@@ -20,6 +20,7 @@ import {
   type BrokerQuoteRequest,
   type IbkrClient,
   type IbkrClientOptions,
+  type IbkrContractReferenceEvidence,
   type IbkrHttpErrorResponse,
   type IbkrJsonEvidence,
   type IbkrSessionEvidence,
@@ -32,6 +33,7 @@ import {
   type OptionDefinitionCacheKey,
   type OptionDiscoveryOptions,
   type OptionDiscoveryTelemetry,
+  type OptionSeriesReferenceEvidence,
   type OptionStrikeRange,
   type OptionChainSnapshotDiagnostics,
   type OptionChainSnapshotField,
@@ -43,6 +45,7 @@ import {
   type PriceHistorySecurityType,
   type PriceHistoryTelemetry,
   type TradingDiagnostics,
+  type UnderlyingInstrumentReferenceEvidence,
 } from "../src/index.js";
 
 interface PackageManifest {
@@ -234,12 +237,67 @@ void test("public settlement types state one figure currency and one observation
   assert.equal(read, undefined);
 });
 
+void test("public option-series reference states raw contract facts only", () => {
+  const underlying: UnderlyingInstrumentReferenceEvidence = {
+    requestedConid: 756733,
+    observedAtEpochMillis: 1_754_000_000_000,
+    conid: 756733,
+    symbol: "SPY",
+    localSymbol: "SPY",
+    instrumentType: "STK",
+    tradingClass: "SPY",
+    underlyingConid: 0,
+    multiplier: null,
+    multiplierRaw: null,
+    companyName: "SS SPDR S&P 500 ETF TRUST-US",
+    currency: "USD",
+    exchange: "SMART",
+    listingExchange: null,
+    validExchanges: "SMART,AMEX,ARCA",
+    cfiCode: null,
+    contractClarificationType: null,
+    classifier: null,
+    underlyingIssuer: null,
+    description: null,
+    presentFieldNames: ["con_id", "instrument_type"],
+  };
+  const base: IbkrContractReferenceEvidence = underlying;
+  const option: OptionSeriesReferenceEvidence = {
+    ...base,
+    requestedConid: 904834942,
+    conid: 904834942,
+    localSymbol: "SPY   260904P00716000",
+    instrumentType: "OPT",
+    underlyingConid: 756733,
+    multiplier: 100,
+    multiplierRaw: "100",
+    cfiCode: "OPXXXS",
+    description: "SEP 04 '26 716 Put",
+    right: "PUT",
+    strike: 716,
+    strikeRaw: "716.0",
+    maturityDate: "20260904",
+    expiryFull: "20260904",
+    contractMonth: "202609",
+  };
+  const readOption: IbkrClient["getOptionSeriesReference"] | undefined = undefined;
+  const readUnderlying: IbkrClient["getUnderlyingInstrumentReference"] | undefined = undefined;
+
+  assert.equal(option.multiplierRaw, "100");
+  assert.equal(option.tradingClass, "SPY");
+  assert.equal(option.listingExchange, null);
+  assert.equal(underlying.instrumentType, "STK");
+  assert.equal(underlying.underlyingConid, 0);
+  assert.equal(readOption, undefined);
+  assert.equal(readUnderlying, undefined);
+});
+
 test("package exposes only the library and no CLI entry point", async () => {
   const manifest = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   ) as PackageManifest;
 
-  assert.equal(manifest.version, "2.1.1");
+  assert.equal(manifest.version, "2.2.0");
   assert.equal(manifest.bin, undefined);
   for (const script of Object.values(manifest.scripts ?? {})) {
     assert.doesNotMatch(script, /(?:src|dist)\/cli(?:\/|\s|$)/);

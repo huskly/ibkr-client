@@ -6,6 +6,9 @@ import type {
   AccountSettledCashByDate,
   AccountSettlementEvidence,
   AccountSettlementFigure,
+  IbkrContractReferenceEvidence,
+  OptionSeriesReferenceEvidence,
+  UnderlyingInstrumentReferenceEvidence,
   ActiveDerivativeOrder,
   ActiveDerivativeOrderLeg,
   ActiveDerivativeOrderUncertainty,
@@ -2316,6 +2319,119 @@ export class IbkrClient
     const record: unknown = summary;
     if (record === null || typeof record !== "object") return [];
     return Object.keys(record).sort();
+  }
+
+  /**
+   * Read every reference fact IBKR states about ONE exact option conid, from
+   * `iserver/contract/{conid}/info`.
+   *
+   * This endpoint is the only per-conid read that states `multiplier` and
+   * `trading_class`; the conid-only `iserver/secdef/info` re-read drops both.
+   *
+   * The result is raw evidence. A field the broker did not state reads `null`,
+   * no field is inferred, no currency is defaulted, and one missing field never
+   * makes this method throw. A stated `underlying_con_id` of `0` is reported as
+   * `0`, never as `null`.
+   *
+   * IBKR states no deliverable list, no adjusted flag, and no settlement style
+   * here: a known adjusted class (`TLRY1`) and a standard class (`SPY`) report
+   * the same `multiplier` `"100"` and the same `cfi_code` `"OPXXXS"`. So this
+   * evidence can never prove a standard series. The CONSUMER, not this package,
+   * decides what qualifies.
+   *
+   * @param conid The exact option contract id. It must be a positive integer.
+   */
+  async getOptionSeriesReference(conid: number): Promise<OptionSeriesReferenceEvidence> {
+    this.assertOpen();
+    const record = await this.readContractReference(conid);
+    return {
+      ...this.contractReferenceEvidence(conid, record),
+      right: this.trimmedString(record?.["right"]),
+      strike: toNullableNumber(record?.["strike"]),
+      strikeRaw: this.trimmedString(record?.["strike"]),
+      maturityDate: this.trimmedString(record?.["maturity_date"]),
+      expiryFull: this.trimmedString(record?.["expiry_full"]),
+      contractMonth: this.trimmedString(record?.["contract_month"]),
+    };
+  }
+
+  /**
+   * Read the same reference facts for an UNDERLYING conid, so a consumer can
+   * resolve the option's `underlying_con_id` to its instrument type and venue.
+   *
+   * `instrument_type` reads `"STK"` for an equity or an ETF and `"IND"` for an
+   * index. `exchange` and `valid_exchanges` read `"BASKET"` for the
+   * pseudo-underlying of an adjusted class. This method reports those facts and
+   * judges none of them. The join is a second, non-atomic read of a different
+   * contract; the consumer owns its freshness and ambiguity policy.
+   *
+   * @param conid The exact underlying contract id. It must be a positive integer.
+   */
+  async getUnderlyingInstrumentReference(
+    conid: number
+  ): Promise<UnderlyingInstrumentReferenceEvidence> {
+    this.assertOpen();
+    return this.contractReferenceEvidence(conid, await this.readContractReference(conid));
+  }
+
+  /**
+   * Fetch one `iserver/contract/{conid}/info` record. An explicit broker error
+   * is raised, because it is a refusal and not a missing field. A response that
+   * is not one object reads as no record at all, which states every field
+   * `null` instead of guessing a shape.
+   */
+  private async readContractReference(
+    conid: number
+  ): Promise<Readonly<Record<string, unknown>> | null> {
+    if (!Number.isSafeInteger(conid) || conid <= 0) {
+      throw new Error(`An exact positive IBKR conid is required, received ${String(conid)}`);
+    }
+    const response = await this.req<unknown>({
+      path: `iserver/contract/${String(conid)}/info`,
+    });
+    if (
+      isUnknownRecord(response) &&
+      response["error"] !== undefined &&
+      response["error"] !== null
+    ) {
+      const detail = this.normalizeBrokerError(
+        response["error"],
+        response,
+        "IBKR rejected the contract reference request"
+      );
+      throw new IbkrBrokerResponseError(detail.message, detail);
+    }
+    return isUnknownRecord(response) ? response : null;
+  }
+
+  /** Narrow one contract-reference record into the facts IBKR stated, verbatim. */
+  private contractReferenceEvidence(
+    requestedConid: number,
+    record: Readonly<Record<string, unknown>> | null
+  ): IbkrContractReferenceEvidence {
+    return {
+      requestedConid,
+      observedAtEpochMillis: this.now(),
+      conid: toNullableNumber(record?.["con_id"]),
+      symbol: this.trimmedString(record?.["symbol"]),
+      localSymbol: this.trimmedString(record?.["local_symbol"]),
+      instrumentType: this.trimmedString(record?.["instrument_type"]),
+      tradingClass: this.trimmedString(record?.["trading_class"]),
+      underlyingConid: toNullableNumber(record?.["underlying_con_id"]),
+      multiplier: toNullableNumber(record?.["multiplier"]),
+      multiplierRaw: this.trimmedString(record?.["multiplier"]),
+      companyName: this.trimmedString(record?.["company_name"]),
+      currency: this.trimmedString(record?.["currency"]),
+      exchange: this.trimmedString(record?.["exchange"]),
+      listingExchange: this.trimmedString(record?.["listing_exchange"]),
+      validExchanges: this.trimmedString(record?.["valid_exchanges"]),
+      cfiCode: this.trimmedString(record?.["cfi_code"]),
+      contractClarificationType: this.trimmedString(record?.["contract_clarification_type"]),
+      classifier: this.trimmedString(record?.["classifier"]),
+      underlyingIssuer: this.trimmedString(record?.["underlying_issuer"]),
+      description: this.trimmedString(record?.["text"]),
+      presentFieldNames: record === null ? [] : Object.keys(record).sort(),
+    };
   }
 
   async getPositions(symbol?: string): Promise<BrokerPosition[]> {

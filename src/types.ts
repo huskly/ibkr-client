@@ -147,6 +147,127 @@ export interface AccountSettlementEvidence {
   presentSummaryFieldNames: string[];
 }
 
+/**
+ * The reference facts IBKR states about ONE exact contract on
+ * `iserver/contract/{conid}/info`, kept verbatim.
+ *
+ * Every field is raw evidence. A field the broker did not state reads `null`.
+ * Nothing is inferred, nothing is defaulted, and no currency is assumed. One
+ * missing field never makes the read fail. This package states facts only: the
+ * CONSUMER decides what the facts qualify.
+ *
+ * Read this endpoint, not `iserver/secdef/info?conid=`. The conid-only
+ * `secdef/info` re-read DROPS `multiplier` and `tradingClass`, so it cannot
+ * state the contract size or the listing class.
+ */
+export interface IbkrContractReferenceEvidence {
+  /** The conid this read asked for. It is the caller's value, not the broker's. */
+  requestedConid: number;
+  /** When this observation was minted, from the client clock. */
+  observedAtEpochMillis: number;
+  /**
+   * Vendor field `con_id`. `null` when absent or not a number. Compare it with
+   * {@link IbkrContractReferenceEvidence.requestedConid}: this package does not
+   * compare them for you.
+   */
+  conid: number | null;
+  /**
+   * Vendor field `symbol` (for example `"SPY"`, or `"TLRY1"` for an adjusted
+   * class). It is a listing symbol, never a deliverable statement.
+   */
+  symbol: string | null;
+  /** Vendor field `local_symbol`, the OSI symbol (`"SPY   260904P00716000"`). */
+  localSymbol: string | null;
+  /** Vendor field `instrument_type`, the vendor security type (`"OPT"`, `"STK"`, `"IND"`). */
+  instrumentType: string | null;
+  /** Vendor field `trading_class` (`"SPY"`, `"SPXW"`, `"TLRY1"`, `"NMS"`). */
+  tradingClass: string | null;
+  /**
+   * Vendor field `underlying_con_id`. IBKR writes `0` on a contract that has no
+   * underlying, and `0` is reported as the number `0`, never as `null`: a stated
+   * zero and an unstated field are different facts.
+   */
+  underlyingConid: number | null;
+  /** Vendor field `multiplier`, parsed (`"100"` reads `100`). */
+  multiplier: number | null;
+  /** Vendor field `multiplier` verbatim, so an operator sees what IBKR sent. */
+  multiplierRaw: string | null;
+  /**
+   * Vendor field `company_name`, the free-text description (the search endpoint
+   * calls the same text `companyHeader`). For an adjusted class it can read
+   * `"TLRY: TILRAY BRANDS INC: ADJ 20251201"`. It is prose, not a machine flag.
+   */
+  companyName: string | null;
+  /** Vendor field `currency`. Never inferred, never defaulted to `"USD"`. */
+  currency: string | null;
+  /** Vendor field `exchange` (the routing venue, for example `"SMART"` or `"BASKET"`). */
+  exchange: string | null;
+  /**
+   * Vendor field `listing_exchange`. This endpoint stated no such key in any
+   * captured payload, so it normally reads `null`; the venue lives in
+   * {@link IbkrContractReferenceEvidence.exchange} and
+   * {@link IbkrContractReferenceEvidence.validExchanges}.
+   */
+  listingExchange: string | null;
+  /** Vendor field `valid_exchanges`, the comma-separated venue list, verbatim. */
+  validExchanges: string | null;
+  /**
+   * Vendor field `cfi_code` (ISO 10962), verbatim. IBKR returned `"OPXXXS"` for
+   * every option captured, including a known adjusted class, so position 6 (`S`,
+   * "standard") is not a usable standard-series claim.
+   */
+  cfiCode: string | null;
+  /** Vendor field `contract_clarification_type`. `null` on every contract captured. */
+  contractClarificationType: string | null;
+  /** Vendor field `classifier`. `null` on every contract captured. */
+  classifier: string | null;
+  /** Vendor field `underlying_issuer`. `null` on every contract captured. */
+  underlyingIssuer: string | null;
+  /** Vendor field `text`, the short human label (`"SEP 04 '26 716 Put"`). */
+  description: string | null;
+  /**
+   * The sorted key NAMES present in the response. Names only, never values, so
+   * an operator can confirm the live schema without seeing the contract terms.
+   */
+  presentFieldNames: string[];
+}
+
+/**
+ * One reference observation of ONE exact option conid.
+ *
+ * It carries the identity terms IBKR states for that option and nothing more.
+ * IBKR publishes no deliverable list, no adjusted flag, and no settlement style
+ * on this endpoint, so this evidence can never state that a series is standard.
+ * The CONSUMER makes that decision from its own authority.
+ */
+export interface OptionSeriesReferenceEvidence extends IbkrContractReferenceEvidence {
+  /** Vendor field `right` (`"PUT"` or `"CALL"` on this endpoint). */
+  right: string | null;
+  /** Vendor field `strike`, parsed (`"716.0"` reads `716`). */
+  strike: number | null;
+  /** Vendor field `strike` verbatim. */
+  strikeRaw: string | null;
+  /** Vendor field `maturity_date`, the `YYYYMMDD` expiry the broker wrote. */
+  maturityDate: string | null;
+  /** Vendor field `expiry_full`, the second `YYYYMMDD` expiry the broker wrote. */
+  expiryFull: string | null;
+  /** Vendor field `contract_month` (`"202609"`). */
+  contractMonth: string | null;
+}
+
+/**
+ * One reference observation of an UNDERLYING conid, read from the same endpoint.
+ *
+ * The equity-versus-index answer is not on the option record: it needs this
+ * second, non-atomic read of a different contract, joined by
+ * {@link OptionSeriesReferenceEvidence.underlyingConid}.
+ * {@link IbkrContractReferenceEvidence.instrumentType} reads `"STK"` for an
+ * equity or ETF and `"IND"` for an index.
+ * {@link IbkrContractReferenceEvidence.exchange} reads `"BASKET"` for the
+ * pseudo-underlying of an adjusted class. Both are facts, not verdicts.
+ */
+export type UnderlyingInstrumentReferenceEvidence = IbkrContractReferenceEvidence;
+
 export interface BrokerPosition {
   /** Broker-native contract id for exact reads in the current broker session. */
   brokerId: string;

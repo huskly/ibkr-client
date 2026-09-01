@@ -99,6 +99,28 @@ validated at runtime. Its broker-neutral account API includes:
   makes the read throw. `presentSummaryFieldNames` lists the sorted key NAMES present in the
   summary response, names only and never values, so an operator can confirm the live schema
   without seeing amounts. This method remains a separate read from `getAccountBalances()`.
+- `getOptionSeriesReference(conid)` for one reference read of ONE exact option contract, and
+  `getUnderlyingInstrumentReference(conid)` for the same read of an underlying contract. Both read
+  `iserver/contract/{conid}/info`. Use this endpoint, not the conid-only `iserver/secdef/info`
+  re-read: that re-read drops `multiplier` and `tradingClass`, so it cannot state the contract size
+  or the listing class. The option read reports `con_id`, `symbol`, `local_symbol` (the OSI symbol),
+  `instrument_type`, `right`, `strike`, `maturity_date`, `expiry_full`, `contract_month`,
+  `multiplier`, `trading_class`, `underlying_con_id`, `company_name`, `currency`, `exchange`,
+  `listing_exchange`, `valid_exchanges`, `cfi_code`, `contract_clarification_type`, `classifier`,
+  `underlying_issuer`, and `text`. The underlying read reports the same facts minus the option
+  terms, so a consumer can resolve `underlying_con_id` to `instrument_type` (`STK` for an equity or
+  an ETF, `IND` for an index) and to the venue (`exchange` and `valid_exchanges` read `BASKET` for
+  the pseudo-underlying of an adjusted class). Both reads state raw evidence and one client-minted
+  `observedAtEpochMillis`. A field the broker did not state reads `null`, no field is inferred, no
+  currency is defaulted, and one missing field never makes the read throw. A stated
+  `underlying_con_id` of `0` stays `0`, because a stated zero and an unstated field are different
+  facts. An explicit broker error still throws `IbkrBrokerResponseError`, because a refusal is not a
+  missing field. `presentFieldNames` lists the sorted key NAMES present in the response, names only
+  and never values, so an operator can confirm the live schema without seeing the contract terms.
+  These reads prove no deliverable: IBKR states no deliverable list, no adjusted flag, and no
+  settlement style on this endpoint, and a known adjusted class (`TLRY1`) reports the same
+  `multiplier` `"100"` and the same `cfi_code` `"OPXXXS"` as a standard class (`SPY`). The CONSUMER
+  decides what the facts qualify.
 - `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes. Quote requests accept
   a symbol and an optional broker ID. A broker ID reads that exact contract without symbol
   discovery. A request without one can also resolve a complete OSI option symbol without loading
