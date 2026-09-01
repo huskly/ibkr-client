@@ -18,10 +18,27 @@ export interface IbkrPortfolioAccount {
   currency?: string;
 }
 
-/** A single field in the `portfolio/{accountId}/summary` response. */
+/**
+ * A single field in the `portfolio/{accountId}/summary` response.
+ *
+ * Observed live shape (read-only probe of a real account): every field carries
+ * `value`, `isNull`, `severity`, and `timestamp` beside `amount` and
+ * `currency`. A NUMERIC field (for example `totalcashvalue`, `availablefunds`,
+ * `accruedcash`, `excessliquidity`, `buyingpower`, `netliquidation`) carries a
+ * numeric `amount` with `currency: "USD"` and `value: null`. A STRING field
+ * (for example `settledcashbydate`, `accounttype`, `tradingtype-s`) carries
+ * `amount: 0` and `currency: null`, and holds its real content in `value`.
+ * Most keys also appear with a `-s` (securities) and a `-c` (commodities)
+ * suffix beside the unsuffixed total.
+ */
 export interface IbkrSummaryField {
   amount?: number | string;
-  currency?: string;
+  currency?: string | null;
+  /** The real content of a string field. `null` for a numeric field. */
+  value?: string | null;
+  isNull?: boolean;
+  severity?: number;
+  timestamp?: number;
 }
 
 export type IbkrPortfolioSummary = Record<string, IbkrSummaryField | undefined>;

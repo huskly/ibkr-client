@@ -3,6 +3,7 @@ import type { IbkrClient as RawIbkrClient } from "ibkr-client";
 import type { IbkrOauth1Config } from "./oauthConfig.js";
 import type {
   AccountBalances,
+  AccountSettledCashByDate,
   AccountSettlementEvidence,
   AccountSettlementFigure,
   ActiveDerivativeOrder,
@@ -2229,6 +2230,11 @@ export class IbkrClient
    * null, non-finite, or not convertible reads `null`, and a missing currency
    * reads `null`. A currency is never inferred and never defaulted to `"USD"`.
    * One missing field never makes this method throw.
+   *
+   * Settled cash is reported as evidence only, from the live `settledcashbydate`
+   * string field. This package refuses nothing and infers nothing: the CONSUMER,
+   * not this package, decides which dates count as settled, and a date after the
+   * observation date is not settled cash.
    */
   async getAccountSettlementEvidence(): Promise<AccountSettlementEvidence> {
     this.assertOpen();
@@ -2239,15 +2245,59 @@ export class IbkrClient
     return {
       accountId,
       observedAtEpochMillis: this.now(),
-      settledCash: this.settlementFigure(summary, "settledcash"),
+      settledCashByDate: this.settledCashByDate(summary),
+      settledCashByDateRaw: this.settledCashByDateRaw(summary),
       availableFunds: this.settlementFigure(summary, "availablefunds"),
       totalCashValue: this.settlementFigure(summary, "totalcashvalue"),
       accruedCash: this.settlementFigure(summary, "accruedcash"),
       excessLiquidity: this.settlementFigure(summary, "excessliquidity"),
       buyingPower: this.settlementFigure(summary, "buyingpower"),
       netLiquidation: this.settlementFigure(summary, "netliquidation"),
+      accountType: this.summaryFieldValue(summary, "accounttype"),
+      tradingType: this.summaryFieldValue(summary, "tradingtype-s"),
       presentSummaryFieldNames: this.presentSummaryFieldNames(summary),
     };
+  }
+
+  /**
+   * The exact `settledcashbydate` `value` string, unparsed. `null` when the key
+   * is absent, is not an object, or carries no usable string.
+   */
+  private settledCashByDateRaw(summary: IbkrPortfolioSummary): string | null {
+    return this.summaryFieldValue(summary, "settledcashbydate");
+  }
+
+  /**
+   * Parse the `settledcashbydate` `value` string into one entry for each
+   * `YYYYMMDD:amount` pair, in the order the broker wrote them. Several pairs
+   * may share one string, separated by `;` or `,`. A comma is always a pair
+   * separator here, never a thousands separator. A pair that does not carry
+   * an eight-digit date and a usable amount is skipped, never guessed; the raw
+   * string still reports it. This is evidence only: which dates count as
+   * settled is the consumer's decision, and a date after the observation date
+   * is not settled cash.
+   */
+  private settledCashByDate(summary: IbkrPortfolioSummary): AccountSettledCashByDate[] {
+    const raw = this.settledCashByDateRaw(summary);
+    if (raw === null) return [];
+    const out: AccountSettledCashByDate[] = [];
+    for (const pair of raw.split(/[;,]/)) {
+      const separator = pair.indexOf(":");
+      if (separator < 0) continue;
+      const settlementDate = pair.slice(0, separator).trim();
+      if (!/^\d{8}$/.test(settlementDate)) continue;
+      const amount = toNullableNumber(pair.slice(separator + 1).trim());
+      if (amount === null) continue;
+      out.push({ settlementDate, amount });
+    }
+    return out;
+  }
+
+  /** The `value` string of one summary key, or `null` when it is unusable. */
+  private summaryFieldValue(summary: IbkrPortfolioSummary, key: string): string | null {
+    const field: unknown = summary[key];
+    if (field === null || typeof field !== "object") return null;
+    return this.trimmedString((field as IbkrSummaryField).value);
   }
 
   /** Narrow one summary key into an amount and the currency IBKR stated for it. */

@@ -84,6 +84,18 @@ export interface AccountSettlementFigure {
 }
 
 /**
+ * One `YYYYMMDD:amount` pair the broker stated inside the `settledcashbydate`
+ * summary field. The date is kept exactly as the broker wrote it, and the
+ * amount is the parsed number. This is evidence, not a decision.
+ */
+export interface AccountSettledCashByDate {
+  /** The settlement date the broker stated, in its own `YYYYMMDD` form. */
+  settlementDate: string;
+  /** The amount the broker stated for that date. */
+  amount: number;
+}
+
+/**
  * One settled-cash observation of one account, read from the IBKR account
  * summary in one request. Every figure states its own currency, so a consumer
  * can refuse a currency it does not accept instead of assuming one.
@@ -93,8 +105,25 @@ export interface AccountSettlementEvidence {
   accountId: string;
   /** When this observation was minted, from the client clock. */
   observedAtEpochMillis: number;
-  /** Summary key `settledcash`. */
-  settledCash: AccountSettlementFigure;
+  /**
+   * Summary key `settledcashbydate`, parsed. The live field is a STRING field:
+   * `amount: 0`, `currency: null`, and the real content in `value`, of the form
+   * `"YYYYMMDD:amount"`. One entry is reported for each pair, in the order the
+   * broker used. A malformed pair is skipped and never guessed;
+   * {@link AccountSettlementEvidence.settledCashByDateRaw} still reports it.
+   * An absent key gives an empty array.
+   *
+   * This package infers no policy. The CONSUMER, not this package, decides
+   * which dates count as settled. A date after the observation date is not
+   * settled cash.
+   */
+  settledCashByDate: readonly AccountSettledCashByDate[];
+  /**
+   * The exact `settledcashbydate` `value` string, unparsed, or `null` when the
+   * key is absent or carries no string. It survives a parse failure so an
+   * operator can see what the broker actually sent.
+   */
+  settledCashByDateRaw: string | null;
   /** Summary key `availablefunds`. */
   availableFunds: AccountSettlementFigure;
   /** Summary key `totalcashvalue`. */
@@ -107,6 +136,10 @@ export interface AccountSettlementEvidence {
   buyingPower: AccountSettlementFigure;
   /** Summary key `netliquidation`. */
   netLiquidation: AccountSettlementFigure;
+  /** Summary key `accounttype`, from its `value` string (for example `"INDIVIDUAL"`). */
+  accountType: string | null;
+  /** Summary key `tradingtype-s`, from its `value` string (for example `"PMRGN"`). */
+  tradingType: string | null;
   /**
    * The sorted key NAMES present in the summary response. Names only, never
    * values, so an operator can confirm the live schema without seeing amounts.
