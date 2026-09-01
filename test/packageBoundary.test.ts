@@ -6,6 +6,9 @@ import {
   IbkrInsufficientHistoryError,
   IbkrPriceHistoryContractError,
   type AccountBalances,
+  type AccountSettledCashByDate,
+  type AccountSettlementEvidence,
+  type AccountSettlementFigure,
   type BrokerClient,
   type BrokerEnvironment,
   type DerivativeComboPreviewResult,
@@ -190,12 +193,42 @@ void test("public quote types expose snapshot-only requests", () => {
   assert.equal(getQuotes, undefined);
 });
 
+void test("public settlement types state one figure currency and one observation instant", () => {
+  const figure: AccountSettlementFigure = { amount: 25_000.5, currency: "USD" };
+  const settled: readonly AccountSettledCashByDate[] = [
+    { settlementDate: "20260902", amount: 25_000.5 },
+  ];
+  const evidence: AccountSettlementEvidence = {
+    accountId: "U123",
+    observedAtEpochMillis: 1_754_000_000_000,
+    settledCashByDate: settled,
+    settledCashByDateRaw: "20260902:25000.50",
+    availableFunds: { amount: null, currency: null },
+    totalCashValue: figure,
+    accruedCash: figure,
+    excessLiquidity: figure,
+    buyingPower: figure,
+    netLiquidation: figure,
+    accountType: "INDIVIDUAL",
+    tradingType: "PMRGN",
+    presentSummaryFieldNames: ["availablefunds", "settledcashbydate"],
+  };
+  const read: IbkrClient["getAccountSettlementEvidence"] | undefined = undefined;
+
+  assert.equal(evidence.totalCashValue.currency, "USD");
+  assert.equal(evidence.settledCashByDate[0]?.settlementDate, "20260902");
+  assert.equal(evidence.settledCashByDateRaw, "20260902:25000.50");
+  assert.equal(evidence.accountType, "INDIVIDUAL");
+  assert.equal(evidence.availableFunds.amount, null);
+  assert.equal(read, undefined);
+});
+
 test("package exposes only the library and no CLI entry point", async () => {
   const manifest = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   ) as PackageManifest;
 
-  assert.equal(manifest.version, "2.0.0");
+  assert.equal(manifest.version, "2.1.0");
   assert.equal(manifest.bin, undefined);
   for (const script of Object.values(manifest.scripts ?? {})) {
     assert.doesNotMatch(script, /(?:src|dist)\/cli(?:\/|\s|$)/);
