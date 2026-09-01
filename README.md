@@ -84,6 +84,16 @@ validated at runtime. Its broker-neutral account API includes:
   maintenance-margin, full, look-ahead, and leverage values. The client removes comma separators
   from numeric provider strings, such as day P/L field `78` and account summary amounts. Margin
   values are `null` when IBKR omits or returns an invalid value; numeric zero remains `0`.
+- `getAccountSettlementEvidence()` for one settled-cash observation of the account. It reads the
+  same account summary endpoint as `getAccountBalances()` and returns the account id, one
+  client-minted `observedAtEpochMillis`, and the `settledCash`, `availableFunds`, `totalCashValue`,
+  `accruedCash`, `excessLiquidity`, `buyingPower`, and `netLiquidation` figures. Each figure is an
+  `{ amount, currency }` pair that states the currency IBKR gave for that figure. An amount that is
+  absent, null, non-finite, or not convertible is `null`, and a missing currency is `null`. The
+  client never infers a currency and never defaults one to `"USD"`, and one missing field never
+  makes the read throw. `presentSummaryFieldNames` lists the sorted key NAMES present in the
+  summary response, names only and never values, so an operator can confirm the live schema
+  without seeing amounts. This method is additive: `getAccountBalances()` is unchanged.
 - `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes. Quote requests accept
   a symbol and an optional broker ID. A broker ID reads that exact contract without symbol
   discovery. A request without one can also resolve a complete OSI option symbol without loading

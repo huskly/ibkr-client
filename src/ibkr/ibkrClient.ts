@@ -3,6 +3,8 @@ import type { IbkrClient as RawIbkrClient } from "ibkr-client";
 import type { IbkrOauth1Config } from "./oauthConfig.js";
 import type {
   AccountBalances,
+  AccountSettlementEvidence,
+  AccountSettlementFigure,
   ActiveDerivativeOrder,
   ActiveDerivativeOrderLeg,
   ActiveDerivativeOrderUncertainty,
@@ -98,6 +100,7 @@ import type {
   IbkrPortfolioAccount,
   IbkrPortfolioSummary,
   IbkrPosition,
+  IbkrSummaryField,
   IbkrSecdefByConidResponse,
   IbkrSecdefInfo,
   IbkrSecdefResponse,
@@ -2215,6 +2218,54 @@ export class IbkrClient
         commodities: marginSnapshot("-c"),
       },
     };
+  }
+
+  /**
+   * Read one settled-cash observation of the account from the same account
+   * summary endpoint {@link getAccountBalances} uses.
+   *
+   * The observation names the account, states the currency IBKR gave for each
+   * figure, and carries one client-minted timestamp. A figure that is absent,
+   * null, non-finite, or not convertible reads `null`, and a missing currency
+   * reads `null`. A currency is never inferred and never defaulted to `"USD"`.
+   * One missing field never makes this method throw.
+   */
+  async getAccountSettlementEvidence(): Promise<AccountSettlementEvidence> {
+    this.assertOpen();
+    const accountId = await this.getAccountId();
+    const summary = await this.req<IbkrPortfolioSummary>({
+      path: `portfolio/${accountId}/summary`,
+    });
+    return {
+      accountId,
+      observedAtEpochMillis: this.now(),
+      settledCash: this.settlementFigure(summary, "settledcash"),
+      availableFunds: this.settlementFigure(summary, "availablefunds"),
+      totalCashValue: this.settlementFigure(summary, "totalcashvalue"),
+      accruedCash: this.settlementFigure(summary, "accruedcash"),
+      excessLiquidity: this.settlementFigure(summary, "excessliquidity"),
+      buyingPower: this.settlementFigure(summary, "buyingpower"),
+      netLiquidation: this.settlementFigure(summary, "netliquidation"),
+      presentSummaryFieldNames: this.presentSummaryFieldNames(summary),
+    };
+  }
+
+  /** Narrow one summary key into an amount and the currency IBKR stated for it. */
+  private settlementFigure(summary: IbkrPortfolioSummary, key: string): AccountSettlementFigure {
+    const field: unknown = summary[key];
+    if (field === null || typeof field !== "object") return { amount: null, currency: null };
+    const record = field as IbkrSummaryField;
+    return {
+      amount: toNullableNumber(record.amount),
+      currency: this.trimmedString(record.currency),
+    };
+  }
+
+  /** The sorted key names present in the summary response. Names only, never values. */
+  private presentSummaryFieldNames(summary: IbkrPortfolioSummary): string[] {
+    const record: unknown = summary;
+    if (record === null || typeof record !== "object") return [];
+    return Object.keys(record).sort();
   }
 
   async getPositions(symbol?: string): Promise<BrokerPosition[]> {

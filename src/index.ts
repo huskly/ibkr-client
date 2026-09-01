@@ -23,6 +23,8 @@ export type {
   AccountMargin,
   AccountMarginSnapshot,
   AccountBalances,
+  AccountSettlementEvidence,
+  AccountSettlementFigure,
   ActiveDerivativeOptionIdentity,
   ActiveDerivativeOrder,
   ActiveDerivativeOrderLeg,

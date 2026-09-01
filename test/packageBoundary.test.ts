@@ -6,6 +6,8 @@ import {
   IbkrInsufficientHistoryError,
   IbkrPriceHistoryContractError,
   type AccountBalances,
+  type AccountSettlementEvidence,
+  type AccountSettlementFigure,
   type BrokerClient,
   type BrokerEnvironment,
   type DerivativeComboPreviewResult,
@@ -188,6 +190,27 @@ void test("public quote types expose snapshot-only requests", () => {
   assert.equal(options.includeHistory, false);
   assert.equal(requests[0]?.symbol, "SPX");
   assert.equal(getQuotes, undefined);
+});
+
+void test("public settlement types state one figure currency and one observation instant", () => {
+  const figure: AccountSettlementFigure = { amount: 25_000.5, currency: "USD" };
+  const evidence: AccountSettlementEvidence = {
+    accountId: "U123",
+    observedAtEpochMillis: 1_754_000_000_000,
+    settledCash: figure,
+    availableFunds: { amount: null, currency: null },
+    totalCashValue: figure,
+    accruedCash: figure,
+    excessLiquidity: figure,
+    buyingPower: figure,
+    netLiquidation: figure,
+    presentSummaryFieldNames: ["availablefunds", "settledcash"],
+  };
+  const read: IbkrClient["getAccountSettlementEvidence"] | undefined = undefined;
+
+  assert.equal(evidence.settledCash.currency, "USD");
+  assert.equal(evidence.availableFunds.amount, null);
+  assert.equal(read, undefined);
 });
 
 test("package exposes only the library and no CLI entry point", async () => {

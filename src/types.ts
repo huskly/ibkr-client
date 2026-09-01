@@ -72,6 +72,48 @@ export interface AccountBalances {
   margin: AccountMargin;
 }
 
+/**
+ * One account-summary figure with the currency IBKR stated for that figure.
+ * An amount that is absent, null, non-finite, or not convertible is `null`.
+ * A currency that is absent is `null`; it is never inferred and never
+ * defaulted to `"USD"`. A stated currency is kept verbatim.
+ */
+export interface AccountSettlementFigure {
+  amount: number | null;
+  currency: string | null;
+}
+
+/**
+ * One settled-cash observation of one account, read from the IBKR account
+ * summary in one request. Every figure states its own currency, so a consumer
+ * can refuse a currency it does not accept instead of assuming one.
+ */
+export interface AccountSettlementEvidence {
+  /** The account the figures belong to. */
+  accountId: string;
+  /** When this observation was minted, from the client clock. */
+  observedAtEpochMillis: number;
+  /** Summary key `settledcash`. */
+  settledCash: AccountSettlementFigure;
+  /** Summary key `availablefunds`. */
+  availableFunds: AccountSettlementFigure;
+  /** Summary key `totalcashvalue`. */
+  totalCashValue: AccountSettlementFigure;
+  /** Summary key `accruedcash`. */
+  accruedCash: AccountSettlementFigure;
+  /** Summary key `excessliquidity`. */
+  excessLiquidity: AccountSettlementFigure;
+  /** Summary key `buyingpower`. */
+  buyingPower: AccountSettlementFigure;
+  /** Summary key `netliquidation`. */
+  netLiquidation: AccountSettlementFigure;
+  /**
+   * The sorted key NAMES present in the summary response. Names only, never
+   * values, so an operator can confirm the live schema without seeing amounts.
+   */
+  presentSummaryFieldNames: string[];
+}
+
 export interface BrokerPosition {
   /** Broker-native contract id for exact reads in the current broker session. */
   brokerId: string;
