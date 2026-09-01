@@ -167,6 +167,48 @@ void test("getAccountBalances exposes typed total and segment margin snapshots",
   assert.equal(client.calls.filter(({ path }) => path === "portfolio/U123/summary").length, 1);
 });
 
+for (const { name, amount, expected } of [
+  { name: "missing", amount: undefined, expected: null },
+  { name: "null", amount: null, expected: null },
+  { name: "malformed", amount: "not-a-number", expected: null },
+  { name: "non-finite", amount: Number.POSITIVE_INFINITY, expected: null },
+  { name: "zero", amount: 0, expected: 0 },
+  { name: "numeric string", amount: "125.5", expected: 125.5 },
+  { name: "comma-formatted string", amount: "1,250.50", expected: 1_250.5 },
+] as const) {
+  void test(`getAccountBalances normalizes a ${name} top-level amount without guessing`, async () => {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "portfolio/accounts") return [{ accountId: "U123" }];
+      if (input.path === "portfolio/U123/summary") {
+        if (amount === undefined) return {};
+        return {
+          netliquidation: { amount },
+          availablefunds: { amount },
+          buyingpower: { amount },
+          totalcashvalue: { amount },
+        };
+      }
+      throw new Error(`Unexpected request: ${input.path}`);
+    });
+
+    const balances = await client.getAccountBalances();
+    assert.deepEqual(
+      {
+        netLiquidation: balances.netLiquidation,
+        availableFunds: balances.availableFunds,
+        buyingPower: balances.buyingPower,
+        cashBalance: balances.cashBalance,
+      },
+      {
+        netLiquidation: expected,
+        availableFunds: expected,
+        buyingPower: expected,
+        cashBalance: expected,
+      }
+    );
+  });
+}
+
 void test("fetchTransactionHistory normalizes and date-filters IBKR transactions", async () => {
   let positionPage = 0;
   const client = new FakeIbkrClient((input) => {

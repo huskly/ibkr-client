@@ -177,9 +177,20 @@ void test("public option definition cache carries identity only", () => {
   assert.ok(!Object.keys(entry.contracts[0] ?? {}).includes("bid"));
 });
 
-void test("public account balance types expose margin snapshots", () => {
+void test("public account balance types expose nullable totals and margin snapshots", () => {
+  const unavailableTotals: Pick<
+    AccountBalances,
+    "netLiquidation" | "availableFunds" | "buyingPower" | "cashBalance"
+  > = {
+    netLiquidation: null,
+    availableFunds: null,
+    buyingPower: null,
+    cashBalance: null,
+  };
   const balance = undefined as AccountBalances | undefined;
   const excessLiquidity: number | null = balance?.margin.securities.excessLiquidity ?? null;
+
+  assert.equal(unavailableTotals.netLiquidation, null);
   assert.equal(excessLiquidity, null);
 });
 
@@ -228,7 +239,7 @@ test("package exposes only the library and no CLI entry point", async () => {
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   ) as PackageManifest;
 
-  assert.equal(manifest.version, "2.1.0");
+  assert.equal(manifest.version, "2.1.1");
   assert.equal(manifest.bin, undefined);
   for (const script of Object.values(manifest.scripts ?? {})) {
     assert.doesNotMatch(script, /(?:src|dist)\/cli(?:\/|\s|$)/);

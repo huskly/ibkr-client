@@ -2175,7 +2175,7 @@ export class IbkrClient
     const summary = await this.req<IbkrPortfolioSummary>({
       path: `portfolio/${accountId}/summary`,
     });
-    const amount = (key: string): number => toNumber(summary[key]?.amount);
+    const amount = (key: string): number | null => toNullableNumber(summary[key]?.amount);
     const marginSnapshot = (suffix: "" | "-s" | "-c") => ({
       equityWithLoanValue: toNullableNumber(summary[`equitywithloanvalue${suffix}`]?.amount),
       regTEquity: toNullableNumber(summary[`regtequity${suffix}`]?.amount),

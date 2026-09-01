@@ -59,6 +59,9 @@ Optional environment variables:
 
 ## Version 2 migration
 
+Version 2.1.1 makes the four top-level `getAccountBalances()` amounts nullable. Missing, invalid, and
+non-finite broker values are `null`, not a financial zero. Numeric zero remains `0`.
+
 Version 2.0.0 makes session and write safety evidence explicit:
 
 - Use `initializeBrokerageSession(...)` and the other explicit lifecycle methods instead of `init()`.
@@ -81,9 +84,11 @@ validated at runtime. Its broker-neutral account API includes:
   session's broker contract ID for exact follow-up reads. Account balances include typed
   `margin.total`, `margin.securities`, and `margin.commodities` snapshots with IBKR's available
   funds, buying power, excess liquidity, cushion, SMA, equity-with-loan, Reg-T, initial- and
-  maintenance-margin, full, look-ahead, and leverage values. The client removes comma separators
-  from numeric provider strings, such as day P/L field `78` and account summary amounts. Margin
-  values are `null` when IBKR omits or returns an invalid value; numeric zero remains `0`.
+  maintenance-margin, full, look-ahead, and leverage values. The client removes valid comma
+  separators from numeric provider strings, such as day P/L field `78` and account summary amounts.
+  The top-level net liquidation, available funds, buying power, and cash balance values and all
+  margin values are `null` when IBKR omits or returns an invalid or non-finite value. Numeric zero
+  remains `0`.
 - `getAccountSettlementEvidence()` for one settled-cash observation of the account. It reads the
   same account summary endpoint as `getAccountBalances()` and returns the account id, one
   client-minted `observedAtEpochMillis`, and the `settledCash`, `availableFunds`, `totalCashValue`,
@@ -93,7 +98,7 @@ validated at runtime. Its broker-neutral account API includes:
   client never infers a currency and never defaults one to `"USD"`, and one missing field never
   makes the read throw. `presentSummaryFieldNames` lists the sorted key NAMES present in the
   summary response, names only and never values, so an operator can confirm the live schema
-  without seeing amounts. This method is additive: `getAccountBalances()` is unchanged.
+  without seeing amounts. This method remains a separate read from `getAccountBalances()`.
 - `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes. Quote requests accept
   a symbol and an optional broker ID. A broker ID reads that exact contract without symbol
   discovery. A request without one can also resolve a complete OSI option symbol without loading

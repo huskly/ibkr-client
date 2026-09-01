@@ -65,10 +65,10 @@ export interface AccountMargin {
 }
 
 export interface AccountBalances {
-  netLiquidation: number;
-  availableFunds: number;
-  buyingPower: number;
-  cashBalance: number;
+  netLiquidation: number | null;
+  availableFunds: number | null;
+  buyingPower: number | null;
+  cashBalance: number | null;
   margin: AccountMargin;
 }
 
