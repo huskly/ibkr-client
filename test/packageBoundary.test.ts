@@ -297,7 +297,7 @@ test("package exposes only the library and no CLI entry point", async () => {
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   ) as PackageManifest;
 
-  assert.equal(manifest.version, "2.1.1");
+  assert.equal(manifest.version, "2.2.0");
   assert.equal(manifest.bin, undefined);
   for (const script of Object.values(manifest.scripts ?? {})) {
     assert.doesNotMatch(script, /(?:src|dist)\/cli(?:\/|\s|$)/);
