@@ -436,11 +436,11 @@ test("warning continuation preserves explicit graph identities through chained r
   assert.equal(first.state, "warning");
   if (first.state !== "warning") return;
   assert.equal(first.rootClientOrderId, "hg-root");
-  assert.deepEqual(first.members.map(({ clientOrderId }) => clientOrderId), expectedIds);
   assert.deepEqual(
-    first.continuation.request.rootClientOrderId,
-    "hg-root"
+    first.members.map(({ clientOrderId }) => clientOrderId),
+    expectedIds
   );
+  assert.deepEqual(first.continuation.request.rootClientOrderId, "hg-root");
   assert.deepEqual(
     first.continuation.request.nodes.map(({ clientOrderId }) => clientOrderId),
     expectedIds
@@ -454,7 +454,9 @@ test("warning continuation preserves explicit graph identities through chained r
   const initialOrderPosts = client.calls.filter(
     (c) => c.path.endsWith("/orders") && c.method === "POST"
   ).length;
-  const initialReplyRequests = client.calls.filter((c) => c.path.startsWith("iserver/reply/")).length;
+  const initialReplyRequests = client.calls.filter((c) =>
+    c.path.startsWith("iserver/reply/")
+  ).length;
   const second = await client.acknowledgeDerivativeOrderGraphWarning({
     continuation: persisted,
     confirmed: true,
@@ -462,7 +464,10 @@ test("warning continuation preserves explicit graph identities through chained r
   assert.equal(second.state, "warning");
   if (second.state !== "warning") return;
   assert.equal(second.rootClientOrderId, "hg-root");
-  assert.deepEqual(second.members.map(({ clientOrderId }) => clientOrderId), expectedIds);
+  assert.deepEqual(
+    second.members.map(({ clientOrderId }) => clientOrderId),
+    expectedIds
+  );
   assert.equal(second.continuation.request.rootClientOrderId, "hg-root");
   assert.deepEqual(
     second.continuation.request.nodes.map(({ clientOrderId }) => clientOrderId),
@@ -486,7 +491,10 @@ test("warning continuation preserves explicit graph identities through chained r
   });
   assert.equal(accepted.state, "accepted");
   assert.equal(accepted.rootClientOrderId, "hg-root");
-  assert.deepEqual(accepted.members.map(({ clientOrderId }) => clientOrderId), expectedIds);
+  assert.deepEqual(
+    accepted.members.map(({ clientOrderId }) => clientOrderId),
+    expectedIds
+  );
   assert.equal(
     client.calls.filter((c) => c.path.startsWith("iserver/reply/")).length,
     initialReplyRequests + 2
@@ -676,7 +684,10 @@ test("rejects graph when explicit identity values collide", async () => {
   const client = new Fake(() => {
     throw new Error("network");
   });
-  await assert.rejects(() => client.submitDerivativeOrderGraph(request), /Duplicate graph member client order ID/);
+  await assert.rejects(
+    () => client.submitDerivativeOrderGraph(request),
+    /Duplicate graph member client order ID/
+  );
   assert.equal(client.calls.length, 0);
 });
 
@@ -686,7 +697,10 @@ test("rejects graph when an explicit identity collides with a fallback", async (
   const client = new Fake(() => {
     throw new Error("network");
   });
-  await assert.rejects(() => client.submitDerivativeOrderGraph(request), /Duplicate graph member client order ID/);
+  await assert.rejects(
+    () => client.submitDerivativeOrderGraph(request),
+    /Duplicate graph member client order ID/
+  );
   assert.equal(client.calls.length, 0);
 });
 
@@ -696,7 +710,10 @@ test("rejects graph when the explicit root identity disagrees with rootClientOrd
   const client = new Fake(() => {
     throw new Error("network");
   });
-  await assert.rejects(() => client.submitDerivativeOrderGraph(request), /Invalid graph root client order ID/);
+  await assert.rejects(
+    () => client.submitDerivativeOrderGraph(request),
+    /Invalid graph root client order ID/
+  );
   assert.equal(client.calls.length, 0);
 });
 
@@ -735,7 +752,6 @@ test("submits a root, child, and grandchild with exact activation links", async 
     ]
   );
 });
-
 
 test("submits a root, child, and grandchild with explicit graph member identities", async () => {
   const client = new Fake((input) =>

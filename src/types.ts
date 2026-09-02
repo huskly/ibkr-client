@@ -744,18 +744,15 @@ export interface DerivativeOrderGraphNodeIdentity {
 
 /** Caller-stable identity and complete placement evidence for one graph member. */
 export type DerivativeOrderGraphNode =
-  | (DerivativeOrderGraphNodeIdentity &
-      DerivativeComboPreviewRequest &
-      CmeOperatorMetadata)
-  | (DerivativeOrderGraphNodeIdentity &
-      {
-        accountId: string;
-        contract: DerivativeContract;
-        side: DerivativeOrderSide;
-        quantity: number;
-        tif: "DAY" | "GTC";
-        session: "REGULAR" | "OVERNIGHT";
-      } & (
+  | (DerivativeOrderGraphNodeIdentity & DerivativeComboPreviewRequest & CmeOperatorMetadata)
+  | (DerivativeOrderGraphNodeIdentity & {
+      accountId: string;
+      contract: DerivativeContract;
+      side: DerivativeOrderSide;
+      quantity: number;
+      tif: "DAY" | "GTC";
+      session: "REGULAR" | "OVERNIGHT";
+    } & (
         | { orderType: "LMT"; limit: number; stopPrice?: never }
         | { orderType: "STP"; stopPrice: number; limit?: never }
         | { orderType: "MKT"; limit?: never; stopPrice?: never }
