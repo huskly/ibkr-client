@@ -1701,8 +1701,12 @@ export class IbkrClient
     );
     const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
     if (!parentIdentity.valid || !clientIdentity.valid) return null;
-    const clientOrderId = clientIdentity.value;
-    if (clientOrderId === request.rootClientOrderId && parentIdentity.value === undefined) {
+    const rootNode = request.nodes.find(({ parentMemberId }) => parentMemberId === undefined);
+    if (
+      rootNode !== undefined &&
+      clientIdentity.value === this.graphClientOrderId(request, rootNode) &&
+      parentIdentity.value === undefined
+    ) {
       return "root";
     }
     if (
