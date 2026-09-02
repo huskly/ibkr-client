@@ -2,6 +2,11 @@
 
 # Node
 node_modules/
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
 dist/
 *.tsbuildinfo
 .eslintcache

@@ -29,8 +29,11 @@ wiki setup step and are git-ignored.
 
 ## Setup
 
+This project uses Yarn 4 through Corepack. Enable Corepack once, then install:
+
 ```bash
-yarn install --frozen-lockfile
+corepack enable
+yarn install --immutable
 ```
 
 Provide the account-specific secrets, either by copying the template:

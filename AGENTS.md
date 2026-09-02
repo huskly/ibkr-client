@@ -2,7 +2,7 @@
 
 ## Toolchain
 
-- Use Yarn Classic (`yarn.lock` v1); install with `yarn install --frozen-lockfile`.
+- Use Yarn 4 through Corepack (`packageManager` field in `package.json`); install with `yarn install --immutable`.
 
 ## Conventions
 
