@@ -177,14 +177,100 @@ void test("getContractTransactionEvidence reads a silent field as null and never
   assert.deepEqual(evidence.transactions[1]?.presentFieldNames, []);
 });
 
-void test("getContractTransactionEvidence states an empty response as an empty list", async () => {
-  const client = clientForTransactions({});
+/**
+ * A response that states no `transactions` ARRAY did not answer this question.
+ *
+ * `AGENTS.md` refuses a read that turns an incomplete or unknown broker state into success. An
+ * empty list and an unanswered read look identical to a consumer, and the consumer of THIS read
+ * decides whether an assignment happened. Reading a refusal as "no activity" would retire a
+ * cash-secured put lineage on evidence the broker never gave.
+ */
+void test("getContractTransactionEvidence refuses a response that states no transaction list", async () => {
+  const refused: readonly [string, object][] = [
+    ["an empty envelope", {}],
+    ["an explicit null list", { transactions: null }],
+    ["a broker error envelope", { error: "no permission", statusCode: 403 }],
+    ["a list that is not an array", { transactions: { 0: {} } }],
+  ];
+  for (const [name, response] of refused) {
+    const client = clientForTransactions(response);
+    await assert.rejects(
+      () => client.getContractTransactionEvidence({ conids: [726], currency: "USD", days: 1 }),
+      /stated no transaction list/i,
+      name
+    );
+  }
+});
+
+/** A stated empty array is a real answer, and it stays one. */
+void test("getContractTransactionEvidence accepts a stated empty transaction list", async () => {
+  const client = clientForTransactions({ transactions: [] });
   const evidence = await client.getContractTransactionEvidence({
     conids: [726],
     currency: "USD",
     days: 1,
   });
   assert.deepEqual(evidence.transactions, []);
+});
+
+/**
+ * The window the evidence reports must be the window the request sent. A caller that reuses and
+ * mutates its input object while the read is in flight must never get evidence that claims a
+ * window IBKR was never asked for.
+ */
+void test("getContractTransactionEvidence reports the window it actually sent", async () => {
+  const input = { conids: [726], currency: "USD", days: 30 };
+  const client = new FakeIbkrClient((request) => {
+    if (request.path === "portfolio/accounts") return [{ accountId: "U123" }];
+    if (request.path === "pa/transactions") {
+      input.days = 1; // the caller mutates its own object mid-flight
+      return { transactions: [] };
+    }
+    throw new Error(`Unexpected request: ${request.path}`);
+  });
+
+  const evidence = await client.getContractTransactionEvidence(input);
+
+  const sent = client.calls.find((call) => call.path === "pa/transactions");
+  assert.deepEqual(sent?.data, {
+    acctIds: ["U123"],
+    conids: [726],
+    currency: "USD",
+    days: 30,
+  });
+  assert.equal(evidence.requestedDays, 30);
+});
+
+/**
+ * These strings are the only place IBKR names an assignment, an exercise, or an expiration, and the
+ * public type states they are echoed exactly as written. Trimming them would change what a consumer
+ * classifies and what an audit comparison sees, so the padding the broker sent survives.
+ */
+void test("getContractTransactionEvidence preserves broker text verbatim", async () => {
+  const client = clientForTransactions({
+    transactions: [
+      { conid: 726, type: "  Assignment  ", desc: " ASSIGNED PUT ", cur: " USD " },
+      { conid: 727, type: "   ", desc: "", cur: null },
+      { conid: 728, type: 42, desc: { note: "x" } },
+    ],
+  });
+
+  const evidence = await client.getContractTransactionEvidence({
+    conids: [726, 727, 728],
+    currency: "USD",
+    days: 1,
+  });
+
+  assert.equal(evidence.transactions[0]?.type, "  Assignment  ");
+  assert.equal(evidence.transactions[0]?.description, " ASSIGNED PUT ");
+  assert.equal(evidence.transactions[0]?.currency, " USD ");
+  // A stated whitespace-only string is still a stated string, not silence.
+  assert.equal(evidence.transactions[1]?.type, "   ");
+  assert.equal(evidence.transactions[1]?.description, "");
+  assert.equal(evidence.transactions[1]?.currency, null);
+  // A non-string is not text the broker stated, so it reads null.
+  assert.equal(evidence.transactions[2]?.type, null);
+  assert.equal(evidence.transactions[2]?.description, null);
 });
 
 /**

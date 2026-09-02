@@ -272,9 +272,11 @@ export type UnderlyingInstrumentReferenceEvidence = IbkrContractReferenceEvidenc
  * One transaction row exactly as IBKR stated it for one contract.
  *
  * Every field is the broker's own statement. Nothing is mapped, classified,
- * uppercased, or renamed, and a field the broker did not state reads `null`. A
- * stated zero stays `0`: zero and silence are different facts and this package
- * never collapses them together.
+ * uppercased, renamed, or trimmed, and a field the broker did not state reads
+ * `null`. A stated zero stays `0`, and a stated whitespace-only string stays
+ * that string: zero, blank, and silence are different facts and this package
+ * never collapses them together. A value that is not a string is not text the
+ * broker stated, so it reads `null`.
  *
  * {@link ContractTransactionRecord.type} and
  * {@link ContractTransactionRecord.description} are where IBKR names an
@@ -330,6 +332,11 @@ export interface ContractTransactionRecord {
  * empty list is not proof that nothing happened; it states only that this
  * window, this currency, and these conids produced no row. The CONSUMER decides
  * what the rows mean and what their absence is worth.
+ *
+ * A response that states no transaction ARRAY is refused instead of reported as
+ * an empty read. An error envelope, an empty object, and an explicit `null` are
+ * unknown broker states, and an unknown state must never reach a consumer
+ * looking exactly like a completed read that found nothing.
  */
 export interface ContractTransactionEvidence {
   /** The account the rows were requested for. */

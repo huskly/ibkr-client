@@ -2679,24 +2679,57 @@ export class IbkrClient
       throw new Error("Contract transaction evidence days must be an integer from 1 through 90");
     }
 
+    // Every value the evidence reports is captured BEFORE the await, so a caller that reuses and
+    // mutates its own input object while this read is in flight can never receive evidence that
+    // claims a window or an identity IBKR was not asked for.
     const conids = [...input.conids];
+    const days = input.days;
     const accountId = input.accountId ?? (await this.getAccountId());
-    const response = await this.req<IbkrTransactionsResponse>({
+    // Read as `unknown`: the declared wire type describes the SUCCESS shape, and the whole point of
+    // the guard below is that IBKR does not always send it.
+    const response = await this.req<unknown>({
       path: "pa/transactions",
       method: "POST",
-      data: { acctIds: [accountId], conids, currency, days: input.days },
+      data: { acctIds: [accountId], conids, currency, days },
     });
+    const envelope: { transactions?: unknown } =
+      typeof response === "object" && response !== null ? response : {};
+
+    // A response that states no transaction ARRAY did not answer this question. An error envelope,
+    // an empty object, and an explicit null are unknown broker states, and this package never
+    // reports an unknown state as a successful empty read: the consumer of this evidence decides
+    // whether an assignment happened, and it must not read a refusal as "no activity". A STATED
+    // empty array is a real answer and passes through untouched.
+    if (!Array.isArray(envelope.transactions)) {
+      const present = Object.keys(envelope).sort();
+      throw new Error(
+        "IBKR stated no transaction list for this contract transaction read; " +
+          `present response keys: ${present.length === 0 ? "(none)" : present.join(", ")}`
+      );
+    }
+    const rows = envelope.transactions as IbkrTransaction[];
 
     return {
       accountId,
       observedAtEpochMillis: this.now(),
       requestedConids: conids,
       requestedCurrency: currency,
-      requestedDays: input.days,
-      transactions: (response.transactions ?? []).map((transaction) =>
-        this.contractTransactionRecord(transaction)
-      ),
+      requestedDays: days,
+      transactions: rows.map((transaction) => this.contractTransactionRecord(transaction)),
     };
+  }
+
+  /**
+   * One provider string, echoed exactly as the broker wrote it.
+   *
+   * {@link trimmedString} is deliberately NOT used here. `type` and `desc` are the only place IBKR
+   * names an assignment, an exercise, or an expiration, and the public type states they are echoed
+   * exactly. Trimming would change what a consumer classifies and what an audit comparison sees,
+   * and a stated whitespace-only string is still a statement, never silence. A value that is not a
+   * string is not text the broker stated, so it reads `null`.
+   */
+  private verbatimString(value: unknown): string | null {
+    return typeof value === "string" ? value : null;
   }
 
   /**
@@ -2706,12 +2739,12 @@ export class IbkrClient
   private contractTransactionRecord(transaction: IbkrTransaction): ContractTransactionRecord {
     return {
       conid: toNullableNumber(transaction.conid),
-      accountId: this.trimmedString(transaction.acctid),
-      date: this.trimmedString(transaction.date),
-      rawDate: this.trimmedString(transaction.rawDate),
-      type: this.trimmedString(transaction.type),
-      description: this.trimmedString(transaction.desc),
-      currency: this.trimmedString(transaction.cur),
+      accountId: this.verbatimString(transaction.acctid),
+      date: this.verbatimString(transaction.date),
+      rawDate: this.verbatimString(transaction.rawDate),
+      type: this.verbatimString(transaction.type),
+      description: this.verbatimString(transaction.desc),
+      currency: this.verbatimString(transaction.cur),
       amount: toNullableNumber(transaction.amt),
       quantity: toNullableNumber(transaction.qty),
       price: toNullableNumber(transaction.pr),

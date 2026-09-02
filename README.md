@@ -109,11 +109,17 @@ validated at runtime. Its broker-neutral account API includes:
   id, one client-minted `observedAtEpochMillis`, the requested conids, currency, and window, and
   one record for each row IBKR returned. Each record echoes `conid`, `accountId`, `date`,
   `rawDate`, `type`, `description`, `currency`, `amount`, `quantity`, `price`, and `fxRate` exactly
-  as the broker stated them, with `type` and `description` keeping their own case. A field the
-  broker did not state is `null`; a stated zero remains `0`. `presentFieldNames` lists the sorted
-  key NAMES the row carried, names only and never values. The read refuses an empty conid list, a
-  conid that is not a positive safe integer, a blank currency, and a window outside 1 through 90
-  days; a missing field never makes it throw. It proves no event and infers nothing: an empty list
+  as the broker stated them. Provider text is verbatim: `type` and `description` keep their own
+  case AND their own padding, because they are the only place IBKR names an assignment, and
+  trimming them would change what a consumer classifies. A field the broker did not state is
+  `null`, a stated zero remains `0`, and a stated whitespace-only string stays that string; a value
+  that is not a string reads `null`. `presentFieldNames` lists the sorted key NAMES the row
+  carried, names only and never values. The read refuses an empty conid list, a conid that is not a
+  positive safe integer, a blank currency, and a window outside 1 through 90 days; it also refuses
+  a response that states no transaction ARRAY, because an error envelope, an empty object, or an
+  explicit `null` is an unknown broker state and must never reach a consumer looking exactly like a
+  completed read that found nothing. A stated empty array is a real answer and is reported as one.
+  A missing field inside a row never makes it throw. It proves no event and infers nothing: an empty list
   is not proof that nothing happened, and the CONSUMER decides whether a row states an assignment,
   an exercise, or an expiration.
 - `getOptionSeriesReference(conid)` for one reference read of ONE exact option contract, and
