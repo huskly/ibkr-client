@@ -6,6 +6,8 @@ import type {
   AccountSettledCashByDate,
   AccountSettlementEvidence,
   AccountSettlementFigure,
+  ContractTransactionEvidence,
+  ContractTransactionRecord,
   IbkrContractReferenceEvidence,
   OptionSeriesReferenceEvidence,
   UnderlyingInstrumentReferenceEvidence,
@@ -2619,6 +2621,136 @@ export class IbkrClient
     });
 
     return (response[query] ?? []).flatMap((listing) => this.normalizeStockListing(query, listing));
+  }
+
+  /**
+   * Read the transaction activity IBKR states for named contracts, without ever
+   * asking which contracts the account still holds.
+   *
+   * {@link fetchTransactionHistory} loops over HELD conids, so a contract that
+   * left the account - assigned, exercised, or expired - can never be reached
+   * through it. The `pa/transactions` endpoint does not require a conid to be
+   * held: it answers for the conids it is given. This method gives it the conids
+   * the caller names, so the row of a gone contract stays reachable.
+   *
+   * The caller states the currency, and this method never supplies a default.
+   * IBKR converts every figure into the requested currency, so a wrong currency
+   * returns a converted number that looks exactly like a real one.
+   * {@link fetchTransactionHistory} reads it from the environment and falls back
+   * to `"USD"`; that habit is deliberately not repeated here.
+   *
+   * Every field is echoed as the broker stated it. A field the broker did not
+   * state reads `null`, a stated zero stays `0`, and `type` and `desc` keep
+   * their own case. A missing field never makes this method throw. Only an
+   * identity or a window this read could not ask about at all is refused.
+   *
+   * This method proves no event and infers nothing. An empty list is not proof
+   * that nothing happened. The CONSUMER, not this package, decides whether a row
+   * states an assignment, an exercise, or an expiration.
+   */
+  async getContractTransactionEvidence(input: {
+    /** The conids to ask about. They need not be held. */
+    conids: readonly number[];
+    /** The currency IBKR must report in. Never defaulted. */
+    currency: string;
+    /** The window in days back from the broker's today. IBKR serves 1 through 90. */
+    days: number;
+    /** The account to ask for. Discovered when the caller states none. */
+    accountId?: string;
+  }): Promise<ContractTransactionEvidence> {
+    this.assertOpen();
+    const currency = input.currency.trim();
+    if (!currency) {
+      throw new Error(
+        "Contract transaction evidence requires an explicit currency; it is never defaulted"
+      );
+    }
+    if (input.conids.length === 0) {
+      throw new Error("Contract transaction evidence requires at least one conid");
+    }
+    for (const conid of input.conids) {
+      if (!Number.isSafeInteger(conid) || conid <= 0) {
+        throw new Error(
+          `Contract transaction evidence received an unusable conid: ${String(conid)}`
+        );
+      }
+    }
+    if (!Number.isSafeInteger(input.days) || input.days < 1 || input.days > 90) {
+      throw new Error("Contract transaction evidence days must be an integer from 1 through 90");
+    }
+
+    // Every value the evidence reports is captured BEFORE the await, so a caller that reuses and
+    // mutates its own input object while this read is in flight can never receive evidence that
+    // claims a window or an identity IBKR was not asked for.
+    const conids = [...input.conids];
+    const days = input.days;
+    const accountId = input.accountId ?? (await this.getAccountId());
+    // Read as `unknown`: the declared wire type describes the SUCCESS shape, and the whole point of
+    // the guard below is that IBKR does not always send it.
+    const response = await this.req<unknown>({
+      path: "pa/transactions",
+      method: "POST",
+      data: { acctIds: [accountId], conids, currency, days },
+    });
+    const envelope: { transactions?: unknown } =
+      typeof response === "object" && response !== null ? response : {};
+
+    // A response that states no transaction ARRAY did not answer this question. An error envelope,
+    // an empty object, and an explicit null are unknown broker states, and this package never
+    // reports an unknown state as a successful empty read: the consumer of this evidence decides
+    // whether an assignment happened, and it must not read a refusal as "no activity". A STATED
+    // empty array is a real answer and passes through untouched.
+    if (!Array.isArray(envelope.transactions)) {
+      const present = Object.keys(envelope).sort();
+      throw new Error(
+        "IBKR stated no transaction list for this contract transaction read; " +
+          `present response keys: ${present.length === 0 ? "(none)" : present.join(", ")}`
+      );
+    }
+    const rows = envelope.transactions as IbkrTransaction[];
+
+    return {
+      accountId,
+      observedAtEpochMillis: this.now(),
+      requestedConids: conids,
+      requestedCurrency: currency,
+      requestedDays: days,
+      transactions: rows.map((transaction) => this.contractTransactionRecord(transaction)),
+    };
+  }
+
+  /**
+   * One provider string, echoed exactly as the broker wrote it.
+   *
+   * {@link trimmedString} is deliberately NOT used here. `type` and `desc` are the only place IBKR
+   * names an assignment, an exercise, or an expiration, and the public type states they are echoed
+   * exactly. Trimming would change what a consumer classifies and what an audit comparison sees,
+   * and a stated whitespace-only string is still a statement, never silence. A value that is not a
+   * string is not text the broker stated, so it reads `null`.
+   */
+  private verbatimString(value: unknown): string | null {
+    return typeof value === "string" ? value : null;
+  }
+
+  /**
+   * One `pa/transactions` row, echoed. Nothing here maps, classifies, or
+   * defaults a value; a field the broker did not state reads `null`.
+   */
+  private contractTransactionRecord(transaction: IbkrTransaction): ContractTransactionRecord {
+    return {
+      conid: toNullableNumber(transaction.conid),
+      accountId: this.verbatimString(transaction.acctid),
+      date: this.verbatimString(transaction.date),
+      rawDate: this.verbatimString(transaction.rawDate),
+      type: this.verbatimString(transaction.type),
+      description: this.verbatimString(transaction.desc),
+      currency: this.verbatimString(transaction.cur),
+      amount: toNullableNumber(transaction.amt),
+      quantity: toNullableNumber(transaction.qty),
+      price: toNullableNumber(transaction.pr),
+      fxRate: toNullableNumber(transaction.fxRate),
+      presentFieldNames: Object.keys(transaction).sort(),
+    };
   }
 
   async fetchTransactionHistory(

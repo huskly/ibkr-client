@@ -268,6 +268,95 @@ export interface OptionSeriesReferenceEvidence extends IbkrContractReferenceEvid
  */
 export type UnderlyingInstrumentReferenceEvidence = IbkrContractReferenceEvidence;
 
+/**
+ * One transaction row exactly as IBKR stated it for one contract.
+ *
+ * Every field is the broker's own statement. Nothing is mapped, classified,
+ * uppercased, renamed, or trimmed, and a field the broker did not state reads
+ * `null`. A stated zero stays `0`, and a stated whitespace-only string stays
+ * that string: zero, blank, and silence are different facts and this package
+ * never collapses them together. A value that is not a string is not text the
+ * broker stated, so it reads `null`.
+ *
+ * {@link ContractTransactionRecord.type} and
+ * {@link ContractTransactionRecord.description} are where IBKR names an
+ * assignment, an exercise, or an expiration, when it names one at all. This
+ * package does not decide what those strings mean. The CONSUMER classifies.
+ */
+export interface ContractTransactionRecord {
+  /** IBKR `conid`, or `null` when the row stated none. */
+  conid: number | null;
+  /** IBKR `acctid`, or `null` when the row stated none. */
+  accountId: string | null;
+  /** IBKR `date`, in the broker's own display form. */
+  date: string | null;
+  /** IBKR `rawDate`, in the broker's own form. */
+  rawDate: string | null;
+  /**
+   * IBKR `type`, exactly as written, with its own case preserved. This package
+   * states it and never maps it to an enum.
+   */
+  type: string | null;
+  /** IBKR `desc`, the broker's free prose, exactly as written. */
+  description: string | null;
+  /**
+   * IBKR `cur` for this row. `null` when the row stated none. A currency is
+   * never inferred and never defaulted to `"USD"`.
+   */
+  currency: string | null;
+  /** IBKR `amt`. A stated zero is `0`; silence is `null`. */
+  amount: number | null;
+  /** IBKR `qty`. A stated zero is `0`; silence is `null`. */
+  quantity: number | null;
+  /** IBKR `pr`. A stated zero is `0`; silence is `null`. */
+  price: number | null;
+  /** IBKR `fxRate`. A stated zero is `0`; silence is `null`. */
+  fxRate: number | null;
+  /**
+   * The sorted key NAMES this row carried. Names only, never values, so an
+   * operator can confirm the live schema without seeing amounts.
+   */
+  presentFieldNames: string[];
+}
+
+/**
+ * The transaction activity IBKR states for named contracts over a window.
+ *
+ * This read is keyed by the conids the CALLER names. It never consults held
+ * positions, so it reaches a contract the account no longer holds - the shape
+ * an assigned, exercised, or expired option leaves behind. That is the whole
+ * reason it exists: {@link IbkrClient.fetchTransactionHistory} loops over held
+ * conids and can never see one of these.
+ *
+ * The read states what IBKR returned and nothing else. It proves no event. An
+ * empty list is not proof that nothing happened; it states only that this
+ * window, this currency, and these conids produced no row. The CONSUMER decides
+ * what the rows mean and what their absence is worth.
+ *
+ * A response that states no transaction ARRAY is refused instead of reported as
+ * an empty read. An error envelope, an empty object, and an explicit `null` are
+ * unknown broker states, and an unknown state must never reach a consumer
+ * looking exactly like a completed read that found nothing.
+ */
+export interface ContractTransactionEvidence {
+  /** The account the rows were requested for. */
+  accountId: string;
+  /** When this observation was minted, from the client clock. */
+  observedAtEpochMillis: number;
+  /** The conids this read asked about, in the order the caller gave them. */
+  requestedConids: readonly number[];
+  /**
+   * The currency this read sent. IBKR converts every figure into it, so a
+   * consumer that did not choose it cannot trust the amounts. The caller states
+   * it; this package never supplies a default.
+   */
+  requestedCurrency: string;
+  /** The window this read asked for, in days back from the broker's today. */
+  requestedDays: number;
+  /** Every row the response held, in the order IBKR returned them. */
+  transactions: readonly ContractTransactionRecord[];
+}
+
 export interface BrokerPosition {
   /** Broker-native contract id for exact reads in the current broker session. */
   brokerId: string;

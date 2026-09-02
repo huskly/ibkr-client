@@ -31,6 +31,8 @@ export type {
   ActiveDerivativeOrderLeg,
   ActiveDerivativeOrderUncertainty,
   AuthStatus,
+  ContractTransactionEvidence,
+  ContractTransactionRecord,
   IbkrSessionEvidence,
   IbkrJsonEvidence,
   IbkrSessionLifecycleClient,
