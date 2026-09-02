@@ -435,7 +435,12 @@ test("warning continuation preserves explicit graph identities through chained r
   const first = await client.submitDerivativeOrderGraph(explicitGraph());
   assert.equal(first.state, "warning");
   if (first.state !== "warning") return;
+  assert.equal(first.rootClientOrderId, "hg-root");
   assert.deepEqual(first.members.map(({ clientOrderId }) => clientOrderId), expectedIds);
+  assert.deepEqual(
+    first.continuation.request.rootClientOrderId,
+    "hg-root"
+  );
   assert.deepEqual(
     first.continuation.request.nodes.map(({ clientOrderId }) => clientOrderId),
     expectedIds
@@ -445,6 +450,7 @@ test("warning continuation preserves explicit graph identities through chained r
     expectedIds
   );
   const persisted = JSON.parse(JSON.stringify(first.continuation)) as typeof first.continuation;
+  assert.equal(persisted.request.rootClientOrderId, "hg-root");
   const initialOrderPosts = client.calls.filter(
     (c) => c.path.endsWith("/orders") && c.method === "POST"
   ).length;
@@ -455,7 +461,9 @@ test("warning continuation preserves explicit graph identities through chained r
   });
   assert.equal(second.state, "warning");
   if (second.state !== "warning") return;
+  assert.equal(second.rootClientOrderId, "hg-root");
   assert.deepEqual(second.members.map(({ clientOrderId }) => clientOrderId), expectedIds);
+  assert.equal(second.continuation.request.rootClientOrderId, "hg-root");
   assert.deepEqual(
     second.continuation.request.nodes.map(({ clientOrderId }) => clientOrderId),
     expectedIds
@@ -477,6 +485,7 @@ test("warning continuation preserves explicit graph identities through chained r
     confirmed: true,
   });
   assert.equal(accepted.state, "accepted");
+  assert.equal(accepted.rootClientOrderId, "hg-root");
   assert.deepEqual(accepted.members.map(({ clientOrderId }) => clientOrderId), expectedIds);
   assert.equal(
     client.calls.filter((c) => c.path.startsWith("iserver/reply/")).length,
@@ -968,7 +977,7 @@ test("recovers explicit graph identities from live and historical rows and rejec
       },
     ],
   };
-  const historicalStop = {
+  const exactStop = {
     account: "U1",
     order_id: "12",
     order_status: "Submitted",
@@ -981,13 +990,16 @@ test("recovers explicit graph identities from live and historical rows and rejec
     tif: "DAY",
     outsideRTH: false,
   };
+  const fallbackClientOrderIdStop = { ...exactStop, cOID: "hg-root:stop" };
+  const fallbackParentIdStop = { ...exactStop, parentId: "hg-root:stop" };
   for (const [name, stopStatus] of [
-    ["exact", historicalStop],
-    ["fallback", { ...historicalStop, cOID: "hg-root:stop" }],
+    ["exact", exactStop],
+    ["fallback-client-order-id", fallbackClientOrderIdStop],
+    ["fallback-parent-id", fallbackParentIdStop],
   ] as const) {
     const client = new Fake((input) => {
       if (input.path === "iserver/account/orders") {
-        if (input.params?.["filters"] !== undefined) return { orders: [historicalStop] };
+        if (input.params?.["filters"] !== undefined) return { orders: [stopStatus] };
         return liveOrders;
       }
       if (input.path === "iserver/account/order/status/12") return stopStatus;
