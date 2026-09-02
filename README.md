@@ -686,25 +686,29 @@ to guard against committed secrets.
 
 `submitDerivativeOrderGraph(...)` is the bounded (one through eight member) bracket API for
 broker-hosted derivative protection. A graph may combine atomic two-leg LIMIT combos with
-single-option LIMIT, STOP, and MARKET members. Every node has a caller-stable `memberId`; exactly
-one root carries `rootClientOrderId`. Each later node uses `parentMemberId` to name a member that
-comes before it. IBKR receives a deterministic `cOID` for every node. A non-root node also receives
-the deterministic `parentId` of its exact parent. This means that a graph can contain children,
-grandchildren, and deeper descendants.
-Accepted and fail-closed results retain each node's immutable request evidence (contracts/conids,
-signed ratios, side, quantity, TIF, session, and prices), stable depth role, parent member/broker
-IDs, and every broker order ID. Conids remain correlation evidence only; callers still own durable
-semantic option identity.
+single-option LIMIT, STOP, and MARKET members.
+
+Each node has a caller-stable `memberId`. `clientOrderId` is optional on each node. When you set
+it, the value is the exact IBKR `cOID`. It must be trimmed, non-empty, and at most 64 characters.
+The effective identity must be unique across the graph. The root node's explicit `clientOrderId`
+must match `rootClientOrderId`. When you omit `clientOrderId`, the client keeps the fallback:
+`rootClientOrderId` for the root, and `rootClientOrderId:memberId` for later nodes.
+
+Explicit values flow unchanged through tickets, warning evidence, and recovery. The client keeps
+the exact request and the exact identities it used. Accepted and fail-closed results retain each
+node's immutable request evidence, stable depth role, parent member/broker IDs, and every broker
+order ID. Conids remain correlation evidence only; callers still own durable semantic option
+identity.
 
 Warnings are never acknowledged automatically. A warning result contains a JSON-safe
 `continuation` with the exact reply ID, full graph request, and all correlation accumulated so far;
 persist it before calling `acknowledgeDerivativeOrderGraphWarning(...)`. Each placement or reply is
 attempted once after revalidating the account's authentication and competing-session safety;
-chained and unknown warnings remain pending for the caller, and mixed, partial,
-duplicated, terminal, malformed, or ambiguous acknowledgements return `recovery_required`. Broker
-IDs from ambiguous acknowledgements are retained as uncorrelated responses rather than assigned to
-nodes by position. Submission acknowledgements are correlated only by the echoed `local_order_id`
-or `cOID`. Nested child acknowledgements under `children` or `childOrders` are flattened before
+chained and unknown warnings remain pending for the caller, and mixed, partial, duplicated,
+terminal, malformed, or ambiguous acknowledgements return `recovery_required`. Broker IDs from
+ambiguous acknowledgements are retained as uncorrelated responses rather than assigned to nodes by
+position. Submission acknowledgements are correlated only by the echoed `local_order_id` or
+`cOID`. Nested child acknowledgements under `children` or `childOrders` are flattened before
 correlation, so a parent-only top-level array does not hide live child broker IDs.
 `accepted` requires one distinct non-null broker order ID for every requested graph member. If any
 member still has a null order ID after correlation, the result is `recovery_required` and the reason
@@ -718,8 +722,8 @@ known member broker ID, and terminal evidence keyed by the durable root client I
 normal active and filtered filled, canceled, and inactive order snapshots before it uses recent
 execution evidence. It queries an exact broker ID even if execution history is unavailable. When the
 caller supplies a durable broker ID, the exact status read can identify only that member without a
-client order ID. The account and broker ID must match, and the complete ticket must match exactly one
-requested node. Conflicting identity or listing evidence still fails closed.
+client order ID. The account and broker ID must match, and the complete ticket must match exactly
+one requested node. Conflicting identity or listing evidence still fails closed.
 It requires complete active and filtered terminal snapshot markers, traverses both nested child
 collection aliases, and rejects contradictory aliases within a broker response before correlation.
 It correlates the root by the transmitted client ID and its complete ticket. It correlates each
@@ -727,13 +731,30 @@ descendant by the deterministic client order ID of its exact parent, plus the co
 combo legs, order type, side, quantity, applicable signed limit or stop price, TIF, and
 regular/overnight session. IBKR can report combo legs in a different order on each endpoint, so
 recovery compares the complete signed `(conid, ratio)` multiset without using response order.
-Recovery
-accepts terminal members when the evidence is
-non-ambiguous and complete, preserves broker terminal states for each member, and fails closed when
-evidence is partial, duplicated, ambiguous, unknown, includes an unexpected attached order, or cannot
-prove required account, broker ID, or parent identity links.
+Recovery accepts terminal members when the evidence is non-ambiguous and complete, preserves broker
+terminal states for each member, and fails closed when evidence is partial, duplicated, ambiguous,
+unknown, includes an unexpected attached order, or cannot prove required account, broker ID, or
+parent identity links.
 No recoveries involve writes.
 Failed terminal snapshot lookups force `recovery_required`; trade-linked members whose exact status
 lookup fails remain preserved as uncorrelated evidence instead of being discarded.
 This recovery API is the safety boundary: consumers should not bypass it with the private raw request
 client.
+
+Build the request with every identity in place before submission:
+
+```ts
+const request = {
+  accountId,
+  rootClientOrderId: "hg-root",
+  nodes: [
+    { ...entry, memberId: "entry", clientOrderId: "hg-root" },
+    {
+      ...profit,
+      memberId: "profit",
+      parentMemberId: "entry",
+      clientOrderId: "hg-profit",
+    },
+  ],
+};
+```

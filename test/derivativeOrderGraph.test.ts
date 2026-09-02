@@ -104,6 +104,57 @@ const graphTwoNodes = (): DerivativeOrderGraphRequest => {
     nodes: [full.nodes[0]!, full.nodes[1]!] as const,
   };
 };
+const explicitGraph = (): DerivativeOrderGraphRequest => ({
+  accountId: "U1",
+  rootClientOrderId: "hg-root",
+  nodes: [
+    {
+      memberId: "entry",
+      clientOrderId: "hg-root",
+      accountId: "U1",
+      legs: [
+        { contract: contract(1), ratio: -1 },
+        { contract: contract(2), ratio: 1 },
+      ],
+      quantity: 1,
+      orderType: "LMT",
+      priceEffect: "CREDIT",
+      limit: 1.2,
+      tif: "DAY",
+      session: "REGULAR",
+    },
+    {
+      memberId: "profit",
+      parentMemberId: "entry",
+      clientOrderId: "hg-profit",
+      accountId: "U1",
+      contract: contract(1),
+      side: "BUY",
+      quantity: 1,
+      orderType: "STP",
+      stopPrice: 2.4,
+      tif: "GTC",
+      session: "REGULAR",
+    },
+    {
+      memberId: "stop",
+      parentMemberId: "profit",
+      clientOrderId: "hg-stop",
+      accountId: "U1",
+      contract: contract(2),
+      side: "SELL",
+      quantity: 1,
+      orderType: "MKT",
+      tif: "DAY",
+      session: "REGULAR",
+    },
+  ],
+});
+const invalidIdentities = [
+  { name: "empty", value: "" },
+  { name: "blank", value: " " },
+  { name: "too long", value: "x".repeat(65) },
+] as const;
 /**
  * A BAG parent with a BAG STOP child, same conidex with reversed ratios - the 2-level shape
  * huskly/strategy-terminal#527 needs because IBKR rejects a combo parent with a non-combo child.
@@ -366,7 +417,8 @@ test("fails closed on conflicting echoed identities and keeps raw evidence", asy
   ]);
 });
 
-test("warning continuation is restart-safe and supports chained replies", async () => {
+test("warning continuation preserves explicit graph identities through chained replies", async () => {
+  const expectedIds = ["hg-root", "hg-profit", "hg-stop"] as const;
   let reply = 0;
   const client = new Fake((input) => {
     if (input.path.endsWith("/orders") && input.method === "POST")
@@ -375,36 +427,83 @@ test("warning continuation is restart-safe and supports chained replies", async 
       return ++reply === 1
         ? [{ id: "w2", message: ["again"], messageIds: ["o163"] }]
         : [
-            { order_id: "10", order_status: "Submitted", local_order_id: "pcs-42" },
-            {
-              order_id: "11",
-              order_status: "Submitted",
-              local_order_id: "pcs-42:stop",
-            },
-            {
-              order_id: "12",
-              order_status: "Submitted",
-              local_order_id: "pcs-42:hedge",
-            },
+            { order_id: "10", order_status: "Submitted", local_order_id: "hg-root" },
+            { order_id: "11", order_status: "Submitted", local_order_id: "hg-profit" },
+            { order_id: "12", order_status: "Submitted", local_order_id: "hg-stop" },
           ];
     return session(input);
   });
-  const first = await client.submitDerivativeOrderGraph(graph());
+  const first = await client.submitDerivativeOrderGraph(explicitGraph());
   assert.equal(first.state, "warning");
   if (first.state !== "warning") return;
+  assert.equal(first.rootClientOrderId, "hg-root");
+  assert.deepEqual(
+    first.members.map(({ clientOrderId }) => clientOrderId),
+    expectedIds
+  );
+  assert.deepEqual(first.continuation.request.rootClientOrderId, "hg-root");
+  assert.deepEqual(
+    first.continuation.request.nodes.map(({ clientOrderId }) => clientOrderId),
+    expectedIds
+  );
+  assert.deepEqual(
+    first.continuation.members.map(({ clientOrderId }) => clientOrderId),
+    expectedIds
+  );
   const persisted = JSON.parse(JSON.stringify(first.continuation)) as typeof first.continuation;
+  assert.equal(persisted.request.rootClientOrderId, "hg-root");
+  const initialOrderPosts = client.calls.filter(
+    (c) => c.path.endsWith("/orders") && c.method === "POST"
+  ).length;
+  const initialReplyRequests = client.calls.filter((c) =>
+    c.path.startsWith("iserver/reply/")
+  ).length;
   const second = await client.acknowledgeDerivativeOrderGraphWarning({
     continuation: persisted,
     confirmed: true,
   });
   assert.equal(second.state, "warning");
   if (second.state !== "warning") return;
+  assert.equal(second.rootClientOrderId, "hg-root");
+  assert.deepEqual(
+    second.members.map(({ clientOrderId }) => clientOrderId),
+    expectedIds
+  );
+  assert.equal(second.continuation.request.rootClientOrderId, "hg-root");
+  assert.deepEqual(
+    second.continuation.request.nodes.map(({ clientOrderId }) => clientOrderId),
+    expectedIds
+  );
+  assert.deepEqual(
+    second.continuation.members.map(({ clientOrderId }) => clientOrderId),
+    expectedIds
+  );
+  assert.equal(
+    client.calls.filter((c) => c.path.startsWith("iserver/reply/")).length,
+    initialReplyRequests + 1
+  );
+  assert.equal(
+    client.calls.filter((c) => c.path.endsWith("/orders") && c.method === "POST").length,
+    initialOrderPosts
+  );
   const accepted = await client.acknowledgeDerivativeOrderGraphWarning({
     continuation: second.continuation,
     confirmed: true,
   });
   assert.equal(accepted.state, "accepted");
-  assert.equal(client.calls.filter((c) => c.path.startsWith("iserver/reply/")).length, 2);
+  assert.equal(accepted.rootClientOrderId, "hg-root");
+  assert.deepEqual(
+    accepted.members.map(({ clientOrderId }) => clientOrderId),
+    expectedIds
+  );
+  assert.equal(
+    client.calls.filter((c) => c.path.startsWith("iserver/reply/")).length,
+    initialReplyRequests + 2
+  );
+  assert.equal(
+    client.calls.filter((c) => c.path.endsWith("/orders") && c.method === "POST").length,
+    initialOrderPosts
+  );
 });
 
 test("warning acknowledgement rechecks brokerage session safety before replying", async () => {
@@ -566,6 +665,98 @@ test("invalid graph fails before broker access and transport placement is attemp
   );
 });
 
+for (const { name, value } of invalidIdentities) {
+  test(`rejects graph member identity ${name} before broker access`, async () => {
+    const request = graph();
+    request.nodes[0]!.clientOrderId = value;
+    const client = new Fake(() => {
+      throw new Error("network");
+    });
+    await assert.rejects(() => client.submitDerivativeOrderGraph(request), /client order ID/);
+    assert.equal(client.calls.length, 0);
+  });
+}
+
+test("accepts a 49-character explicit root when every effective ID fits", async () => {
+  const request = explicitGraph();
+  request.rootClientOrderId = "r".repeat(49);
+  request.nodes[0]!.clientOrderId = request.rootClientOrderId;
+  request.nodes[1]!.clientOrderId = "hg-profit";
+  request.nodes[2]!.clientOrderId = "hg-stop";
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          { order_id: "10", order_status: "Submitted", local_order_id: request.rootClientOrderId },
+          { order_id: "11", order_status: "Submitted", local_order_id: "hg-profit" },
+          { order_id: "12", order_status: "Submitted", local_order_id: "hg-stop" },
+        ]
+      : session(input)
+  );
+  const result = await client.submitDerivativeOrderGraph(request);
+  assert.equal(result.state, "accepted");
+  if (result.state !== "accepted") return;
+  assert.equal(result.rootClientOrderId, request.rootClientOrderId);
+  assert.deepEqual(
+    result.members.map(({ clientOrderId }) => clientOrderId),
+    [request.rootClientOrderId, "hg-profit", "hg-stop"]
+  );
+  assert.equal(client.calls.filter((call) => call.path.endsWith("/orders")).length, 1);
+});
+
+test("rejects a derived fallback identity longer than 64 characters", async () => {
+  const request = explicitGraph();
+  request.rootClientOrderId = "r".repeat(64);
+  request.nodes[0]!.clientOrderId = request.rootClientOrderId;
+  request.nodes[1]!.clientOrderId = "hg-profit";
+  delete request.nodes[2]!.clientOrderId;
+  const client = new Fake(() => {
+    throw new Error("network");
+  });
+  await assert.rejects(() => client.submitDerivativeOrderGraph(request), /client order ID/);
+  assert.equal(client.calls.length, 0);
+});
+
+test("rejects graph when explicit identity values collide", async () => {
+  const request = graph();
+  request.rootClientOrderId = "hg-same";
+  request.nodes[0]!.clientOrderId = "hg-same";
+  request.nodes[1]!.clientOrderId = "hg-same";
+  const client = new Fake(() => {
+    throw new Error("network");
+  });
+  await assert.rejects(
+    () => client.submitDerivativeOrderGraph(request),
+    /Duplicate graph member client order ID/
+  );
+  assert.equal(client.calls.length, 0);
+});
+
+test("rejects graph when an explicit identity collides with a fallback", async () => {
+  const request = graph();
+  request.nodes[2]!.clientOrderId = `${request.rootClientOrderId}:stop`;
+  const client = new Fake(() => {
+    throw new Error("network");
+  });
+  await assert.rejects(
+    () => client.submitDerivativeOrderGraph(request),
+    /Duplicate graph member client order ID/
+  );
+  assert.equal(client.calls.length, 0);
+});
+
+test("rejects graph when the explicit root identity disagrees with rootClientOrderId", async () => {
+  const request = graph();
+  request.nodes[0]!.clientOrderId = "hg-other-root";
+  const client = new Fake(() => {
+    throw new Error("network");
+  });
+  await assert.rejects(
+    () => client.submitDerivativeOrderGraph(request),
+    /Invalid graph root client order ID/
+  );
+  assert.equal(client.calls.length, 0);
+});
+
 test("submits a root, child, and grandchild with exact activation links", async () => {
   const client = new Fake((input) =>
     input.path.endsWith("/orders") && input.method === "POST"
@@ -598,6 +789,88 @@ test("submits a root, child, and grandchild with exact activation links", async 
       ["pcs-42", undefined],
       ["pcs-42:stop", "pcs-42"],
       ["pcs-42:hedge", "pcs-42:stop"],
+    ]
+  );
+});
+
+test("submits a root, child, and grandchild with explicit graph member identities", async () => {
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          { order_id: "10", order_status: "Submitted", local_order_id: "hg-root" },
+          { order_id: "11", order_status: "Submitted", local_order_id: "hg-profit" },
+          { order_id: "12", order_status: "Submitted", local_order_id: "hg-stop" },
+        ]
+      : session(input)
+  );
+  const request: DerivativeOrderGraphRequest = {
+    accountId: "U1",
+    rootClientOrderId: "hg-root",
+    nodes: [
+      {
+        memberId: "entry",
+        clientOrderId: "hg-root",
+        accountId: "U1",
+        legs: [
+          { contract: contract(1), ratio: -1 },
+          { contract: contract(2), ratio: 1 },
+        ],
+        quantity: 1,
+        orderType: "LMT",
+        priceEffect: "CREDIT",
+        limit: 1.2,
+        tif: "DAY",
+        session: "REGULAR",
+      },
+      {
+        memberId: "profit",
+        parentMemberId: "entry",
+        clientOrderId: "hg-profit",
+        accountId: "U1",
+        contract: contract(1),
+        side: "BUY",
+        quantity: 1,
+        orderType: "STP",
+        stopPrice: 2.4,
+        tif: "GTC",
+        session: "REGULAR",
+      },
+      {
+        memberId: "stop",
+        parentMemberId: "profit",
+        clientOrderId: "hg-stop",
+        accountId: "U1",
+        contract: contract(2),
+        side: "SELL",
+        quantity: 1,
+        orderType: "MKT",
+        tif: "DAY",
+        session: "REGULAR",
+      },
+    ],
+  };
+  const result = await client.submitDerivativeOrderGraph(request);
+  assert.equal(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map(({ memberId, clientOrderId }) => ({
+      memberId,
+      clientOrderId,
+    })),
+    [
+      { memberId: "entry", clientOrderId: "hg-root" },
+      { memberId: "profit", clientOrderId: "hg-profit" },
+      { memberId: "stop", clientOrderId: "hg-stop" },
+    ]
+  );
+  const submittedOrders = client.calls.find(
+    (call) => call.method === "POST" && call.path.endsWith("/orders")
+  )?.data as { orders: Record<string, unknown>[] };
+  assert.deepEqual(
+    submittedOrders.orders.map(({ cOID, parentId }) => ({ cOID, parentId })),
+    [
+      { cOID: "hg-root", parentId: undefined },
+      { cOID: "hg-profit", parentId: "hg-root" },
+      { cOID: "hg-stop", parentId: "hg-profit" },
     ]
   );
 });
@@ -726,6 +999,90 @@ test("recovers exact graph from root or a known broker identity", async () => {
       { accountId: "U1", filters: "inactive" },
     ]
   );
+});
+
+test("recovers explicit graph identities from live and historical rows and rejects fallback recovery", async () => {
+  const liveOrders = {
+    orders: [
+      {
+        account: "U1",
+        order_id: "10",
+        order_status: "Submitted",
+        cOID: "hg-root",
+        conidex: "28812380;;;1/-1,2/1",
+        orderType: "LMT",
+        side: "BUY",
+        totalSize: 1,
+        limitPrice: -1.2,
+        tif: "DAY",
+        outsideRTH: false,
+      },
+      {
+        account: "U1",
+        order_id: "11",
+        order_status: "Submitted",
+        cOID: "hg-profit",
+        parentId: "hg-root",
+        conid: 1,
+        orderType: "STP",
+        side: "BUY",
+        totalSize: 1,
+        stopPrice: 2.4,
+        tif: "GTC",
+        outsideRTH: false,
+      },
+    ],
+  };
+  const exactStop = {
+    account: "U1",
+    order_id: "12",
+    order_status: "Submitted",
+    cOID: "hg-stop",
+    parentId: "hg-profit",
+    conid: 2,
+    orderType: "MKT",
+    side: "SELL",
+    totalSize: 1,
+    tif: "DAY",
+    outsideRTH: false,
+  };
+  const fallbackClientOrderIdStop = { ...exactStop, cOID: "hg-root:stop" };
+  const fallbackParentIdStop = { ...exactStop, parentId: "hg-root:stop" };
+  for (const [name, stopStatus] of [
+    ["exact", exactStop],
+    ["fallback-client-order-id", fallbackClientOrderIdStop],
+    ["fallback-parent-id", fallbackParentIdStop],
+  ] as const) {
+    const client = new Fake((input) => {
+      if (input.path === "iserver/account/orders") {
+        if (input.params?.["filters"] !== undefined) return { orders: [stopStatus] };
+        return liveOrders;
+      }
+      if (input.path === "iserver/account/order/status/12") return stopStatus;
+      return session(input);
+    });
+
+    const result = await client.recoverDerivativeOrderGraph(
+      { accountId: "U1", rootClientOrderId: "hg-root" },
+      explicitGraph()
+    );
+
+    if (name === "exact") {
+      assert.equal(result.state, "accepted");
+      if (result.state !== "accepted") continue;
+      assert.equal(result.rootClientOrderId, "hg-root");
+      assert.deepEqual(
+        result.members.map(({ clientOrderId }) => clientOrderId),
+        ["hg-root", "hg-profit", "hg-stop"]
+      );
+      assert.deepEqual(
+        result.members.map(({ parentOrderId }) => parentOrderId),
+        [null, "10", "11"]
+      );
+    } else {
+      assert.notEqual(result.state, "accepted");
+    }
+  }
 });
 
 test("recovers an active grandchild through its exact parent identity", async () => {

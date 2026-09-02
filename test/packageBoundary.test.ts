@@ -34,6 +34,7 @@ import {
   type OptionDefinitionCacheEntry,
   type OptionDefinitionCacheKey,
   type OptionDiscoveryOptions,
+  type DerivativeOrderGraphNode,
   type OptionDiscoveryTelemetry,
   type OptionSeriesReferenceEvidence,
   type OptionStrikeRange,
@@ -181,6 +182,57 @@ void test("public option definition cache carries identity only", () => {
   assert.equal(entry.contracts[0]?.conid, 777);
   assert.equal(clientOptions.optionDefinitionCache, cache);
   assert.ok(!Object.keys(entry.contracts[0] ?? {}).includes("bid"));
+});
+
+void test("public graph nodes preserve explicit and fallback clientOrderId", () => {
+  const nodeFixture: DerivativeOrderGraphNode = {
+    memberId: "entry",
+    accountId: "U1",
+    legs: [
+      {
+        contract: {
+          conid: 1,
+          assetClass: "OPT",
+          underlying: "SPY",
+          expiration: "2026-09-18",
+          tradingClass: "SPY",
+          exchange: "SMART",
+          multiplier: 100,
+          strike: 700,
+          right: "P",
+        },
+        ratio: -1,
+      },
+      {
+        contract: {
+          conid: 2,
+          assetClass: "OPT",
+          underlying: "SPY",
+          expiration: "2026-09-18",
+          tradingClass: "SPY",
+          exchange: "SMART",
+          multiplier: 100,
+          strike: 705,
+          right: "P",
+        },
+        ratio: 1,
+      },
+    ],
+    quantity: 1,
+    priceEffect: "CREDIT",
+    orderType: "LMT",
+    limit: 1.2,
+    tif: "DAY",
+    session: "REGULAR",
+  };
+  const explicitNode: DerivativeOrderGraphNode = {
+    ...nodeFixture,
+    clientOrderId: "hg-explicit",
+  };
+  const fallbackNode: DerivativeOrderGraphNode = { ...nodeFixture };
+
+  assert.equal(explicitNode.clientOrderId, "hg-explicit");
+  assert.equal(fallbackNode.clientOrderId, undefined);
 });
 
 void test("public account balance types expose nullable totals and margin snapshots", () => {
@@ -333,8 +385,7 @@ test("package exposes only the library and no CLI entry point", async () => {
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   ) as PackageManifest;
 
-  assert.equal(typeof manifest.version, "string");
-  assert.match(manifest.version as string, /^\d+\.\d+\.\d+$/);
+  assert.equal(manifest.version, "2.4.0");
   assert.equal(typeof manifest.packageManager, "string");
   assert.match(manifest.packageManager as string, /^yarn@4\.\d+\.\d+$/);
   assert.equal(manifest.bin, undefined);

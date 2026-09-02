@@ -1701,8 +1701,12 @@ export class IbkrClient
     );
     const clientIdentity = this.consistentStringAliases(order.cOID, order.order_ref);
     if (!parentIdentity.valid || !clientIdentity.valid) return null;
-    const clientOrderId = clientIdentity.value;
-    if (clientOrderId === request.rootClientOrderId && parentIdentity.value === undefined) {
+    const rootNode = request.nodes.find(({ parentMemberId }) => parentMemberId === undefined);
+    if (
+      rootNode !== undefined &&
+      clientIdentity.value === this.graphClientOrderId(request, rootNode) &&
+      parentIdentity.value === undefined
+    ) {
       return "root";
     }
     if (
@@ -2869,8 +2873,8 @@ export class IbkrClient
 
   private validateOrderGraph(request: DerivativeOrderGraphRequest): void {
     if (!request.accountId.trim()) throw new Error("An explicit IBKR account ID is required");
-    if (!request.rootClientOrderId.trim() || request.rootClientOrderId.length > 48) {
-      throw new Error("Root client order ID must contain 1 to 48 characters");
+    if (!request.rootClientOrderId.trim() || request.rootClientOrderId.length > 64) {
+      throw new Error("Root client order ID must contain 1 to 64 characters");
     }
     if (request.nodes.length < 1 || request.nodes.length > 8) {
       throw new Error("Derivative order graphs require 1 to 8 members");
@@ -2900,6 +2904,30 @@ export class IbkrClient
     }
     if (roots !== 1 || request.nodes[0]?.parentMemberId !== undefined) {
       throw new Error("Derivative order graphs require exactly one root as the first member");
+    }
+    for (const node of request.nodes) {
+      if (
+        node.clientOrderId !== undefined &&
+        (typeof node.clientOrderId !== "string" ||
+          node.clientOrderId.trim() !== node.clientOrderId ||
+          node.clientOrderId.length === 0 ||
+          node.clientOrderId.length > 64)
+      ) {
+        throw new TypeError("Invalid graph member client order ID");
+      }
+    }
+    const root = request.nodes.find(({ parentMemberId }) => parentMemberId === undefined);
+    if (root?.clientOrderId !== undefined && root.clientOrderId !== request.rootClientOrderId) {
+      throw new TypeError("Invalid graph root client order ID");
+    }
+    const effectiveIds = request.nodes.map((node) => this.graphClientOrderId(request, node));
+    for (const clientOrderId of effectiveIds) {
+      if (clientOrderId.length > 64) {
+        throw new TypeError("Graph member client order ID must contain 1 to 64 characters");
+      }
+    }
+    if (new Set(effectiveIds).size !== effectiveIds.length) {
+      throw new TypeError("Duplicate graph member client order ID");
     }
   }
 
@@ -2947,6 +2975,7 @@ export class IbkrClient
     request: DerivativeOrderGraphRequest,
     node: DerivativeOrderGraphNode
   ): string {
+    if (node.clientOrderId !== undefined) return node.clientOrderId;
     return node.parentMemberId === undefined
       ? request.rootClientOrderId
       : `${request.rootClientOrderId}:${node.memberId}`;
