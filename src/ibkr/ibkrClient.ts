@@ -2947,6 +2947,7 @@ export class IbkrClient
     request: DerivativeOrderGraphRequest,
     node: DerivativeOrderGraphNode
   ): string {
+    if (node.clientOrderId !== undefined) return node.clientOrderId;
     return node.parentMemberId === undefined
       ? request.rootClientOrderId
       : `${request.rootClientOrderId}:${node.memberId}`;

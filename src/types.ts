@@ -734,27 +734,32 @@ export interface DerivativeContingentWarningContinuation {
   parentClientOrderId: string;
 }
 
+/** Caller-stable identity shared by every graph member. */
+export interface DerivativeOrderGraphNodeIdentity {
+  memberId: string;
+  parentMemberId?: string;
+  /** Exact IBKR cOID. When absent, the client derives its current fallback. */
+  clientOrderId?: string;
+}
+
 /** Caller-stable identity and complete placement evidence for one graph member. */
 export type DerivativeOrderGraphNode =
-  | ({
-      memberId: string;
-      parentMemberId?: string;
-    } & DerivativeComboPreviewRequest &
+  | (DerivativeOrderGraphNodeIdentity &
+      DerivativeComboPreviewRequest &
       CmeOperatorMetadata)
-  | ({
-      memberId: string;
-      parentMemberId?: string;
-      accountId: string;
-      contract: DerivativeContract;
-      side: DerivativeOrderSide;
-      quantity: number;
-      tif: "DAY" | "GTC";
-      session: "REGULAR" | "OVERNIGHT";
-    } & (
-      | { orderType: "LMT"; limit: number; stopPrice?: never }
-      | { orderType: "STP"; stopPrice: number; limit?: never }
-      | { orderType: "MKT"; limit?: never; stopPrice?: never }
-    ) &
+  | (DerivativeOrderGraphNodeIdentity &
+      {
+        accountId: string;
+        contract: DerivativeContract;
+        side: DerivativeOrderSide;
+        quantity: number;
+        tif: "DAY" | "GTC";
+        session: "REGULAR" | "OVERNIGHT";
+      } & (
+        | { orderType: "LMT"; limit: number; stopPrice?: never }
+        | { orderType: "STP"; stopPrice: number; limit?: never }
+        | { orderType: "MKT"; limit?: never; stopPrice?: never }
+      ) &
       CmeOperatorMetadata);
 
 export interface DerivativeOrderGraphRequest {

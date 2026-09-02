@@ -602,6 +602,89 @@ test("submits a root, child, and grandchild with exact activation links", async 
   );
 });
 
+
+test("submits a root, child, and grandchild with explicit graph member identities", async () => {
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          { order_id: "10", order_status: "Submitted", local_order_id: "hg-root" },
+          { order_id: "11", order_status: "Submitted", local_order_id: "hg-profit" },
+          { order_id: "12", order_status: "Submitted", local_order_id: "hg-stop" },
+        ]
+      : session(input)
+  );
+  const request: DerivativeOrderGraphRequest = {
+    accountId: "U1",
+    rootClientOrderId: "hg-root",
+    nodes: [
+      {
+        memberId: "entry",
+        clientOrderId: "hg-root",
+        accountId: "U1",
+        legs: [
+          { contract: contract(1), ratio: -1 },
+          { contract: contract(2), ratio: 1 },
+        ],
+        quantity: 1,
+        orderType: "LMT",
+        priceEffect: "CREDIT",
+        limit: 1.2,
+        tif: "DAY",
+        session: "REGULAR",
+      },
+      {
+        memberId: "profit",
+        parentMemberId: "entry",
+        clientOrderId: "hg-profit",
+        accountId: "U1",
+        contract: contract(1),
+        side: "BUY",
+        quantity: 1,
+        orderType: "STP",
+        stopPrice: 2.4,
+        tif: "GTC",
+        session: "REGULAR",
+      },
+      {
+        memberId: "stop",
+        parentMemberId: "profit",
+        clientOrderId: "hg-stop",
+        accountId: "U1",
+        contract: contract(2),
+        side: "SELL",
+        quantity: 1,
+        orderType: "MKT",
+        tif: "DAY",
+        session: "REGULAR",
+      },
+    ],
+  };
+  const result = await client.submitDerivativeOrderGraph(request);
+  assert.equal(result.state, "accepted");
+  assert.deepEqual(
+    result.members.map(({ memberId, clientOrderId }) => ({
+      memberId,
+      clientOrderId,
+    })),
+    [
+      { memberId: "entry", clientOrderId: "hg-root" },
+      { memberId: "profit", clientOrderId: "hg-profit" },
+      { memberId: "stop", clientOrderId: "hg-stop" },
+    ]
+  );
+  const submittedOrders = client.calls.find(
+    (call) => call.method === "POST" && call.path.endsWith("/orders")
+  )?.data as { orders: Record<string, unknown>[] };
+  assert.deepEqual(
+    submittedOrders.orders.map(({ cOID, parentId }) => ({ cOID, parentId })),
+    [
+      { cOID: "hg-root", parentId: undefined },
+      { cOID: "hg-profit", parentId: "hg-root" },
+      { cOID: "hg-stop", parentId: "hg-profit" },
+    ]
+  );
+});
+
 test("retains the readable paper rejection for an unregistered grandchild parent ID", async () => {
   const text = "Order couldn't be submitted: Parent order ID=raw-probe-1:root_1 isn't recognized.";
   const client = new Fake((input) =>
