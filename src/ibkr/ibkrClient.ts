@@ -2905,6 +2905,25 @@ export class IbkrClient
     if (roots !== 1 || request.nodes[0]?.parentMemberId !== undefined) {
       throw new Error("Derivative order graphs require exactly one root as the first member");
     }
+    for (const node of request.nodes) {
+      if (
+        node.clientOrderId !== undefined &&
+        (typeof node.clientOrderId !== "string" ||
+          node.clientOrderId.trim() !== node.clientOrderId ||
+          node.clientOrderId.length === 0 ||
+          node.clientOrderId.length > 64)
+      ) {
+        throw new TypeError("Invalid graph member client order ID");
+      }
+    }
+    const root = request.nodes.find(({ parentMemberId }) => parentMemberId === undefined);
+    if (root?.clientOrderId !== undefined && root.clientOrderId !== request.rootClientOrderId) {
+      throw new TypeError("Invalid graph root client order ID");
+    }
+    const effectiveIds = request.nodes.map((node) => this.graphClientOrderId(request, node));
+    if (new Set(effectiveIds).size !== effectiveIds.length) {
+      throw new TypeError("Duplicate graph member client order ID");
+    }
   }
 
   private validateGraphSingleNode(

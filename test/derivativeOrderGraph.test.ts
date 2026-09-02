@@ -104,6 +104,10 @@ const graphTwoNodes = (): DerivativeOrderGraphRequest => {
     nodes: [full.nodes[0]!, full.nodes[1]!] as const,
   };
 };
+const invalidIdentities = [
+  { name: "blank", value: " " },
+  { name: "too long", value: "x".repeat(65) },
+] as const;
 /**
  * A BAG parent with a BAG STOP child, same conidex with reversed ratios - the 2-level shape
  * huskly/strategy-terminal#527 needs because IBKR rejects a combo parent with a non-combo child.
@@ -564,6 +568,50 @@ test("invalid graph fails before broker access and transport placement is attemp
     transport.calls.filter((c) => c.path.endsWith("/orders") && c.method === "POST").length,
     1
   );
+});
+
+for (const { name, value } of invalidIdentities) {
+  test(`rejects graph member identity ${name} before broker access`, async () => {
+    const request = graph();
+    request.nodes[0]!.clientOrderId = value;
+    const client = new Fake(() => {
+      throw new Error("network");
+    });
+    await assert.rejects(() => client.submitDerivativeOrderGraph(request), /client order ID/);
+    assert.equal(client.calls.length, 0);
+  });
+}
+
+test("rejects graph when explicit identity values collide", async () => {
+  const request = graph();
+  request.rootClientOrderId = "hg-same";
+  request.nodes[0]!.clientOrderId = "hg-same";
+  request.nodes[1]!.clientOrderId = "hg-same";
+  const client = new Fake(() => {
+    throw new Error("network");
+  });
+  await assert.rejects(() => client.submitDerivativeOrderGraph(request), /Duplicate graph member client order ID/);
+  assert.equal(client.calls.length, 0);
+});
+
+test("rejects graph when an explicit identity collides with a fallback", async () => {
+  const request = graph();
+  request.nodes[2]!.clientOrderId = `${request.rootClientOrderId}:stop`;
+  const client = new Fake(() => {
+    throw new Error("network");
+  });
+  await assert.rejects(() => client.submitDerivativeOrderGraph(request), /Duplicate graph member client order ID/);
+  assert.equal(client.calls.length, 0);
+});
+
+test("rejects graph when the explicit root identity disagrees with rootClientOrderId", async () => {
+  const request = graph();
+  request.nodes[0]!.clientOrderId = "hg-other-root";
+  const client = new Fake(() => {
+    throw new Error("network");
+  });
+  await assert.rejects(() => client.submitDerivativeOrderGraph(request), /Invalid graph root client order ID/);
+  assert.equal(client.calls.length, 0);
 });
 
 test("submits a root, child, and grandchild with exact activation links", async () => {
