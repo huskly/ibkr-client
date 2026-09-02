@@ -18,6 +18,8 @@ import {
   type DerivativeContingentWarningContinuation,
   type BrokerQuoteOptions,
   type BrokerQuoteRequest,
+  type ContractTransactionEvidence,
+  type ContractTransactionRecord,
   type IbkrClient,
   type IbkrClientOptions,
   type IbkrContractReferenceEvidence,
@@ -234,6 +236,39 @@ void test("public settlement types state one figure currency and one observation
   assert.equal(evidence.settledCashByDateRaw, "20260902:25000.50");
   assert.equal(evidence.accountType, "INDIVIDUAL");
   assert.equal(evidence.availableFunds.amount, null);
+  assert.equal(read, undefined);
+});
+
+void test("public contract transaction types state broker prose without classifying it", () => {
+  const record: ContractTransactionRecord = {
+    conid: 726,
+    accountId: "U123",
+    date: "Mon Sep 21 00:00:00 EDT 2026",
+    rawDate: "20260921",
+    type: "Assignment",
+    description: "ASSIGNED PUT",
+    currency: "USD",
+    amount: -36_000,
+    quantity: -1,
+    price: 0,
+    fxRate: 1,
+    presentFieldNames: ["amt", "conid", "type"],
+  };
+  const evidence: ContractTransactionEvidence = {
+    accountId: "U123",
+    observedAtEpochMillis: 1_754_000_000_000,
+    requestedConids: [726],
+    requestedCurrency: "USD",
+    requestedDays: 30,
+    transactions: [record, { ...record, conid: null, type: null, amount: null }],
+  };
+  const read: IbkrClient["getContractTransactionEvidence"] | undefined = undefined;
+
+  // A stated zero and an unstated field are different facts at the type level too.
+  assert.equal(evidence.transactions[0]?.price, 0);
+  assert.equal(evidence.transactions[1]?.amount, null);
+  assert.equal(evidence.transactions[0]?.type, "Assignment");
+  assert.equal(evidence.requestedCurrency, "USD");
   assert.equal(read, undefined);
 });
 
