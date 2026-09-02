@@ -735,7 +735,7 @@ export interface DerivativeContingentWarningContinuation {
 }
 
 /** Caller-stable identity shared by every graph member. */
-export interface DerivativeOrderGraphNodeIdentity {
+interface DerivativeOrderGraphNodeIdentity {
   memberId: string;
   parentMemberId?: string;
   /** Exact IBKR cOID. When absent, the client derives its current fallback. */

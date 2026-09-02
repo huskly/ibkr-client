@@ -2873,8 +2873,8 @@ export class IbkrClient
 
   private validateOrderGraph(request: DerivativeOrderGraphRequest): void {
     if (!request.accountId.trim()) throw new Error("An explicit IBKR account ID is required");
-    if (!request.rootClientOrderId.trim() || request.rootClientOrderId.length > 48) {
-      throw new Error("Root client order ID must contain 1 to 48 characters");
+    if (!request.rootClientOrderId.trim() || request.rootClientOrderId.length > 64) {
+      throw new Error("Root client order ID must contain 1 to 64 characters");
     }
     if (request.nodes.length < 1 || request.nodes.length > 8) {
       throw new Error("Derivative order graphs require 1 to 8 members");
@@ -2921,6 +2921,11 @@ export class IbkrClient
       throw new TypeError("Invalid graph root client order ID");
     }
     const effectiveIds = request.nodes.map((node) => this.graphClientOrderId(request, node));
+    for (const clientOrderId of effectiveIds) {
+      if (clientOrderId.length > 64) {
+        throw new TypeError("Graph member client order ID must contain 1 to 64 characters");
+      }
+    }
     if (new Set(effectiveIds).size !== effectiveIds.length) {
       throw new TypeError("Duplicate graph member client order ID");
     }

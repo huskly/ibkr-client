@@ -151,6 +151,7 @@ const explicitGraph = (): DerivativeOrderGraphRequest => ({
   ],
 });
 const invalidIdentities = [
+  { name: "empty", value: "" },
   { name: "blank", value: " " },
   { name: "too long", value: "x".repeat(65) },
 ] as const;
@@ -675,6 +676,45 @@ for (const { name, value } of invalidIdentities) {
     assert.equal(client.calls.length, 0);
   });
 }
+
+test("accepts a 49-character explicit root when every effective ID fits", async () => {
+  const request = explicitGraph();
+  request.rootClientOrderId = "r".repeat(49);
+  request.nodes[0]!.clientOrderId = request.rootClientOrderId;
+  request.nodes[1]!.clientOrderId = "hg-profit";
+  request.nodes[2]!.clientOrderId = "hg-stop";
+  const client = new Fake((input) =>
+    input.path.endsWith("/orders") && input.method === "POST"
+      ? [
+          { order_id: "10", order_status: "Submitted", local_order_id: request.rootClientOrderId },
+          { order_id: "11", order_status: "Submitted", local_order_id: "hg-profit" },
+          { order_id: "12", order_status: "Submitted", local_order_id: "hg-stop" },
+        ]
+      : session(input)
+  );
+  const result = await client.submitDerivativeOrderGraph(request);
+  assert.equal(result.state, "accepted");
+  if (result.state !== "accepted") return;
+  assert.equal(result.rootClientOrderId, request.rootClientOrderId);
+  assert.deepEqual(
+    result.members.map(({ clientOrderId }) => clientOrderId),
+    [request.rootClientOrderId, "hg-profit", "hg-stop"]
+  );
+  assert.equal(client.calls.filter((call) => call.path.endsWith("/orders")).length, 1);
+});
+
+test("rejects a derived fallback identity longer than 64 characters", async () => {
+  const request = explicitGraph();
+  request.rootClientOrderId = "r".repeat(64);
+  request.nodes[0]!.clientOrderId = request.rootClientOrderId;
+  request.nodes[1]!.clientOrderId = "hg-profit";
+  delete request.nodes[2]!.clientOrderId;
+  const client = new Fake(() => {
+    throw new Error("network");
+  });
+  await assert.rejects(() => client.submitDerivativeOrderGraph(request), /client order ID/);
+  assert.equal(client.calls.length, 0);
+});
 
 test("rejects graph when explicit identity values collide", async () => {
   const request = graph();
