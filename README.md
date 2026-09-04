@@ -758,3 +758,8 @@ const request = {
   ],
 };
 ```
+
+## Releasing
+
+Publishing a stable GitHub Release publishes the matching package version to npm through trusted
+publishing. See [RELEASING.md](RELEASING.md) for the required tag format and release steps.
