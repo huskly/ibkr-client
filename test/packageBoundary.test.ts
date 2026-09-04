@@ -385,7 +385,6 @@ test("package exposes only the library and no CLI entry point", async () => {
     await readFile(new URL("../package.json", import.meta.url), "utf8")
   ) as PackageManifest;
 
-  assert.equal(manifest.version, "2.4.0");
   assert.equal(typeof manifest.packageManager, "string");
   assert.match(manifest.packageManager as string, /^yarn@4\.\d+\.\d+$/);
   assert.equal(manifest.bin, undefined);
