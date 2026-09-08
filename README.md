@@ -75,6 +75,67 @@ Version 2.0.0 makes session and write safety evidence explicit:
 - Handle both `requested` and `recovery_required` cancellation results. Only an unambiguous broker
   acknowledgement returns `requested`.
 
+## Flex statement evidence
+
+`FlexClient` is a separate, read-only client for the
+[IBKR Flex Web Service](https://www.interactivebrokers.com/docs/web-api/flex-web-service/introduction).
+It does not use OAuth brokerage credentials or create a brokerage session.
+
+```typescript
+import { FlexClient } from "@huskly/ibkr-client";
+
+// Obtain these values from private deployment settings, not a tracked file.
+const flex = new FlexClient(flexToken);
+const referenceCode = await flex.requestReport({
+  queryId,
+  fromDate: "20260901",
+  toDate: "20260902",
+}, abortSignal);
+
+// Schedule this call after generation. A report can still be pending.
+const result = await flex.readStatement(referenceCode, abortSignal);
+if (result.status === "pending") {
+  // Schedule another read of this reference code. Do not request a new report.
+} else {
+  consumeStatementEvidence(result.statements, result.observedAtEpochMillis);
+}
+```
+
+Create a Flex Web Service token and an Activity Flex Query in Client Portal first.
+Use an unfiltered query with detailed Cash Transactions and Transfers sections,
+all cash-transaction types, account identity, transaction identity, source amount,
+currency, date/time, and statement date range. Retain the query's time-zone and
+date/time format settings. A query that omits a section, filters rows, aggregates
+transactions, or reports only trade confirmations cannot prove cash-flow coverage.
+The client does not inspect the saved query's configuration or certify completeness.
+
+Each method makes one GET request to the fixed documented HTTPS host. It ignores
+any URL returned by generation, refuses redirects, and uses a 30-second deadline
+plus optional caller cancellation. There is no automatic retry or polling loop.
+The caller must obey IBKR's generation limits: at most one request per second and
+10 per minute. `requestReport()` returns the reference code, not statement data.
+`readStatement()` returns `pending` only for error code `1019`. Other service
+refusals throw `FlexServiceError` with a validated four-digit code or `null`.
+Errors omit private response text and token-bearing URLs, including error causes.
+Never log tokens, request URLs, reference codes, or raw statement evidence.
+
+`parseFlexStatement(xml)` is also exported for an already retrieved XML report.
+Each result preserves statement attributes and CashTransaction/Transfer attributes
+as strings. Missing sections are `null`; explicitly empty sections are `[]`.
+Missing currency or time fields are not inferred. XML entities such as `&amp;`
+are decoded, but DTD and entity declarations are refused. Malformed structures,
+repeated target sections, unexpected target rows, and inconsistent stated counts
+are refused rather than silently discarded. Other statement sections are not
+part of this focused result. Input is limited to 8 MiB of UTF-8 data and 32 nested
+tags. XML parser diagnostics are not exposed because they can contain private data.
+
+A ready report can lag current balances. Validate report identity, source dates,
+query configuration, currencies, event classification, and corrections before
+using it for performance. Date-only or ambiguous local times do not establish an
+intraday flow time. The returned observation time is when this client parsed the
+report, not when its financial data became effective. The existing contract-filtered
+`fetchTransactionHistory()` is unchanged and is not an account-wide cash-flow feed.
+
 ## Library API
 
 `IbkrClient` owns IBKR authentication, requests, raw response types, and

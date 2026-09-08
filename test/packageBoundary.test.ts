@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  FlexClient,
+  FlexServiceError,
+  parseFlexStatement,
+  type FlexReportRequest,
+  type FlexStatementResult,
   IbkrHttpError,
   IbkrInsufficientHistoryError,
   IbkrPriceHistoryContractError,
@@ -50,6 +55,16 @@ import {
   type TradingDiagnostics,
   type UnderlyingInstrumentReferenceEvidence,
 } from "../src/index.js";
+
+void test("public Flex source exposes pending state and raw statement attributes", () => {
+  const request: FlexReportRequest = { queryId: "123", fromDate: "20260901", toDate: "20260902" };
+  const pending: FlexStatementResult = { status: "pending", code: "1019" };
+  assert.equal(request.queryId, "123");
+  assert.equal(pending.status, "pending");
+  assert.equal(typeof FlexClient.prototype.readStatement, "function");
+  assert.equal(typeof parseFlexStatement, "function");
+  assert.equal(new FlexServiceError("1018").code, "1018");
+});
 
 interface PackageManifest {
   version?: unknown;
