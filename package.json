@@ -34,6 +34,8 @@
   },
   "dependencies": {
     "dotenv": "^17.2.3",
+    "fast-xml-parser": "^5.11.1",
+    "fast-xml-validator": "^1.4.2",
     "ibkr-client": "^1.0.4"
   },
   "devDependencies": {

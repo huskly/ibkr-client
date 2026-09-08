@@ -1,4 +1,11 @@
 /** Package entry point — the broker-neutral types and the IBKR client. */
+export { FlexClient, FlexServiceError } from "./flex/flexClient.js";
+export { parseFlexStatement } from "./flex/flexStatement.js";
+export type {
+  FlexReportRequest,
+  FlexStatementEvidence,
+  FlexStatementResult,
+} from "./flex/types.js";
 export {
   IbkrClient,
   IbkrBrokerResponseError,
