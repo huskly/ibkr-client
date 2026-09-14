@@ -62,6 +62,12 @@ export type {
   IbkrContractReferenceEvidence,
   OptionSeriesReferenceEvidence,
   UnderlyingInstrumentReferenceEvidence,
+  EquityContract,
+  EquityOrderCancelRequest,
+  EquityOrderPreviewRequest,
+  EquityOrderPreviewResult,
+  EquityOrderRequest,
+  EquityOrderSide,
   DerivativeAssetClass,
   DerivativeContract,
   DerivativeContractQuery,
@@ -138,3 +144,4 @@ export type {
 } from "./types.js";
 export { formatOsiOptionSymbol, parseOsiOptionSymbol } from "./ibkr/optionContract.js";
 export { normalizeDerivativeDataAvailability } from "./ibkr/derivativeContract.js";
+export { normalizeEquityContract } from "./ibkr/equityContract.js";
