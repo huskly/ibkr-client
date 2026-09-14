@@ -17,6 +17,7 @@ import {
   type BrokerClient,
   type BrokerEnvironment,
   type DerivativeComboPreviewResult,
+  type EquityContract,
   type DerivativeExecutionClient,
   type DerivativeOrderCancellationEvidence,
   type DerivativeOrderCancellationResult,
@@ -248,6 +249,19 @@ void test("public graph nodes preserve explicit and fallback clientOrderId", () 
 
   assert.equal(explicitNode.clientOrderId, "hg-explicit");
   assert.equal(fallbackNode.clientOrderId, undefined);
+});
+
+void test("public equity contract exposes complete US listing identity", () => {
+  const contract: EquityContract = {
+    conid: 320227571,
+    assetClass: "STK",
+    symbol: "IBIT",
+    exchange: "SMART",
+    primaryExchange: "NASDAQ",
+    currency: "USD",
+  };
+  assert.equal(contract.assetClass, "STK");
+  assert.equal(contract.primaryExchange, "NASDAQ");
 });
 
 void test("public account balance types expose nullable totals and margin snapshots", () => {

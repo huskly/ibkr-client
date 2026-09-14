@@ -512,6 +512,16 @@ export interface PriceHistoryBar {
 export type OptionRight = "C" | "P";
 
 /** Derivative security types supported by IBKR security-definition discovery. */
+/** One exact SMART-routed US stock or ETF contract. */
+export interface EquityContract {
+  conid: number;
+  assetClass: "STK";
+  symbol: string;
+  exchange: "SMART";
+  primaryExchange: string;
+  currency: "USD";
+}
+
 export type DerivativeAssetClass = "OPT" | "FOP";
 
 /** Normalized market-data timeline reported by IBKR snapshot field 6509. */
