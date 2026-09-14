@@ -522,6 +522,32 @@ export interface EquityContract {
   currency: "USD";
 }
 
+export type EquityOrderSide = "BUY" | "SELL";
+
+/** One non-submitting US equity limit-order What-If request. */
+export interface EquityOrderPreviewRequest {
+  accountId: string;
+  contract: EquityContract;
+  side: EquityOrderSide;
+  quantity: number;
+  orderType: "LMT";
+  limit: number;
+  tif: "DAY" | "GTC";
+  session: "REGULAR" | "OVERNIGHT";
+}
+
+/** One live US equity limit-order request with caller-stable identity. */
+export interface EquityOrderRequest extends EquityOrderPreviewRequest {
+  clientOrderId: string;
+}
+
+export type EquityOrderPreviewResult = DerivativeComboPreviewResult;
+
+export interface EquityOrderCancelRequest {
+  accountId: string;
+  orderId: string;
+}
+
 export type DerivativeAssetClass = "OPT" | "FOP";
 
 /** Normalized market-data timeline reported by IBKR snapshot field 6509. */
@@ -866,7 +892,7 @@ export type DerivativeMultiOrderResult =
 export type DerivativeOrderCancelRequest = {
   accountId: string;
   orderId: string;
-  assetClass: DerivativeAssetClass;
+  assetClass: DerivativeAssetClass | "STK";
 } & CmeOperatorMetadata;
 
 export interface OrderWarning {

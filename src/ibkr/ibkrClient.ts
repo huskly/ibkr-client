@@ -34,6 +34,10 @@ import type {
   BrokerErrorDetail,
   BrokerEnvironment,
   EquityContract,
+  EquityOrderCancelRequest,
+  EquityOrderPreviewRequest,
+  EquityOrderPreviewResult,
+  EquityOrderRequest,
   DerivativeAssetClass,
   DerivativeContract,
   DerivativeContractQuery,
@@ -894,6 +898,51 @@ export class IbkrClient
               .filter(Boolean)
           : [],
     };
+  }
+
+  async previewEquityOrder(request: EquityOrderPreviewRequest): Promise<EquityOrderPreviewResult> {
+    this.assertOpen();
+    this.validateEquityOrderFields(request);
+    return this.withTradingMutation(
+      request.accountId,
+      "IBKR brokerage session is not safely authenticated for What-If",
+      async (diagnostics) => {
+        await this.req<unknown>({
+          path: "iserver/marketdata/snapshot",
+          params: { conids: String(request.contract.conid), fields: "6509" },
+        });
+        const response = await this.singleAttemptRequest<IbkrWhatIfResponse>({
+          path: `iserver/account/${request.accountId}/orders/whatif`,
+          method: "POST",
+          data: { orders: [this.equityOrderTicket(request)] },
+        });
+        return this.normalizeComboPreview(request.accountId, diagnostics, response);
+      }
+    );
+  }
+
+  async submitEquityOrder(request: EquityOrderRequest): Promise<DerivativeOrderSubmissionResult> {
+    this.assertOpen();
+    this.validateEquityOrderFields(request);
+    if (!request.clientOrderId.trim() || request.clientOrderId.length > 64) {
+      throw new Error("Client order ID must contain 1 to 64 characters");
+    }
+    return this.withTradingMutation(
+      request.accountId,
+      "IBKR brokerage session is not safely authenticated for submission",
+      async () => {
+        const response = await this.singleAttemptRequest<
+          IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+        >({
+          path: `iserver/account/${request.accountId}/orders`,
+          method: "POST",
+          data: {
+            orders: [{ ...this.equityOrderTicket(request), cOID: request.clientOrderId }],
+          },
+        });
+        return this.normalizeOrderSubmission(response, request.clientOrderId);
+      }
+    );
   }
 
   async previewDerivativeCombo(
@@ -2145,6 +2194,18 @@ export class IbkrClient
     }
   }
 
+  getEquityOrderStatus(accountId: string, orderId: string): Promise<DerivativeOrderLifecycle> {
+    return this.getDerivativeOrderStatus(accountId, orderId);
+  }
+
+  findEquityOrder(input: DerivativeOrderLookup): Promise<DerivativeOrderLifecycle> {
+    return this.findDerivativeOrder(input);
+  }
+
+  cancelEquityOrder(input: EquityOrderCancelRequest): Promise<DerivativeOrderCancellationResult> {
+    return this.cancelDerivativeOrder({ ...input, assetClass: "STK" });
+  }
+
   async cancelDerivativeOrder(
     input: DerivativeOrderCancelRequest
   ): Promise<DerivativeOrderCancellationResult> {
@@ -2666,8 +2727,7 @@ export class IbkrClient
       currency: evidence.currency,
     });
     if (
-      contract === null ||
-      contract.conid !== conid ||
+      contract?.conid !== conid ||
       contract.symbol !== requestedSymbol ||
       !validExchanges.includes("SMART")
     ) {
@@ -3221,6 +3281,56 @@ export class IbkrClient
     }
   }
 
+  private validateEquityOrderFields(request: EquityOrderPreviewRequest): void {
+    if (!request.accountId.trim()) throw new Error("An explicit IBKR account ID is required");
+    if (normalizeEquityContract(request.contract) === null) {
+      throw new Error("Equity order requires one exact US equity contract");
+    }
+    const fields = request as unknown as Record<string, unknown>;
+    if (fields["side"] !== "BUY" && fields["side"] !== "SELL") {
+      throw new Error("Equity order side must be BUY or SELL");
+    }
+    if (!Number.isSafeInteger(fields["quantity"]) || (fields["quantity"] as number) <= 0) {
+      throw new Error("Equity order quantity must be a positive integer");
+    }
+    if (
+      fields["orderType"] !== "LMT" ||
+      typeof fields["limit"] !== "number" ||
+      !Number.isFinite(fields["limit"]) ||
+      fields["limit"] <= 0
+    ) {
+      throw new Error("Equity LIMIT order requires a positive limit price");
+    }
+    if (fields["tif"] !== "DAY" && fields["tif"] !== "GTC") {
+      throw new Error("Equity order TIF must be DAY or GTC");
+    }
+    if (fields["session"] !== "REGULAR" && fields["session"] !== "OVERNIGHT") {
+      throw new Error("Equity order session must be REGULAR or OVERNIGHT");
+    }
+  }
+
+  private equityOrderTicket(request: EquityOrderPreviewRequest): {
+    acctId: string;
+    conid: number;
+    orderType: "LMT";
+    side: "BUY" | "SELL";
+    price: number;
+    tif: "DAY" | "GTC";
+    quantity: number;
+    outsideRTH: boolean;
+  } {
+    return {
+      acctId: request.accountId,
+      conid: request.contract.conid,
+      orderType: "LMT",
+      side: request.side,
+      price: request.limit,
+      tif: request.tif,
+      quantity: request.quantity,
+      outsideRTH: request.session === "OVERNIGHT",
+    };
+  }
+
   private validateSingleOrder(request: DerivativeSingleOrderRequest): void {
     this.validateSingleOrderFields(request);
     const identityFields = request as unknown as {
@@ -3282,10 +3392,10 @@ export class IbkrClient
   }
 
   private cmeOperatorMetadata(
-    assetClass: DerivativeAssetClass,
+    assetClass: DerivativeAssetClass | "STK",
     input: { extOperator?: string; manualIndicator?: boolean }
   ): { extOperator: string; manualIndicator: boolean } | Record<string, never> {
-    if (assetClass === "OPT") return {};
+    if (assetClass !== "FOP") return {};
     if (!input.extOperator?.trim() || input.manualIndicator === undefined) {
       throw new Error(`${assetClass} orders require exact CME operator metadata`);
     }

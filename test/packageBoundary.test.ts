@@ -18,6 +18,9 @@ import {
   type BrokerEnvironment,
   type DerivativeComboPreviewResult,
   type EquityContract,
+  type EquityOrderPreviewRequest,
+  type EquityOrderPreviewResult,
+  type EquityOrderRequest,
   type DerivativeExecutionClient,
   type DerivativeOrderCancellationEvidence,
   type DerivativeOrderCancellationResult,
@@ -249,6 +252,37 @@ void test("public graph nodes preserve explicit and fallback clientOrderId", () 
 
   assert.equal(explicitNode.clientOrderId, "hg-explicit");
   assert.equal(fallbackNode.clientOrderId, undefined);
+});
+
+void test("public equity order API exposes preview and one identified submission", () => {
+  const preview = undefined as EquityOrderPreviewResult | undefined;
+  const input: EquityOrderPreviewRequest = {
+    accountId: "U123",
+    contract: {
+      conid: 320227571,
+      assetClass: "STK",
+      symbol: "IBIT",
+      exchange: "SMART",
+      primaryExchange: "NASDAQ",
+      currency: "USD",
+    },
+    side: "BUY",
+    quantity: 100,
+    orderType: "LMT",
+    limit: 44.41,
+    tif: "DAY",
+    session: "REGULAR",
+  };
+  const order: EquityOrderRequest = { ...input, clientOrderId: "equity-1" };
+  const previewMethod: IbkrClient["previewEquityOrder"] | undefined = undefined;
+  const submitMethod: IbkrClient["submitEquityOrder"] | undefined = undefined;
+  const cancelMethod: IbkrClient["cancelEquityOrder"] | undefined = undefined;
+
+  assert.equal(preview?.submitted ?? false, false);
+  assert.equal(order.clientOrderId, "equity-1");
+  assert.equal(previewMethod, undefined);
+  assert.equal(submitMethod, undefined);
+  assert.equal(cancelMethod, undefined);
 });
 
 void test("public equity contract exposes complete US listing identity", () => {

@@ -543,6 +543,15 @@ normalized result includes paper/live environment, commission, initial and maint
 warnings, rejection reasons, and `submitted: false`. An incomplete nominal success fails closed.
 Permission metadata is diagnostic only; the What-If response remains authoritative.
 
+### Guarded US equity order execution
+
+`resolveEquityContract(symbol)` must produce the exact contract before an order can be previewed.
+`previewEquityOrder(...)` sends one What-If request and always returns `submitted: false`.
+`submitEquityOrder(...)` accepts only BUY or SELL limit orders for positive whole-share quantities
+and requires a stable client order ID. `cancelEquityOrder(...)` sends one cancellation request. These
+broker writes never retry automatically. Warning, lifecycle, and recovery evidence use the same
+strict normalization as single derivative orders.
+
 ### Guarded derivative order execution
 
 `IbkrClient` implements a separate `DerivativeExecutionClient` capability for callers that have
