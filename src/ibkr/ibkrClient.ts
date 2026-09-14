@@ -33,6 +33,7 @@ import type {
   BrokerTransactionHistory,
   BrokerErrorDetail,
   BrokerEnvironment,
+  EquityContract,
   DerivativeAssetClass,
   DerivativeContract,
   DerivativeContractQuery,
@@ -122,6 +123,7 @@ import type {
   IbkrWhatIfResponse,
 } from "./ibkrApiTypes.js";
 import { normalizeOptionContract, parseOsiOptionSymbol } from "./optionContract.js";
+import { normalizeEquityContract } from "./equityContract.js";
 import {
   normalizeDerivativeContract,
   normalizeDerivativeDataAvailability,
@@ -2606,6 +2608,74 @@ export class IbkrClient
   }
 
   /** Resolve equity/ETF symbols to IBKR contracts via `trsrv/stocks`. */
+  /** Resolve one exact SMART-routed US stock or ETF contract. */
+  async resolveEquityContract(symbol: string): Promise<EquityContract> {
+    this.assertOpen();
+    const requestedSymbol = symbol.trim().toUpperCase();
+    if (!requestedSymbol || /[\r\n\t]/.test(symbol)) {
+      throw new Error("Equity contract resolution requires a usable symbol");
+    }
+
+    const response = await this.req<unknown>({
+      path: "trsrv/stocks",
+      params: { symbols: requestedSymbol },
+    });
+    if (!isUnknownRecord(response)) {
+      throw new Error("IBKR returned incomplete exact US equity search evidence");
+    }
+    const rawListings = response[requestedSymbol];
+    if (!Array.isArray(rawListings)) {
+      throw new Error("IBKR returned no exact US equity listing evidence");
+    }
+
+    const byConid = new Map<number, string>();
+    let conflicting = false;
+    for (const rawListing of rawListings) {
+      if (!isUnknownRecord(rawListing) || rawListing["assetClass"] !== "STK") continue;
+      const contracts = rawListing["contracts"];
+      if (!Array.isArray(contracts)) continue;
+      for (const rawContract of contracts) {
+        if (!isUnknownRecord(rawContract) || rawContract["isUS"] !== true) continue;
+        const conid = rawContract["conid"];
+        const primaryExchange = this.trimmedString(rawContract["exchange"])?.toUpperCase();
+        if (!Number.isSafeInteger(conid) || (conid as number) <= 0 || !primaryExchange) continue;
+        const previous = byConid.get(conid as number);
+        if (previous !== undefined && previous !== primaryExchange) conflicting = true;
+        byConid.set(conid as number, primaryExchange);
+      }
+    }
+    if (conflicting || byConid.size !== 1) {
+      throw new Error("IBKR did not return one exact US equity listing");
+    }
+
+    const [candidate] = byConid;
+    if (candidate === undefined) throw new Error("IBKR returned no exact US equity listing");
+    const [conid, primaryExchange] = candidate;
+    const evidence = this.contractReferenceEvidence(conid, await this.readContractReference(conid));
+    const validExchanges =
+      evidence.validExchanges
+        ?.split(",")
+        .map((value) => value.trim().toUpperCase())
+        .filter(Boolean) ?? [];
+    const contract = normalizeEquityContract({
+      conid: evidence.conid,
+      assetClass: evidence.instrumentType?.toUpperCase(),
+      symbol: evidence.symbol,
+      exchange: evidence.exchange,
+      primaryExchange,
+      currency: evidence.currency,
+    });
+    if (
+      contract === null ||
+      contract.conid !== conid ||
+      contract.symbol !== requestedSymbol ||
+      !validExchanges.includes("SMART")
+    ) {
+      throw new Error("IBKR equity contract details are incomplete or conflicting");
+    }
+    return contract;
+  }
+
   async searchInstruments(
     symbol: string,
     projection: BrokerInstrumentSearchProjection = "symbol-search"

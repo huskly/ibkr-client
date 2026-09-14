@@ -252,6 +252,7 @@ void test("public graph nodes preserve explicit and fallback clientOrderId", () 
 });
 
 void test("public equity contract exposes complete US listing identity", () => {
+  const resolve: IbkrClient["resolveEquityContract"] | undefined = undefined;
   const contract: EquityContract = {
     conid: 320227571,
     assetClass: "STK",
@@ -262,6 +263,7 @@ void test("public equity contract exposes complete US listing identity", () => {
   };
   assert.equal(contract.assetClass, "STK");
   assert.equal(contract.primaryExchange, "NASDAQ");
+  assert.equal(resolve, undefined);
 });
 
 void test("public account balance types expose nullable totals and margin snapshots", () => {

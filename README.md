@@ -86,11 +86,14 @@ import { FlexClient } from "@huskly/ibkr-client";
 
 // Obtain these values from private deployment settings, not a tracked file.
 const flex = new FlexClient(flexToken);
-const referenceCode = await flex.requestReport({
-  queryId,
-  fromDate: "20260901",
-  toDate: "20260902",
-}, abortSignal);
+const referenceCode = await flex.requestReport(
+  {
+    queryId,
+    fromDate: "20260901",
+    toDate: "20260902",
+  },
+  abortSignal
+);
 
 // Schedule this call after generation. A report can still be pending.
 const result = await flex.readStatement(referenceCode, abortSignal);
@@ -208,6 +211,10 @@ validated at runtime. Its broker-neutral account API includes:
   settlement style on this endpoint, and a known adjusted class (`TLRY1`) reports the same
   `multiplier` `"100"` and the same `cfi_code` `"OPXXXS"` as a standard class (`SPY`). The CONSUMER
   decides what the facts qualify.
+- `resolveEquityContract(symbol)` returns one exact SMART-routed US `STK` identity. It requires
+  one IBKR `isUS` listing and verifies the conid, symbol, security type, USD currency, and SMART
+  routing against `iserver/contract/{conid}/info`. Empty, ambiguous, incomplete, or conflicting
+  evidence fails closed.
 - `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes. Quote requests accept
   a symbol and an optional broker ID. A broker ID reads that exact contract without symbol
   discovery. A request without one can also resolve a complete OSI option symbol without loading
