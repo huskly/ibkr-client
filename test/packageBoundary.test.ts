@@ -14,6 +14,7 @@ import {
   type AccountSettledCashByDate,
   type AccountSettlementEvidence,
   type AccountSettlementFigure,
+  type AuthStatus,
   type BrokerClient,
   type BrokerEnvironment,
   type DerivativeComboPreviewResult,
@@ -535,8 +536,12 @@ void test("package exports the explicit session lifecycle contract", () => {
     lifecycle?.initializeBrokerageSession;
   const renew: IbkrSessionLifecycleClient["renewBrokerageSession"] | undefined =
     lifecycle?.renewBrokerageSession;
+  type TickleReturnsAuthStatus =
+    IbkrSessionLifecycleClient["tickle"] extends () => Promise<AuthStatus> ? true : false;
+  const tickleReturnsAuthStatus: TickleReturnsAuthStatus = true;
 
   assert.equal(evidence.connected, null);
+  assert.equal(tickleReturnsAuthStatus, true);
   assert.equal(initialize, undefined);
   assert.equal(renew, undefined);
 });

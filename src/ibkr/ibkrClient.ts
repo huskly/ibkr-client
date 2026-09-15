@@ -826,9 +826,17 @@ export class IbkrClient
     };
   }
 
-  async tickle(): Promise<void> {
+  async tickle(): Promise<AuthStatus> {
     this.assertOpen();
-    await this.req<unknown>({ path: "tickle", method: "POST" });
+    const response = await this.req<unknown>({ path: "tickle", method: "POST" });
+    const iserver = isUnknownRecord(response) ? response["iserver"] : null;
+    const authStatus = isUnknownRecord(iserver) ? iserver["authStatus"] : null;
+    const status = isUnknownRecord(authStatus) ? authStatus : {};
+    return {
+      authenticated: this.booleanOrNull(status["authenticated"]),
+      competing: this.booleanOrNull(status["competing"]),
+      connected: this.booleanOrNull(status["connected"]),
+    };
   }
 
   async logout(): Promise<void> {

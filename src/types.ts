@@ -30,7 +30,7 @@ export interface IbkrSessionLifecycleClient {
   initializeBrokerageSession(input: { compete: boolean; publish: boolean }): Promise<void>;
   renewBrokerageSession(input: { compete: false; publish: boolean }): Promise<void>;
   getSessionEvidence(): Promise<IbkrSessionEvidence>;
-  tickle(): Promise<void>;
+  tickle(): Promise<AuthStatus>;
   logout(): Promise<void>;
   close(): Promise<void>;
 }
