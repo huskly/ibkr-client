@@ -191,6 +191,51 @@ void test("auth status and trading diagnostics preserve unknown safety evidence"
   });
 });
 
+void test("tickle preserves explicit false and malformed authentication evidence", async () => {
+  const client = new LifecycleClient(() => ({
+    iserver: {
+      authStatus: { authenticated: false, competing: "false", connected: true },
+    },
+  }));
+
+  assert.deepEqual(await client.tickle(), {
+    authenticated: false,
+    competing: null,
+    connected: true,
+  });
+});
+
+void test("tickle returns unknown evidence when the response has no iserver object", async () => {
+  const client = new LifecycleClient(() => ({}));
+
+  assert.deepEqual(await client.tickle(), {
+    authenticated: null,
+    competing: null,
+    connected: null,
+  });
+});
+
+void test("tickle preserves explicit competing-session evidence", async () => {
+  const client = new LifecycleClient(() => ({
+    iserver: { authStatus: { authenticated: true, competing: true, connected: false } },
+  }));
+
+  assert.deepEqual(await client.tickle(), {
+    authenticated: true,
+    competing: true,
+    connected: false,
+  });
+});
+
+void test("tickle still rejects an HTTP failure", async () => {
+  const failure = Object.assign(new Error("Response status 503: unavailable"), { status: 503 });
+  const client = new LifecycleClient(() => {
+    throw failure;
+  });
+
+  await assert.rejects(client.tickle(), IbkrHttpError);
+});
+
 void test("tickle is a safe read and logout is a single idempotent broker attempt", async () => {
   let logoutCalls = 0;
   const failure = Object.assign(new Error("Response status 500: failed"), { status: 500 });

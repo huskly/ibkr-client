@@ -251,7 +251,7 @@ Use the explicit session lifecycle API for gateways and long-running processes:
 ```ts
 await client.initializeBrokerageSession({ compete: false, publish: true });
 const evidence = await client.getSessionEvidence();
-await client.tickle();
+const tickleEvidence = await client.tickle();
 await client.renewBrokerageSession({ compete: false, publish: true });
 await client.logout();
 await client.close();
@@ -259,8 +259,10 @@ await client.close();
 
 Initialization and renewal pass both flags to IBKR once. Both flags must be exact booleans, and
 renewal only accepts `compete: false`. Invalid or missing flags fail before raw client access.
-`tickle()` is a safe read and can use the read scheduler retry policy. `logout()` makes at most one
-broker request for each client, including when that request fails. `close()` only closes local
+`tickle()` is a safe read and can use the read scheduler retry policy. It returns the authentication,
+connection, and competition evidence from the tickle response. Missing or malformed evidence stays
+`null`. `logout()` makes at most one broker request for each client, including when that request
+fails. `close()` only closes local
 admission. It does not invent a transport close operation and does not log out implicitly. After
 `close()`, the client rejects new lifecycle operations and broker requests.
 
