@@ -332,6 +332,48 @@ void test("exact lifecycle reads retain an evicted combo's partial-fill economic
   );
 });
 
+void test("exact lifecycle preserves broker-stated scalar single-leg identity", async () => {
+  const readLifecycle = async (identity: Record<string, unknown>) => {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/accounts") {
+        return { accounts: ["U123"], selectedAccount: "U123" };
+      }
+      if (input.path === "iserver/account/order/status/777") {
+        return {
+          account: "U123",
+          orderId: "777",
+          status: "Filled",
+          totalSize: 1,
+          filledQuantity: 1,
+          remainingQuantity: 0,
+          ...identity,
+        };
+      }
+      throw new Error(`Unexpected request ${input.path}`);
+    });
+    return client.getDerivativeOrderStatus("U123", "777");
+  };
+
+  const scalarSell = await readLifecycle({ conid: 1001, side: "SELL" });
+  const scalarBuy = await readLifecycle({ conid: 1001, side: "BUY" });
+  const comboWithScalar = await readLifecycle({
+    conid: 1001,
+    side: "SELL",
+    conidex: "1000;;;1001/-1,1002/1",
+  });
+  const invalidScalar = await readLifecycle({ conid: -1, side: "BUY" });
+  const unknownSide = await readLifecycle({ conid: 1001, side: "UNKNOWN" });
+
+  assert.deepEqual(scalarSell.legs, [{ conid: 1001, ratio: -1 }]);
+  assert.deepEqual(scalarBuy.legs, [{ conid: 1001, ratio: 1 }]);
+  assert.deepEqual(comboWithScalar.legs, [
+    { conid: 1001, ratio: -1 },
+    { conid: 1002, ratio: 1 },
+  ]);
+  assert.deepEqual(invalidScalar.legs, []);
+  assert.deepEqual(unknownSide.legs, []);
+});
+
 void test("lifecycle derives the remainder when IBKR reports only total and filled sizes", async () => {
   // `iserver/account/order/status/{orderId}` carries no remaining-quantity field at all. This is
   // the real payload shape of a resting combo (BAG) limit order on a paper account.
