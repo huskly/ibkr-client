@@ -4296,10 +4296,10 @@ export class IbkrClient
   }
 
   private derivativeLifecycleLegs(order: IbkrLiveOrder): DerivativeOrderLifecycle["legs"] {
-    const combo = this.parseComboLegs(order.conidex);
+    const combo = typeof order.conidex === "string" ? this.parseComboLegs(order.conidex) : [];
     if (combo.length > 0) return combo;
     if (!Number.isSafeInteger(order.conid) || Number(order.conid) <= 0) return [];
-    const side = order.side?.trim().toUpperCase();
+    const side = typeof order.side === "string" ? order.side.trim().toUpperCase() : undefined;
     const ratio =
       side === "B" || side === "BUY" || side === "BOT"
         ? 1

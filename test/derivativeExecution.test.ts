@@ -363,6 +363,8 @@ void test("exact lifecycle preserves broker-stated scalar single-leg identity", 
   });
   const invalidScalar = await readLifecycle({ conid: -1, side: "BUY" });
   const unknownSide = await readLifecycle({ conid: 1001, side: "UNKNOWN" });
+  const nonStringCombo = await readLifecycle({ conid: 1001, side: "BUY", conidex: 1000 });
+  const nonStringSide = await readLifecycle({ conid: 1001, side: { value: "BUY" } });
 
   assert.deepEqual(scalarSell.legs, [{ conid: 1001, ratio: -1 }]);
   assert.deepEqual(scalarBuy.legs, [{ conid: 1001, ratio: 1 }]);
@@ -372,6 +374,8 @@ void test("exact lifecycle preserves broker-stated scalar single-leg identity", 
   ]);
   assert.deepEqual(invalidScalar.legs, []);
   assert.deepEqual(unknownSide.legs, []);
+  assert.deepEqual(nonStringCombo.legs, [{ conid: 1001, ratio: 1 }]);
+  assert.deepEqual(nonStringSide.legs, []);
 });
 
 void test("lifecycle derives the remainder when IBKR reports only total and filled sizes", async () => {
