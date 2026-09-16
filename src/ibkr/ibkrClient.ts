@@ -4295,6 +4295,20 @@ export class IbkrClient
     return typeof status === "number" && Number.isFinite(status) && status >= 400;
   }
 
+  private derivativeLifecycleLegs(order: IbkrLiveOrder): DerivativeOrderLifecycle["legs"] {
+    const combo = typeof order.conidex === "string" ? this.parseComboLegs(order.conidex) : [];
+    if (combo.length > 0) return combo;
+    if (!Number.isSafeInteger(order.conid) || Number(order.conid) <= 0) return [];
+    const side = typeof order.side === "string" ? order.side.trim().toUpperCase() : undefined;
+    const ratio =
+      side === "B" || side === "BUY" || side === "BOT"
+        ? 1
+        : side === "S" || side === "SELL" || side === "SLD"
+          ? -1
+          : null;
+    return ratio === null ? [] : [{ conid: Number(order.conid), ratio }];
+  }
+
   private normalizeDerivativeOrderLifecycle(
     accountId: string,
     orderId: string,
@@ -4355,7 +4369,7 @@ export class IbkrClient
         typeof order.commissionAndFees === "number"
           ? order.commissionAndFees
           : this.whatIfNumber(order.commissionAndFees),
-      legs: this.parseComboLegs(order.conidex),
+      legs: this.derivativeLifecycleLegs(order),
       updatedAt: this.parseOrderTime(order)?.toISOString() ?? null,
     };
   }
