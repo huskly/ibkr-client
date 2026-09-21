@@ -3301,14 +3301,7 @@ export class IbkrClient
     if (!Number.isSafeInteger(fields["quantity"]) || (fields["quantity"] as number) <= 0) {
       throw new Error("Equity order quantity must be a positive integer");
     }
-    if (
-      fields["orderType"] !== "LMT" ||
-      typeof fields["limit"] !== "number" ||
-      !Number.isFinite(fields["limit"]) ||
-      fields["limit"] <= 0
-    ) {
-      throw new Error("Equity LIMIT order requires a positive limit price");
-    }
+    this.validateEquityOrderTerms(fields);
     if (fields["tif"] !== "DAY" && fields["tif"] !== "GTC") {
       throw new Error("Equity order TIF must be DAY or GTC");
     }
@@ -3317,10 +3310,45 @@ export class IbkrClient
     }
   }
 
+  /**
+   * Rejects any price combination outside the `LMT | STP` union. A `LMT` order carries only a
+   * limit price; a `STP` order carries only a stop price. Both must be positive finite numbers.
+   */
+  private validateEquityOrderTerms(fields: Record<string, unknown>): void {
+    const orderType = fields["orderType"];
+    if (orderType !== "LMT" && orderType !== "STP") {
+      throw new Error("Equity order type must be LMT or STP");
+    }
+    if (orderType === "LMT") {
+      if (!this.isPositiveFinite(fields["limit"])) {
+        throw new Error("Equity LIMIT order requires a positive limit price");
+      }
+      if (fields["stopPrice"] !== undefined) {
+        throw new Error("Equity LIMIT order must not carry a stop price");
+      }
+      return;
+    }
+    if (!this.isPositiveFinite(fields["stopPrice"])) {
+      throw new Error("Equity STOP order requires a positive stop price");
+    }
+    if (fields["limit"] !== undefined) {
+      throw new Error("Equity STOP order must not carry a limit price");
+    }
+  }
+
+  private isPositiveFinite(value: unknown): value is number {
+    return typeof value === "number" && Number.isFinite(value) && value > 0;
+  }
+
+  /**
+   * IBKR places both a LIMIT price and a plain STOP trigger price in the `price` field of the
+   * order ticket; `auxPrice` is only for stop-limit and trailing variants, which this client
+   * does not support for equities.
+   */
   private equityOrderTicket(request: EquityOrderPreviewRequest): {
     acctId: string;
     conid: number;
-    orderType: "LMT";
+    orderType: "LMT" | "STP";
     side: "BUY" | "SELL";
     price: number;
     tif: "DAY" | "GTC";
@@ -3330,9 +3358,9 @@ export class IbkrClient
     return {
       acctId: request.accountId,
       conid: request.contract.conid,
-      orderType: "LMT",
+      orderType: request.orderType,
       side: request.side,
-      price: request.limit,
+      price: request.orderType === "LMT" ? request.limit : request.stopPrice,
       tif: request.tif,
       quantity: request.quantity,
       outsideRTH: request.session === "OVERNIGHT",

@@ -549,10 +549,29 @@ Permission metadata is diagnostic only; the What-If response remains authoritati
 
 `resolveEquityContract(symbol)` must produce the exact contract before an order can be previewed.
 `previewEquityOrder(...)` sends one What-If request and always returns `submitted: false`.
-`submitEquityOrder(...)` accepts only BUY or SELL limit orders for positive whole-share quantities
-and requires a stable client order ID. `cancelEquityOrder(...)` sends one cancellation request. These
-broker writes never retry automatically. Warning, lifecycle, and recovery evidence use the same
-strict normalization as single derivative orders.
+`submitEquityOrder(...)` accepts only BUY or SELL LIMIT or STOP orders for positive whole-share
+quantities and requires a stable client order ID. `cancelEquityOrder(...)` sends one cancellation
+request. These broker writes never retry automatically. Warning, lifecycle, and recovery evidence
+use the same strict normalization as single derivative orders.
+
+LIMIT and STOP requests are discriminated by `orderType`. A `LMT` request requires only a positive
+`limit`. A `STP` request requires only a positive `stopPrice`, and IBKR places it as a native
+stop-market order. A request that carries the other price field, a zero, negative, or non-finite
+price, or an unknown order type is rejected before any broker request.
+
+```ts
+const contract = await client.resolveEquityContract("AAPL");
+const preview = await client.previewEquityOrder({
+  accountId: "U123",
+  contract,
+  side: "SELL",
+  quantity: 10,
+  orderType: "STP",
+  stopPrice: 240,
+  tif: "GTC",
+  session: "REGULAR",
+});
+```
 
 ### Guarded derivative order execution
 

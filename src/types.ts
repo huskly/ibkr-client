@@ -524,22 +524,29 @@ export interface EquityContract {
 
 export type EquityOrderSide = "BUY" | "SELL";
 
-/** One non-submitting US equity limit-order What-If request. */
-export interface EquityOrderPreviewRequest {
+/** Account, contract, side, size, duration, and session fields shared by every equity order. */
+export interface EquityOrderFields {
   accountId: string;
   contract: EquityContract;
   side: EquityOrderSide;
   quantity: number;
-  orderType: "LMT";
-  limit: number;
   tif: "DAY" | "GTC";
   session: "REGULAR" | "OVERNIGHT";
 }
 
-/** One live US equity limit-order request with caller-stable identity. */
-export interface EquityOrderRequest extends EquityOrderPreviewRequest {
-  clientOrderId: string;
-}
+/**
+ * Economic terms of one US equity order. `LMT` requires only a positive `limit`. `STP` is a
+ * native IBKR stop-market order and requires only a positive `stopPrice`. The other price field
+ * is not allowed on either member.
+ */
+export type EquityOrderTerms =
+  { orderType: "LMT"; limit: number } | { orderType: "STP"; stopPrice: number };
+
+/** One non-submitting US equity LIMIT or STOP What-If request. */
+export type EquityOrderPreviewRequest = EquityOrderFields & EquityOrderTerms;
+
+/** One live US equity LIMIT or STOP request with caller-stable identity. */
+export type EquityOrderRequest = EquityOrderPreviewRequest & { clientOrderId: string };
 
 export type EquityOrderPreviewResult = DerivativeComboPreviewResult;
 

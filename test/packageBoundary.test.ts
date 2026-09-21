@@ -275,12 +275,29 @@ void test("public equity order API exposes preview and one identified submission
     session: "REGULAR",
   };
   const order: EquityOrderRequest = { ...input, clientOrderId: "equity-1" };
+  const stopInput: EquityOrderPreviewRequest = {
+    accountId: input.accountId,
+    contract: input.contract,
+    side: "SELL",
+    quantity: input.quantity,
+    orderType: "STP",
+    stopPrice: 40.15,
+    tif: "GTC",
+    session: "OVERNIGHT",
+  };
+  const stopOrder: EquityOrderRequest = { ...stopInput, clientOrderId: "equity-stop-1" };
+  const priceOf = (terms: EquityOrderPreviewRequest): number =>
+    terms.orderType === "LMT" ? terms.limit : terms.stopPrice;
   const previewMethod: IbkrClient["previewEquityOrder"] | undefined = undefined;
   const submitMethod: IbkrClient["submitEquityOrder"] | undefined = undefined;
   const cancelMethod: IbkrClient["cancelEquityOrder"] | undefined = undefined;
 
   assert.equal(preview?.submitted ?? false, false);
   assert.equal(order.clientOrderId, "equity-1");
+  assert.equal(stopOrder.clientOrderId, "equity-stop-1");
+  assert.equal(stopOrder.orderType, "STP");
+  assert.equal(priceOf(input), 44.41);
+  assert.equal(priceOf(stopInput), 40.15);
   assert.equal(previewMethod, undefined);
   assert.equal(submitMethod, undefined);
   assert.equal(cancelMethod, undefined);

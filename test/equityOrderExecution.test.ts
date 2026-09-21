@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { IbkrClient, type EquityContract, type EquityOrderRequest } from "../src/index.js";
+import {
+  IbkrClient,
+  type EquityContract,
+  type EquityOrderPreviewRequest,
+  type EquityOrderRequest,
+} from "../src/index.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
 interface RequestInput {
@@ -42,7 +47,10 @@ const contract: EquityContract = {
   currency: "USD",
 };
 
-function request(overrides: Partial<EquityOrderRequest> = {}): EquityOrderRequest {
+type EquityLimitOrderRequest = Extract<EquityOrderRequest, { orderType: "LMT" }>;
+type EquityStopOrderRequest = Extract<EquityOrderRequest, { orderType: "STP" }>;
+
+function request(overrides: Partial<EquityLimitOrderRequest> = {}): EquityOrderRequest {
   return {
     accountId: "U123",
     contract,
@@ -55,6 +63,27 @@ function request(overrides: Partial<EquityOrderRequest> = {}): EquityOrderReques
     clientOrderId: "huskly-equity-1",
     ...overrides,
   };
+}
+
+function stopRequest(overrides: Partial<EquityStopOrderRequest> = {}): EquityOrderRequest {
+  return {
+    accountId: "U123",
+    contract,
+    side: "SELL",
+    quantity: 25,
+    orderType: "STP",
+    stopPrice: 40.15,
+    tif: "GTC",
+    session: "OVERNIGHT",
+    clientOrderId: "huskly-equity-stop-1",
+    ...overrides,
+  };
+}
+
+/** Builds a request whose shape is intentionally outside the public union. */
+function invalidRequest(overrides: Record<string, unknown>): EquityOrderRequest {
+  const { orderType: _orderType, limit: _limit, ...shared } = request() as EquityLimitOrderRequest;
+  return { ...shared, ...overrides } as unknown as EquityOrderRequest;
 }
 
 function session(input: RequestInput): unknown {
@@ -105,6 +134,147 @@ void test("equity What-If sends one non-submitting limit order", async () => {
     ],
   });
   assert.equal(api.calls.filter(({ path }) => path.endsWith("/orders/whatif")).length, 1);
+});
+
+void test("equity STOP What-If sends one native stop-market order for BUY and SELL", async () => {
+  for (const side of ["BUY", "SELL"] as const) {
+    const api = new FakeIbkrClient((input) =>
+      input.path === "iserver/account/U123/orders/whatif" ? whatIf : session(input)
+    );
+    const { clientOrderId: _clientOrderId, ...preview } = stopRequest({ side });
+    const result = await api.previewEquityOrder(preview);
+    assert.equal(result.accepted, true);
+    assert.equal(result.submitted, false);
+    const whatIfCalls = api.calls.filter(({ path }) => path.endsWith("/orders/whatif"));
+    assert.equal(whatIfCalls.length, 1);
+    assert.equal(whatIfCalls[0]?.method, "POST");
+    assert.deepEqual(whatIfCalls[0]?.data, {
+      orders: [
+        {
+          acctId: "U123",
+          conid: 320227571,
+          orderType: "STP",
+          side,
+          price: 40.15,
+          tif: "GTC",
+          quantity: 25,
+          outsideRTH: true,
+        },
+      ],
+    });
+    assert.equal(
+      api.calls.some(({ path }) => path === "iserver/account/U123/orders"),
+      false
+    );
+  }
+});
+
+void test("equity STOP submission sends the same native mapping with a stable client order ID", async () => {
+  for (const side of ["BUY", "SELL"] as const) {
+    const api = new FakeIbkrClient((input) =>
+      input.path === "iserver/account/U123/orders"
+        ? [{ order_id: "9", order_status: "PreSubmitted" }]
+        : session(input)
+    );
+    const result = await api.submitEquityOrder(
+      stopRequest({ side, tif: "DAY", session: "REGULAR" })
+    );
+    assert.equal(result.state, "accepted");
+    const writes = api.calls.filter(({ path }) => path === "iserver/account/U123/orders");
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0]?.data, {
+      orders: [
+        {
+          acctId: "U123",
+          conid: 320227571,
+          orderType: "STP",
+          side,
+          price: 40.15,
+          tif: "DAY",
+          quantity: 25,
+          outsideRTH: false,
+          cOID: "huskly-equity-stop-1",
+        },
+      ],
+    });
+    assert.equal(
+      api.calls.some(({ path }) => path.endsWith("/orders/whatif")),
+      false
+    );
+  }
+});
+
+void test("equity order validation rejects invalid order terms before any broker request", async () => {
+  const cases: { name: string; value: EquityOrderRequest; message: RegExp }[] = [
+    {
+      name: "unknown order type",
+      value: invalidRequest({ orderType: "MKT" }),
+      message: /Equity order type must be LMT or STP/,
+    },
+    {
+      name: "LMT without limit",
+      value: invalidRequest({ orderType: "LMT" }),
+      message: /Equity LIMIT order requires a positive limit price/,
+    },
+    {
+      name: "STP without stop price",
+      value: invalidRequest({ orderType: "STP" }),
+      message: /Equity STOP order requires a positive stop price/,
+    },
+    {
+      name: "LMT with stop price",
+      value: invalidRequest({ orderType: "LMT", limit: 44.41, stopPrice: 40 }),
+      message: /Equity LIMIT order must not carry a stop price/,
+    },
+    {
+      name: "STP with limit",
+      value: invalidRequest({ orderType: "STP", stopPrice: 40, limit: 44.41 }),
+      message: /Equity STOP order must not carry a limit price/,
+    },
+    {
+      name: "STP zero stop price",
+      value: stopRequest({ stopPrice: 0 }),
+      message: /Equity STOP order requires a positive stop price/,
+    },
+    {
+      name: "STP negative stop price",
+      value: stopRequest({ stopPrice: -40 }),
+      message: /Equity STOP order requires a positive stop price/,
+    },
+    {
+      name: "STP NaN stop price",
+      value: stopRequest({ stopPrice: Number.NaN }),
+      message: /Equity STOP order requires a positive stop price/,
+    },
+    {
+      name: "STP infinite stop price",
+      value: stopRequest({ stopPrice: Number.POSITIVE_INFINITY }),
+      message: /Equity STOP order requires a positive stop price/,
+    },
+    {
+      name: "LMT negative limit",
+      value: request({ limit: -1 }),
+      message: /Equity LIMIT order requires a positive limit price/,
+    },
+    {
+      name: "LMT non-finite limit",
+      value: request({ limit: Number.NaN }),
+      message: /Equity LIMIT order requires a positive limit price/,
+    },
+  ];
+  for (const { name, value, message } of cases) {
+    const api = new FakeIbkrClient(() => {
+      throw new Error(`broker must not be called for ${name}`);
+    });
+    const { clientOrderId: _clientOrderId, ...preview } = value;
+    await assert.rejects(() => api.submitEquityOrder(value), message, name);
+    await assert.rejects(
+      () => api.previewEquityOrder(preview as EquityOrderPreviewRequest),
+      message,
+      name
+    );
+    assert.equal(api.calls.length, 0, name);
+  }
 });
 
 void test("equity BUY and SELL submission use one exact broker write", async () => {
