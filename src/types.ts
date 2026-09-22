@@ -425,6 +425,8 @@ export interface BrokerOrder {
   status?: string;
   orderType?: string;
   complexOrderStrategyType?: string;
+  tif?: string;
+  session?: "REGULAR" | "OVERNIGHT" | "UNKNOWN";
   quantity?: number;
   filledQuantity?: number;
   remainingQuantity?: number;

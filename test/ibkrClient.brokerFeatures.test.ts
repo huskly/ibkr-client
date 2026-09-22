@@ -377,3 +377,42 @@ void test("fetchOrders treats every active IBKR status as WORKING", async () => 
   );
   assert.deepEqual(client.calls.find(({ path }) => path === "iserver/account/orders")?.params, {});
 });
+
+void test("fetchOrders preserves time in force and normalizes the trading session", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "portfolio/accounts") return [{ accountId: "U123" }];
+    if (input.path === "iserver/accounts") {
+      return { accounts: ["U123"], selectedAccount: "U123" };
+    }
+    if (input.path === "iserver/account/orders") {
+      return {
+        orders: [
+          { account: "U123", orderId: 1, status: "Submitted", tif: "DAY", outsideRTH: false },
+          {
+            account: "U123",
+            orderId: 2,
+            status: "Submitted",
+            timeInForce: "GTC",
+            outside_rth: true,
+          },
+          { account: "U123", orderId: 3, status: "Submitted", tif: "IOC" },
+        ],
+      };
+    }
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const result = await client.fetchOrders({
+    fromEnteredTime: new Date("2026-01-01T00:00:00Z"),
+    toEnteredTime: new Date("2026-12-31T23:59:59Z"),
+  });
+
+  assert.deepEqual(
+    result[0]?.orders.map(({ tif, session }) => ({ tif, session })),
+    [
+      { tif: "DAY", session: "REGULAR" },
+      { tif: "GTC", session: "OVERNIGHT" },
+      { tif: "IOC", session: "UNKNOWN" },
+    ]
+  );
+});

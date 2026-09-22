@@ -7000,12 +7000,18 @@ export class IbkrClient
     const orderId = order.order_id ?? order.orderId;
     const enteredTime = this.parseOrderTime(order)?.toISOString();
     const orderType = this.normalizeOrderType(order.order_type ?? order.orderType);
+    const tif = this.canonicalTimeInForce(order.tif ?? order.timeInForce);
+    const outsideRth = order.outsideRTH ?? order.outside_rth;
+    const session =
+      outsideRth === true ? "OVERNIGHT" : outsideRth === false ? "REGULAR" : "UNKNOWN";
 
     return {
       ...(orderId === undefined ? {} : { orderId }),
       ...(enteredTime === undefined ? {} : { enteredTime }),
       ...(status === undefined ? {} : { status }),
       ...(orderType === undefined ? {} : { orderType }),
+      ...(tif === undefined ? {} : { tif }),
+      session,
       ...(quantity === undefined ? {} : { quantity }),
       ...(filledQuantity === undefined ? {} : { filledQuantity }),
       ...(remainingQuantity === undefined ? {} : { remainingQuantity }),
