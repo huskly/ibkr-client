@@ -242,7 +242,13 @@ validated at runtime. Its broker-neutral account API includes:
   closed as a malformed response. An error object is never an empty successful search.
 - `fetchTransactionHistory()` for normalized portfolio transactions.
 - `fetchOrders()` for normalized live orders, including aggregate `WORKING`
-  matching across IBKR's active order states.
+  matching across IBKR's active order states. Each leg keeps its broker contract ID,
+  signed ratio, and broker-stated asset class when available. A combo leg has no
+  asset class until the caller resolves its exact contract ID.
+- `getOrderContractQuotes(brokerIds)` reads bounded market snapshots by exact
+  contract ID. It returns nullable bid, ask, and mark prices with market-data
+  availability and last-change time. A missing snapshot has an unavailable result.
+  Do not treat a quote for an underlying symbol as a quote for an option contract.
 
 ### Brokerage session lifecycle
 

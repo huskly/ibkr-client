@@ -416,3 +416,110 @@ void test("fetchOrders preserves time in force and normalizes the trading sessio
     ]
   );
 });
+
+void test("fetchOrders preserves exact stock and signed option leg identities", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "portfolio/accounts") return [{ accountId: "U123" }];
+    if (input.path === "iserver/accounts") return { accounts: ["U123"], selectedAccount: "U123" };
+    if (input.path === "iserver/account/orders")
+      return {
+        orders: [
+          {
+            account: "U123",
+            orderId: 1,
+            status: "Submitted",
+            side: "SELL",
+            secType: "STK",
+            conid: 100,
+            symbol: "IBIT",
+          },
+          {
+            account: "U123",
+            orderId: 2,
+            status: "Submitted",
+            side: "BUY",
+            secType: "OPT",
+            conid: 200,
+            symbol: "IBIT",
+          },
+          {
+            account: "U123",
+            orderId: 3,
+            status: "Submitted",
+            side: "BUY",
+            secType: "BAG",
+            conidex: "28812380;;;301/1,302/-2",
+            symbol: "SPX",
+          },
+          {
+            account: "U123",
+            orderId: 4,
+            status: "Submitted",
+            side: "BUY",
+            secType: "BAG",
+            conidex: "28812380;;;bad",
+            symbol: "SPX",
+          },
+        ],
+      };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+  const result = await client.fetchOrders({
+    fromEnteredTime: new Date("2026-01-01T00:00:00Z"),
+    toEnteredTime: new Date("2026-12-31T23:59:59Z"),
+  });
+  const orders = result[0]?.orders ?? [];
+  assert.deepEqual(
+    orders[0]?.orderLegCollection?.map(({ brokerId, assetClass, ratio }) => ({
+      brokerId,
+      assetClass,
+      ratio,
+    })),
+    [{ brokerId: 100, assetClass: "STK", ratio: -1 }]
+  );
+  assert.deepEqual(
+    orders[1]?.orderLegCollection?.map(({ brokerId, assetClass, ratio }) => ({
+      brokerId,
+      assetClass,
+      ratio,
+    })),
+    [{ brokerId: 200, assetClass: "OPT", ratio: 1 }]
+  );
+  assert.deepEqual(
+    orders[2]?.orderLegCollection?.map(({ brokerId, assetClass, ratio }) => ({
+      brokerId,
+      assetClass,
+      ratio,
+    })),
+    [
+      { brokerId: 301, assetClass: null, ratio: 1 },
+      { brokerId: 302, assetClass: null, ratio: -2 },
+    ]
+  );
+  assert.deepEqual(
+    orders[3]?.orderLegCollection?.map(({ brokerId, ratio }) => ({ brokerId, ratio })),
+    [{ brokerId: null, ratio: null }]
+  );
+});
+
+void test("getOrderContractQuotes matches market snapshots by exact contract ID", async () => {
+  const client = new FakeIbkrClient((input) => {
+    assert.equal(input.path, "iserver/marketdata/snapshot");
+    assert.equal(input.params?.["conids"], "100,200,300");
+    return [
+      { conid: 200, "84": "1.00", "86": "1.20", "6509": "D", _updated: 1750000000000 },
+      { conid: 100, "7635": "47.95", "6509": "R" },
+      { conid: 999, "7635": "10000", "6509": "R" },
+    ];
+  });
+  const quotes = await client.getOrderContractQuotes([100, 200, 300]);
+  assert.deepEqual(
+    quotes.map(({ brokerId, mark, availability }) => ({ brokerId, mark, availability })),
+    [
+      { brokerId: 100, mark: 47.95, availability: "live" },
+      { brokerId: 200, mark: 1.1, availability: "delayed" },
+      { brokerId: 300, mark: null, availability: "unavailable" },
+    ]
+  );
+  assert.equal(client.calls.length, 2);
+});

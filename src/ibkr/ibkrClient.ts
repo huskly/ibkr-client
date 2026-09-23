@@ -25,6 +25,7 @@ import type {
   BrokerOrder,
   BrokerOrderLeg,
   BrokerOrdersOptions,
+  OrderContractQuote,
   BrokerPosition,
   BrokerQuote,
   BrokerQuoteOptions,
@@ -2597,6 +2598,55 @@ export class IbkrClient
       currentDayProfitLoss: dayPnl.get(p.conid) ?? 0,
       openProfitLoss: toNumber(p.unrealizedPnl),
     };
+  }
+
+  /** Read bounded market snapshots for exact order-leg IDs without symbol resolution. */
+  async getOrderContractQuotes(brokerIds: readonly number[]): Promise<OrderContractQuote[]> {
+    this.assertOpen();
+    const ids = [...new Set(brokerIds)];
+    if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+      throw new Error("Order quote contract IDs must be positive safe integers");
+    }
+    const quotes: OrderContractQuote[] = [];
+    for (let index = 0; index < ids.length; index += 50) {
+      const batch = ids.slice(index, index + 50);
+      const params = { conids: batch.join(","), fields: DERIVATIVE_QUOTE_FIELDS };
+      await this.req<unknown>({ path: "iserver/marketdata/snapshot", params });
+      await this.wait(2000);
+      const response = await this.req<unknown>({ path: "iserver/marketdata/snapshot", params });
+      if (!Array.isArray(response)) throw new Error("Invalid order contract market snapshots");
+      const byId = new Map<number, IbkrMarketDataSnapshot>();
+      for (const value of response) {
+        if (typeof value !== "object" || value === null || !("conid" in value)) continue;
+        const snapshot = value as IbkrMarketDataSnapshot;
+        if (typeof snapshot.conid === "number" && batch.includes(snapshot.conid)) {
+          byId.set(snapshot.conid, snapshot);
+        }
+      }
+      for (const brokerId of batch) {
+        const snapshot = byId.get(brokerId);
+        const bid = snapshot ? (this.snapshotNumber(snapshot, "84") ?? null) : null;
+        const ask = snapshot ? (this.snapshotNumber(snapshot, "86") ?? null) : null;
+        const rawMark = snapshot ? (this.snapshotNumber(snapshot, "7635") ?? null) : null;
+        const mark =
+          rawMark !== null && rawMark > 0
+            ? rawMark
+            : bid !== null && ask !== null && bid >= 0 && ask > 0 && ask >= bid
+              ? (bid + ask) / 2
+              : null;
+        quotes.push({
+          brokerId,
+          bid,
+          ask,
+          mark,
+          availability: snapshot
+            ? normalizeDerivativeDataAvailability(snapshot["6509"])
+            : "unavailable",
+          timestamp: snapshot ? this.snapshotTimestamp(snapshot) : null,
+        });
+      }
+    }
+    return quotes;
   }
 
   async getQuotes(
@@ -7017,17 +7067,29 @@ export class IbkrClient
       ...(remainingQuantity === undefined ? {} : { remainingQuantity }),
       ...(price === undefined ? {} : { price }),
       ...(stopPrice === undefined ? {} : { stopPrice }),
-      orderLegCollection: [this.normalizeOrderLeg(order, symbol)],
+      orderLegCollection: this.normalizeOrderLegs(order, symbol),
     };
   }
 
-  private normalizeOrderLeg(order: IbkrLiveOrder, symbol: string | undefined): BrokerOrderLeg {
+  private normalizeOrderLegs(order: IbkrLiveOrder, symbol: string | undefined): BrokerOrderLeg[] {
     const fallbackSymbol = symbol ?? (order.conid === undefined ? undefined : String(order.conid));
     const instruction = this.normalizeOrderSide(order.side);
-    return {
+    const uncertainty: ActiveDerivativeOrderUncertainty[] = [];
+    const members = this.normalizeActiveDerivativeLegs(order, null, uncertainty);
+    const statedClass = (order.secType ?? order.assetClass)?.trim().toUpperCase();
+    const assetClass =
+      members.length === 1 &&
+      statedClass !== "BAG" &&
+      (statedClass === "STK" || statedClass === "OPT" || statedClass === "FOP")
+        ? statedClass
+        : null;
+    return members.map((member) => ({
       ...(instruction === undefined ? {} : { instruction }),
       instrument: { ...(fallbackSymbol === undefined ? {} : { symbol: fallbackSymbol }) },
-    };
+      brokerId: member.conid,
+      ratio: member.ratio,
+      assetClass,
+    }));
   }
 
   private normalizeOrderStatus(status: string | undefined): string | undefined {
