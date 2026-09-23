@@ -414,9 +414,25 @@ export interface BrokerTransactionHistory {
   transactions: BrokerTransaction[];
 }
 
+/** One market-data snapshot linked to the exact order-leg contract ID. */
+export interface OrderContractQuote {
+  readonly brokerId: number;
+  readonly bid: number | null;
+  readonly ask: number | null;
+  readonly mark: number | null;
+  readonly availability: MarketDataAvailability;
+  readonly timestamp: string | null;
+}
+
 export interface BrokerOrderLeg {
   instrument?: { symbol?: string };
   instruction?: string;
+  /** Exact leg contract ID, or null when the broker did not identify it. */
+  brokerId?: number | null;
+  /** Positive buys; negative sells. Null if the direction is not known. */
+  ratio?: number | null;
+  /** Broker-stated single-contract class; combo members need contract resolution. */
+  assetClass?: "STK" | "OPT" | "FOP" | null;
 }
 
 export interface BrokerOrder {
@@ -1409,6 +1425,7 @@ export interface BrokerClient {
     requests: readonly BrokerQuoteRequest[],
     options?: BrokerQuoteOptions
   ): Promise<Record<string, BrokerQuote>>;
+  getOrderContractQuotes(brokerIds: readonly number[]): Promise<OrderContractQuote[]>;
   searchInstruments(
     symbol: string,
     projection?: BrokerInstrumentSearchProjection
