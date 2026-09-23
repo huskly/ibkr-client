@@ -104,11 +104,13 @@ export function flexStatementsOf(
       statementAttributes: attributes(statement),
       cashTransactions: section(statement, "CashTransactions", "CashTransaction"),
       transfers: section(statement, "Transfers", "Transfer"),
+      trades: section(statement, "Trades", "Trade"),
+      optionEae: section(statement, "OptionEAE", "OptionEAE"),
     };
   });
 }
 
-/** Parse cash and transfer sections, not an assertion that a query is unfiltered. */
+/** Parse supported raw sections, not an assertion that a query is unfiltered. */
 export function parseFlexStatement(xml: string): readonly FlexStatementEvidence[] {
   return flexStatementsOf(parseFlexDocument(xml));
 }

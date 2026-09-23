@@ -13,6 +13,8 @@ export interface FlexStatementEvidence {
   /** Null means absent; an explicit empty section is an empty array. */
   readonly cashTransactions: readonly Readonly<Record<string, string>>[] | null;
   readonly transfers: readonly Readonly<Record<string, string>>[] | null;
+  readonly trades: readonly Readonly<Record<string, string>>[] | null;
+  readonly optionEae: readonly Readonly<Record<string, string>>[] | null;
 }
 
 export type FlexStatementResult =
