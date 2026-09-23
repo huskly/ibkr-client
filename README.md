@@ -105,12 +105,14 @@ if (result.status === "pending") {
 ```
 
 Create a Flex Web Service token and an Activity Flex Query in Client Portal first.
-Use an unfiltered query with detailed Cash Transactions and Transfers sections,
-all cash-transaction types, account identity, transaction identity, source amount,
-currency, date/time, and statement date range. Retain the query's time-zone and
-date/time format settings. A query that omits a section, filters rows, aggregates
-transactions, or reports only trade confirmations cannot prove cash-flow coverage.
-The client does not inspect the saved query's configuration or certify completeness.
+Select the sections for the evidence that your consumer needs. For cash-flow coverage,
+include detailed Cash Transactions and Transfers, all cash-transaction types, account
+identity, transaction identity, source amount, currency, date/time, and the statement
+date range. For option expiration, assignment, and exercise evidence, include Trades
+at the execution level of detail and Option Exercises, Assignments and Expirations.
+Retain the query's time-zone and date/time format settings. A section that the saved
+query does not include is `null`. The client does not inspect the saved query's
+configuration or certify completeness.
 
 Each method makes one GET request to the fixed documented HTTPS host. It ignores
 any URL returned by generation, refuses redirects, and uses a 30-second deadline
@@ -123,8 +125,9 @@ Errors omit private response text and token-bearing URLs, including error causes
 Never log tokens, request URLs, reference codes, or raw statement evidence.
 
 `parseFlexStatement(xml)` is also exported for an already retrieved XML report.
-Each result preserves statement attributes and CashTransaction/Transfer attributes
-as strings. Missing sections are `null`; explicitly empty sections are `[]`.
+Each result preserves statement attributes and CashTransaction, Transfer, Trade, and
+OptionEAE attributes as strings. Missing sections are `null`; explicitly empty
+sections are `[]`. The client does not normalize or infer trade or option-event data.
 Missing currency or time fields are not inferred. XML entities such as `&amp;`
 are decoded, but DTD and entity declarations are refused. Malformed structures,
 repeated target sections, unexpected target rows, and inconsistent stated counts

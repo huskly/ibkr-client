@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { parseFlexStatement, type FlexStatementEvidence } from "../src/index.js";
 
@@ -37,6 +38,85 @@ void test("statement attributes and detailed cash rows remain source strings", (
   assert.equal(rows[0]?.cashTransactions?.[1]?.["newField"], "kept");
   assert.deepEqual(rows[0]?.transfers, []);
   assert.equal("complete" in (rows[0] ?? {}), false);
+});
+
+void test("Trades and identically named OptionEAE rows remain raw source attributes", () => {
+  const fixture = readFileSync(
+    new URL("./fixtures/flex-option-events.xml", import.meta.url),
+    "utf8"
+  );
+  const [row] = parseFlexStatement(fixture);
+
+  assert.equal(row?.trades?.length, 3);
+  assert.deepEqual(row?.trades?.[0], {
+    accountId: "SYNTHETIC",
+    assetCategory: "OPT",
+    symbol: "SYNOPT",
+    tradeID: "trade-expiration",
+    transactionID: "transaction-expiration",
+    positionActionID: "position-expiration",
+    relatedTradeID: "",
+    notes: "Ep",
+    openCloseIndicator: "C",
+    buySell: "BUY",
+    quantity: "1",
+    tradePrice: "0",
+    transactionType: "BookTrade",
+    dateTime: "20240315;162000",
+    ibCommission: "0",
+    netCash: "0",
+    origTradeID: "",
+    origTransactionID: "0",
+    levelOfDetail: "EXECUTION",
+  });
+  assert.equal(row?.trades?.[1]?.["positionActionID"], "position-assignment");
+  assert.equal(row?.trades?.[1]?.["buySell"], "BUY");
+  assert.equal(row?.trades?.[1]?.["openCloseIndicator"], "C");
+  assert.equal(row?.trades?.[1]?.["notes"], "A");
+  assert.equal(row?.trades?.[1]?.["quantity"], "1");
+  assert.equal(row?.trades?.[1]?.["tradePrice"], "0");
+  assert.equal(row?.trades?.[1]?.["netCash"], "0");
+  assert.equal(row?.trades?.[2]?.["positionActionID"], "position-assignment");
+  assert.equal(row?.trades?.[2]?.["buySell"], "BUY");
+  assert.equal(row?.trades?.[2]?.["openCloseIndicator"], "O");
+  assert.equal(row?.trades?.[2]?.["notes"], "A");
+  assert.equal(row?.trades?.[2]?.["quantity"], "100");
+  assert.equal(row?.trades?.[2]?.["tradePrice"], "100");
+  assert.equal(row?.trades?.[2]?.["netCash"], "-10000");
+  for (const trade of row?.trades ?? []) {
+    assert.equal(trade["relatedTradeID"], "");
+    assert.equal(trade["origTradeID"], "");
+    assert.equal(trade["origTransactionID"], "0");
+  }
+
+  assert.equal(row?.optionEae?.length, 3);
+  assert.equal(row?.optionEae?.[0]?.["transactionType"], "Expiration");
+  assert.equal(row?.optionEae?.[0]?.["quantity"], "1");
+  assert.equal(row?.optionEae?.[0]?.["tradePrice"], "0");
+  assert.equal(row?.optionEae?.[0]?.["proceeds"], "0");
+  assert.equal(row?.optionEae?.[0]?.["commisionsAndTax"], "0");
+  assert.equal(row?.optionEae?.[1]?.["transactionType"], "Assignment");
+  assert.equal(row?.optionEae?.[1]?.["quantity"], "1");
+  assert.equal(row?.optionEae?.[1]?.["tradePrice"], "0");
+  assert.equal(row?.optionEae?.[1]?.["proceeds"], "0");
+  assert.equal(row?.optionEae?.[2]?.["transactionType"], "Buy");
+  assert.equal(row?.optionEae?.[2]?.["quantity"], "100");
+  assert.equal(row?.optionEae?.[2]?.["tradePrice"], "100");
+  assert.equal(row?.optionEae?.[2]?.["proceeds"], "-10000");
+  assert.equal(row?.optionEae?.[1]?.["tradeID"], row?.trades?.[1]?.["tradeID"]);
+  assert.equal(row?.optionEae?.[2]?.["tradeID"], row?.trades?.[2]?.["tradeID"]);
+});
+
+void test("absent and empty trade evidence sections remain distinct", () => {
+  const [absent] = parseFlexStatement(xml(`<FlexStatement accountId="SYNTHETIC"/>`));
+  assert.equal(absent?.trades, null);
+  assert.equal(absent?.optionEae, null);
+
+  const [empty] = parseFlexStatement(
+    xml(`<FlexStatement accountId="SYNTHETIC"><Trades/><OptionEAE/></FlexStatement>`)
+  );
+  assert.deepEqual(empty?.trades, []);
+  assert.deepEqual(empty?.optionEae, []);
 });
 
 void test("multiple accounts remain separate without inferred identity", () => {

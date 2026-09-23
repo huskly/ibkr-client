@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="synthetic-option-events" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="SYNTHETIC" fromDate="20240315" toDate="20240315">
+      <Trades count="3">
+        <Trade accountId="SYNTHETIC" assetCategory="OPT" symbol="SYNOPT"
+          tradeID="trade-expiration" transactionID="transaction-expiration"
+          positionActionID="position-expiration" relatedTradeID="" notes="Ep"
+          openCloseIndicator="C" buySell="BUY" quantity="1" tradePrice="0"
+          transactionType="BookTrade" dateTime="20240315;162000" ibCommission="0"
+          netCash="0" origTradeID="" origTransactionID="0" levelOfDetail="EXECUTION" />
+        <Trade accountId="SYNTHETIC" assetCategory="OPT" symbol="SYNOPT"
+          tradeID="trade-assignment" transactionID="transaction-assignment"
+          positionActionID="position-assignment" relatedTradeID="" notes="A"
+          openCloseIndicator="C" buySell="BUY" quantity="1" tradePrice="0"
+          transactionType="BookTrade" dateTime="20240315;162001" ibCommission="0"
+          netCash="0" origTradeID="" origTransactionID="0" levelOfDetail="EXECUTION" />
+        <Trade accountId="SYNTHETIC" assetCategory="STK" symbol="SYNTH"
+          tradeID="trade-stock-buy" transactionID="transaction-stock-buy"
+          positionActionID="position-assignment" relatedTradeID="" notes="A"
+          openCloseIndicator="O" buySell="BUY" quantity="100" tradePrice="100"
+          transactionType="BookTrade" dateTime="20240315;162001" ibCommission="-1"
+          netCash="-10000" origTradeID="" origTransactionID="0" levelOfDetail="EXECUTION" />
+      </Trades>
+      <OptionEAE count="3">
+        <OptionEAE accountId="SYNTHETIC" acctAlias="synthetic-alias" assetCategory="OPT"
+          commisionsAndTax="0" conid="100001" costBasis="0" currency="USD"
+          date="20240315" description="SYNOPT expiration" expiry="20240315" multiplier="100"
+          proceeds="0" putCall="P" quantity="1" realizedPnl="0" strike="100"
+          symbol="SYNOPT" tradeID="trade-expiration" tradePrice="0"
+          transactionType="Expiration" underlyingConid="100000" underlyingSymbol="SYNTH"
+          markPrice="0" mtmPnl="0" fxPnl="0" />
+        <OptionEAE accountId="SYNTHETIC" assetCategory="OPT" currency="USD" date="20240315"
+          description="SYNOPT assignment" expiry="20240315" putCall="P" quantity="1"
+          proceeds="0" strike="100" symbol="SYNOPT" tradeID="trade-assignment"
+          tradePrice="0" transactionType="Assignment" underlyingSymbol="SYNTH" />
+        <OptionEAE accountId="SYNTHETIC" assetCategory="STK" currency="USD" date="20240315"
+          description="SYNTH stock leg" proceeds="-10000" quantity="100" symbol="SYNTH"
+          tradeID="trade-stock-buy" tradePrice="100" transactionType="Buy"
+          underlyingSymbol="SYNTH" />
+      </OptionEAE>
+      <CashTransactions />
+      <Transfers />
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
