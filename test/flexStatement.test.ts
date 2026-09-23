@@ -55,26 +55,54 @@ void test("Trades and identically named OptionEAE rows remain raw source attribu
     tradeID: "trade-expiration",
     transactionID: "transaction-expiration",
     positionActionID: "position-expiration",
+    relatedTradeID: "",
     notes: "Ep",
     openCloseIndicator: "C",
-    buySell: "SELL",
+    buySell: "BUY",
+    quantity: "1",
+    tradePrice: "0",
     transactionType: "BookTrade",
     dateTime: "20240315;162000",
     ibCommission: "0",
     netCash: "0",
     origTradeID: "",
-    origTransactionID: "",
+    origTransactionID: "0",
     levelOfDetail: "EXECUTION",
   });
   assert.equal(row?.trades?.[1]?.["positionActionID"], "position-assignment");
+  assert.equal(row?.trades?.[1]?.["buySell"], "BUY");
+  assert.equal(row?.trades?.[1]?.["openCloseIndicator"], "C");
+  assert.equal(row?.trades?.[1]?.["notes"], "A");
+  assert.equal(row?.trades?.[1]?.["quantity"], "1");
+  assert.equal(row?.trades?.[1]?.["tradePrice"], "0");
+  assert.equal(row?.trades?.[1]?.["netCash"], "0");
   assert.equal(row?.trades?.[2]?.["positionActionID"], "position-assignment");
   assert.equal(row?.trades?.[2]?.["buySell"], "BUY");
+  assert.equal(row?.trades?.[2]?.["openCloseIndicator"], "O");
+  assert.equal(row?.trades?.[2]?.["notes"], "A");
+  assert.equal(row?.trades?.[2]?.["quantity"], "100");
+  assert.equal(row?.trades?.[2]?.["tradePrice"], "100");
+  assert.equal(row?.trades?.[2]?.["netCash"], "-10000");
+  for (const trade of row?.trades ?? []) {
+    assert.equal(trade["relatedTradeID"], "");
+    assert.equal(trade["origTradeID"], "");
+    assert.equal(trade["origTransactionID"], "0");
+  }
 
   assert.equal(row?.optionEae?.length, 3);
   assert.equal(row?.optionEae?.[0]?.["transactionType"], "Expiration");
+  assert.equal(row?.optionEae?.[0]?.["quantity"], "1");
+  assert.equal(row?.optionEae?.[0]?.["tradePrice"], "0");
+  assert.equal(row?.optionEae?.[0]?.["proceeds"], "0");
   assert.equal(row?.optionEae?.[0]?.["commisionsAndTax"], "0");
   assert.equal(row?.optionEae?.[1]?.["transactionType"], "Assignment");
+  assert.equal(row?.optionEae?.[1]?.["quantity"], "1");
+  assert.equal(row?.optionEae?.[1]?.["tradePrice"], "0");
+  assert.equal(row?.optionEae?.[1]?.["proceeds"], "0");
   assert.equal(row?.optionEae?.[2]?.["transactionType"], "Buy");
+  assert.equal(row?.optionEae?.[2]?.["quantity"], "100");
+  assert.equal(row?.optionEae?.[2]?.["tradePrice"], "100");
+  assert.equal(row?.optionEae?.[2]?.["proceeds"], "-10000");
   assert.equal(row?.optionEae?.[1]?.["tradeID"], row?.trades?.[1]?.["tradeID"]);
   assert.equal(row?.optionEae?.[2]?.["tradeID"], row?.trades?.[2]?.["tradeID"]);
 });

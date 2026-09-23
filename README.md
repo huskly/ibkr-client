@@ -105,13 +105,14 @@ if (result.status === "pending") {
 ```
 
 Create a Flex Web Service token and an Activity Flex Query in Client Portal first.
-Use an unfiltered query with detailed Cash Transactions, Transfers, Trades, and
-Option EAE sections. Use execution-level trade detail. Include all cash-transaction
-types, account identity, transaction identity, source amount, currency, date/time,
-and statement date range. Retain the query's time-zone and date/time format settings.
-A query that omits a section, filters rows, aggregates transactions, or reports only
-trade confirmations cannot prove complete activity. The client does not inspect the
-saved query's configuration or certify completeness.
+Select the sections for the evidence that your consumer needs. For cash-flow coverage,
+include detailed Cash Transactions and Transfers, all cash-transaction types, account
+identity, transaction identity, source amount, currency, date/time, and the statement
+date range. For option expiration, assignment, and exercise evidence, include Trades
+at the execution level of detail and Option Exercises, Assignments and Expirations.
+Retain the query's time-zone and date/time format settings. A section that the saved
+query does not include is `null`. The client does not inspect the saved query's
+configuration or certify completeness.
 
 Each method makes one GET request to the fixed documented HTTPS host. It ignores
 any URL returned by generation, refuses redirects, and uses a 30-second deadline
