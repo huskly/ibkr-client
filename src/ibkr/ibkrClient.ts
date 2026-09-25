@@ -39,6 +39,11 @@ import type {
   EquityOrderPreviewRequest,
   EquityOrderPreviewResult,
   EquityOrderRequest,
+  ForexContract,
+  ForexOrderCancelRequest,
+  ForexOrderPreviewRequest,
+  ForexOrderPreviewResult,
+  ForexOrderRequest,
   DerivativeAssetClass,
   DerivativeContract,
   DerivativeContractQuery,
@@ -129,6 +134,7 @@ import type {
 } from "./ibkrApiTypes.js";
 import { normalizeOptionContract, parseOsiOptionSymbol } from "./optionContract.js";
 import { normalizeEquityContract } from "./equityContract.js";
+import { normalizeForexContract, parseForexPair } from "./forexContract.js";
 import {
   normalizeDerivativeContract,
   normalizeDerivativeDataAvailability,
@@ -947,6 +953,61 @@ export class IbkrClient
           method: "POST",
           data: {
             orders: [{ ...this.equityOrderTicket(request), cOID: request.clientOrderId }],
+          },
+        });
+        return this.normalizeOrderSubmission(response, request.clientOrderId);
+      }
+    );
+  }
+
+  /**
+   * Run one non-submitting IDEALPRO spot FX What-If. The result states the commission currency
+   * and the account base currency of the margin figures. A preview without both currencies is
+   * not accepted. IBKR warnings, for example an odd-lot route, are kept verbatim.
+   */
+  async previewForexOrder(request: ForexOrderPreviewRequest): Promise<ForexOrderPreviewResult> {
+    this.assertOpen();
+    this.validateForexOrderFields(request, false);
+    return this.withTradingMutation(
+      request.accountId,
+      "IBKR brokerage session is not safely authenticated for What-If",
+      async (diagnostics) => {
+        await this.req<unknown>({
+          path: "iserver/marketdata/snapshot",
+          params: { conids: String(request.contract.conid), fields: "6509" },
+        });
+        const response = await this.singleAttemptRequest<IbkrWhatIfResponse>({
+          path: `iserver/account/${request.accountId}/orders/whatif`,
+          method: "POST",
+          data: { orders: [this.forexOrderTicket(request)] },
+        });
+        const preview = this.normalizeComboPreview(request.accountId, diagnostics, response);
+        const summary = await this.req<IbkrPortfolioSummary>({
+          path: `portfolio/${request.accountId}/summary`,
+        });
+        return this.forexPreviewResult(preview, response, summary);
+      }
+    );
+  }
+
+  /** Submit one live IDEALPRO spot FX LIMIT order in one write attempt. */
+  async submitForexOrder(request: ForexOrderRequest): Promise<DerivativeOrderSubmissionResult> {
+    this.assertOpen();
+    this.validateForexOrderFields(request, true);
+    if (!request.clientOrderId.trim() || request.clientOrderId.length > 64) {
+      throw new Error("Client order ID must contain 1 to 64 characters");
+    }
+    return this.withTradingMutation(
+      request.accountId,
+      "IBKR brokerage session is not safely authenticated for submission",
+      async () => {
+        const response = await this.singleAttemptRequest<
+          IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+        >({
+          path: `iserver/account/${request.accountId}/orders`,
+          method: "POST",
+          data: {
+            orders: [{ ...this.forexOrderTicket(request), cOID: request.clientOrderId }],
           },
         });
         return this.normalizeOrderSubmission(response, request.clientOrderId);
@@ -2215,6 +2276,10 @@ export class IbkrClient
     return this.cancelDerivativeOrder({ ...input, assetClass: "STK" });
   }
 
+  cancelForexOrder(input: ForexOrderCancelRequest): Promise<DerivativeOrderCancellationResult> {
+    return this.cancelDerivativeOrder({ ...input, assetClass: "CASH" });
+  }
+
   async cancelDerivativeOrder(
     input: DerivativeOrderCancelRequest
   ): Promise<DerivativeOrderCancellationResult> {
@@ -2790,6 +2855,58 @@ export class IbkrClient
       !validExchanges.includes("SMART")
     ) {
       throw new Error("IBKR equity contract details are incomplete or conflicting");
+    }
+    return contract;
+  }
+
+  /**
+   * Resolve one exact IDEALPRO spot FX pair, for example `USD.JPY`. The conid comes from
+   * `iserver/currency/pairs`, and `iserver/contract/{conid}/info` must confirm the pair.
+   */
+  async resolveForexContract(pair: string): Promise<ForexContract> {
+    this.assertOpen();
+    const requested = parseForexPair(pair);
+    if (requested === null) {
+      throw new Error("Forex contract resolution requires one BASE.QUOTE pair of two currencies");
+    }
+    const response = await this.req<unknown>({
+      path: "iserver/currency/pairs",
+      params: { currency: requested.base },
+    });
+    const listed = isUnknownRecord(response) ? response[requested.base] : undefined;
+    if (!Array.isArray(listed)) {
+      throw new Error("IBKR returned no currency pair evidence");
+    }
+    const conids = new Set<number>();
+    for (const raw of listed) {
+      if (!isUnknownRecord(raw) || raw["symbol"] !== requested.localSymbol) continue;
+      const conid = raw["conid"];
+      if (typeof conid === "number" && Number.isSafeInteger(conid) && conid > 0) conids.add(conid);
+    }
+    const [conid] = conids;
+    if (conids.size !== 1 || conid === undefined) {
+      throw new Error(`IBKR did not return one exact ${requested.localSymbol} currency pair`);
+    }
+    const evidence = this.contractReferenceEvidence(conid, await this.readContractReference(conid));
+    const validExchanges =
+      evidence.validExchanges
+        ?.split(",")
+        .map((value) => value.trim().toUpperCase())
+        .filter(Boolean) ?? [];
+    const contract = normalizeForexContract({
+      conid: evidence.conid,
+      assetClass: evidence.instrumentType?.toUpperCase(),
+      symbol: evidence.symbol?.toUpperCase(),
+      currency: evidence.currency?.toUpperCase(),
+      localSymbol: evidence.localSymbol?.toUpperCase() ?? requested.localSymbol,
+      exchange: "IDEALPRO",
+    });
+    if (
+      contract?.conid !== conid ||
+      contract.localSymbol !== requested.localSymbol ||
+      !validExchanges.includes("IDEALPRO")
+    ) {
+      throw new Error("IBKR forex contract details are incomplete or conflicting");
     }
     return contract;
   }
@@ -3386,6 +3503,101 @@ export class IbkrClient
     }
   }
 
+  private validateForexOrderFields(request: ForexOrderPreviewRequest, live: boolean): void {
+    const fields = request as unknown as Record<string, unknown>;
+    const allowed = new Set([
+      "accountId",
+      "contract",
+      "side",
+      "quantity",
+      "orderType",
+      "limit",
+      "tif",
+      ...(live ? ["clientOrderId"] : []),
+    ]);
+    const unknown = Object.keys(fields).find((key) => !allowed.has(key));
+    if (unknown !== undefined) throw new Error(`Forex order does not accept the field ${unknown}`);
+    if (typeof fields["accountId"] !== "string" || !fields["accountId"].trim()) {
+      throw new Error("An explicit IBKR account ID is required");
+    }
+    if (normalizeForexContract(fields["contract"]) === null) {
+      throw new Error("Forex order requires one exact IDEALPRO currency pair contract");
+    }
+    if (fields["side"] !== "BUY" && fields["side"] !== "SELL") {
+      throw new Error("Forex order side must be BUY or SELL");
+    }
+    if (!Number.isSafeInteger(fields["quantity"]) || (fields["quantity"] as number) <= 0) {
+      throw new Error("Forex order quantity must be a positive integer of base-currency units");
+    }
+    if (fields["orderType"] !== "LMT") throw new Error("Forex order type must be LMT");
+    if (!this.isPositiveFinite(fields["limit"])) {
+      throw new Error("Forex LIMIT order requires a positive limit price");
+    }
+    if (fields["tif"] !== "DAY" && fields["tif"] !== "GTC") {
+      throw new Error("Forex order TIF must be DAY or GTC");
+    }
+    if (live && typeof fields["clientOrderId"] !== "string") {
+      throw new Error("Client order ID must be a string");
+    }
+  }
+
+  /** The order goes to IDEALPRO as a normal FX trade, not as a currency conversion. */
+  private forexOrderTicket(request: ForexOrderPreviewRequest): {
+    acctId: string;
+    conid: number;
+    listingExchange: "IDEALPRO";
+    orderType: "LMT";
+    side: "BUY" | "SELL";
+    price: number;
+    tif: "DAY" | "GTC";
+    quantity: number;
+    isCcyConv: false;
+  } {
+    return {
+      acctId: request.accountId,
+      conid: request.contract.conid,
+      listingExchange: "IDEALPRO",
+      orderType: "LMT",
+      side: request.side,
+      price: request.limit,
+      tif: request.tif,
+      quantity: request.quantity,
+      isCcyConv: false,
+    };
+  }
+
+  private forexPreviewResult(
+    preview: DerivativeComboPreviewResult,
+    response: IbkrWhatIfResponse,
+    summary: IbkrPortfolioSummary
+  ): ForexOrderPreviewResult {
+    const commissionCurrency = this.statedCurrency(
+      /\b(?<currency>[A-Z]{3})\s*$/.exec(response.amount?.commission?.trim() ?? "")?.groups?.[
+        "currency"
+      ]
+    );
+    const marginField: unknown = isUnknownRecord(summary) ? summary["initmarginreq"] : undefined;
+    const marginCurrency = this.statedCurrency(
+      isUnknownRecord(marginField) ? marginField["currency"] : undefined
+    );
+    const rejectionReasons = [...preview.rejectionReasons];
+    if (preview.accepted && (commissionCurrency === null || marginCurrency === null)) {
+      rejectionReasons.push("IBKR did not state the What-If currencies");
+    }
+    return {
+      ...preview,
+      accepted: rejectionReasons.length === 0,
+      rejectionReasons,
+      commissionCurrency,
+      marginCurrency,
+    };
+  }
+
+  private statedCurrency(value: unknown): string | null {
+    const text = this.trimmedString(value)?.toUpperCase() ?? "";
+    return /^[A-Z]{3}$/.test(text) ? text : null;
+  }
+
   private isPositiveFinite(value: unknown): value is number {
     return typeof value === "number" && Number.isFinite(value) && value > 0;
   }
@@ -3478,7 +3690,7 @@ export class IbkrClient
   }
 
   private cmeOperatorMetadata(
-    assetClass: DerivativeAssetClass | "STK",
+    assetClass: DerivativeAssetClass | "STK" | "CASH",
     input: { extOperator?: string; manualIndicator?: boolean }
   ): { extOperator: string; manualIndicator: boolean } | Record<string, never> {
     if (assetClass !== "FOP") return {};
@@ -7080,7 +7292,10 @@ export class IbkrClient
     const assetClass =
       members.length === 1 &&
       statedClass !== "BAG" &&
-      (statedClass === "STK" || statedClass === "OPT" || statedClass === "FOP")
+      (statedClass === "STK" ||
+        statedClass === "OPT" ||
+        statedClass === "FOP" ||
+        statedClass === "CASH")
         ? statedClass
         : null;
     return members.map((member) => ({

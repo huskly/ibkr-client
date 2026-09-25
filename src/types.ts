@@ -432,7 +432,7 @@ export interface BrokerOrderLeg {
   /** Positive buys; negative sells. Null if the direction is not known. */
   ratio?: number | null;
   /** Broker-stated single-contract class; combo members need contract resolution. */
-  assetClass?: "STK" | "OPT" | "FOP" | null;
+  assetClass?: "STK" | "OPT" | "FOP" | "CASH" | null;
 }
 
 export interface BrokerOrder {
@@ -572,6 +572,49 @@ export interface EquityOrderCancelRequest {
   accountId: string;
   orderId: string;
 }
+
+/**
+ * One exact IDEALPRO spot FX pair. `symbol` is the base currency and `currency` is the quote
+ * currency. `localSymbol` is the IBKR pair name, for example `USD.JPY`.
+ */
+export interface ForexContract {
+  conid: number;
+  assetClass: "CASH";
+  symbol: string;
+  currency: string;
+  localSymbol: string;
+  exchange: "IDEALPRO";
+}
+
+/**
+ * One spot FX LIMIT order. `quantity` is a whole number of base-currency units. `limit` is the
+ * price in quote currency for one base unit. FX trades 24/5, so there is no trading session.
+ */
+export interface ForexOrderPreviewRequest {
+  accountId: string;
+  contract: ForexContract;
+  side: "BUY" | "SELL";
+  quantity: number;
+  orderType: "LMT";
+  limit: number;
+  tif: "DAY" | "GTC";
+}
+
+/** One live spot FX LIMIT order with caller-stable identity. */
+export type ForexOrderRequest = ForexOrderPreviewRequest & { clientOrderId: string };
+
+/**
+ * A spot FX What-If result. `commissionCurrency` is the currency that IBKR stated for the
+ * commission. `marginCurrency` is the account base currency that IBKR stated for the account
+ * margin figures, which is the currency of the What-If margin values. A currency that IBKR did
+ * not state is `null` and the preview is not accepted.
+ */
+export type ForexOrderPreviewResult = DerivativeComboPreviewResult & {
+  commissionCurrency: string | null;
+  marginCurrency: string | null;
+};
+
+export type ForexOrderCancelRequest = EquityOrderCancelRequest;
 
 export type DerivativeAssetClass = "OPT" | "FOP";
 
@@ -917,7 +960,7 @@ export type DerivativeMultiOrderResult =
 export type DerivativeOrderCancelRequest = {
   accountId: string;
   orderId: string;
-  assetClass: DerivativeAssetClass | "STK";
+  assetClass: DerivativeAssetClass | "STK" | "CASH";
 } & CmeOperatorMetadata;
 
 export interface OrderWarning {

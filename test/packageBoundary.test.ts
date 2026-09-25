@@ -19,6 +19,12 @@ import {
   type BrokerEnvironment,
   type DerivativeComboPreviewResult,
   type EquityContract,
+  type ForexContract,
+  type ForexOrderPreviewRequest,
+  type ForexOrderPreviewResult,
+  type ForexOrderRequest,
+  normalizeForexContract,
+  parseForexPair,
   type EquityOrderPreviewRequest,
   type EquityOrderPreviewResult,
   type EquityOrderRequest,
@@ -301,6 +307,45 @@ void test("public equity order API exposes preview and one identified submission
   assert.equal(previewMethod, undefined);
   assert.equal(submitMethod, undefined);
   assert.equal(cancelMethod, undefined);
+});
+
+void test("public forex order types expose IDEALPRO identity and stated currencies", () => {
+  const resolve: IbkrClient["resolveForexContract"] | undefined = undefined;
+  const previewMethod: IbkrClient["previewForexOrder"] | undefined = undefined;
+  const submitMethod: IbkrClient["submitForexOrder"] | undefined = undefined;
+  const cancelMethod: IbkrClient["cancelForexOrder"] | undefined = undefined;
+  const contract: ForexContract = {
+    conid: 15016059,
+    assetClass: "CASH",
+    symbol: "USD",
+    currency: "JPY",
+    localSymbol: "USD.JPY",
+    exchange: "IDEALPRO",
+  };
+  const input: ForexOrderPreviewRequest = {
+    accountId: "U123",
+    contract,
+    side: "BUY",
+    quantity: 25000,
+    orderType: "LMT",
+    limit: 147.25,
+    tif: "DAY",
+  };
+  const order: ForexOrderRequest = { ...input, clientOrderId: "fx-1" };
+  const result: Pick<ForexOrderPreviewResult, "commissionCurrency" | "marginCurrency"> = {
+    commissionCurrency: "USD",
+    marginCurrency: null,
+  };
+  assert.equal(order.contract.assetClass, "CASH");
+  assert.equal(result.marginCurrency, null);
+  assert.deepEqual(parseForexPair(contract.localSymbol), {
+    base: "USD",
+    quote: "JPY",
+    localSymbol: "USD.JPY",
+  });
+  assert.equal(normalizeForexContract(contract)?.conid, 15016059);
+  for (const method of [resolve, previewMethod, submitMethod, cancelMethod])
+    assert.equal(method, undefined);
 });
 
 void test("public equity contract exposes complete US listing identity", () => {
