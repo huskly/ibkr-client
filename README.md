@@ -218,6 +218,11 @@ validated at runtime. Its broker-neutral account API includes:
   one IBKR `isUS` listing and verifies the conid, symbol, security type, USD currency, and SMART
   routing against `iserver/contract/{conid}/info`. Empty, ambiguous, incomplete, or conflicting
   evidence fails closed.
+- `resolveForexContract(pair)` returns one exact IDEALPRO spot FX (`CASH`) identity for a
+  `BASE.QUOTE` pair, for example `USD.JPY`. It takes the conid from `iserver/currency/pairs` and
+  verifies the conid, base currency, quote currency, pair name, security type, and IDEALPRO routing
+  against `iserver/contract/{conid}/info`. Empty, ambiguous, incomplete, or conflicting evidence
+  fails closed. `parseForexPair(...)` and `normalizeForexContract(...)` apply the same rules.
 - `getQuotes()` and `searchInstruments()` for equity/ETF discovery and quotes. Quote requests accept
   a symbol and an optional broker ID. A broker ID reads that exact contract without symbol
   discovery. A request without one can also resolve a complete OSI option symbol without loading
@@ -579,6 +584,36 @@ const preview = await client.previewEquityOrder({
   stopPrice: 240,
   tif: "GTC",
   session: "REGULAR",
+});
+```
+
+### Guarded spot FX order execution
+
+`resolveForexContract(pair)` must produce the exact contract before an FX order can be previewed.
+`previewForexOrder(...)` sends one What-If request and always returns `submitted: false`.
+`submitForexOrder(...)` accepts only BUY or SELL LIMIT orders. The quantity is a positive whole
+number of base-currency units, and the limit is the quote-currency price of one base unit. The
+request has no `session` field, because FX trades 24/5. `cancelForexOrder(...)` sends one
+cancellation request. These broker writes never retry automatically. Warning, lifecycle, and
+recovery evidence use the same strict normalization as equity orders.
+
+The ticket goes to IDEALPRO as a normal FX trade (`isCcyConv: false`), not as a currency
+conversion. IBKR checks the price increment and the minimum size. The preview keeps IBKR warnings
+verbatim, for example an odd-lot route for a small order. The preview result also states
+`commissionCurrency` and `marginCurrency`. `marginCurrency` is the account base currency that IBKR
+states for the account margin figures. If IBKR does not state one of the two currencies, the
+preview is not accepted.
+
+```ts
+const contract = await client.resolveForexContract("USD.JPY");
+const preview = await client.previewForexOrder({
+  accountId: "U123",
+  contract,
+  side: "BUY",
+  quantity: 25000,
+  orderType: "LMT",
+  limit: 147.25,
+  tif: "DAY",
 });
 ```
 

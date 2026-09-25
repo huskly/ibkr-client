@@ -70,6 +70,11 @@ export type {
   EquityOrderRequest,
   EquityOrderSide,
   EquityOrderTerms,
+  ForexContract,
+  ForexOrderCancelRequest,
+  ForexOrderPreviewRequest,
+  ForexOrderPreviewResult,
+  ForexOrderRequest,
   DerivativeAssetClass,
   DerivativeContract,
   DerivativeContractQuery,
@@ -147,3 +152,4 @@ export type {
 export { formatOsiOptionSymbol, parseOsiOptionSymbol } from "./ibkr/optionContract.js";
 export { normalizeDerivativeDataAvailability } from "./ibkr/derivativeContract.js";
 export { normalizeEquityContract } from "./ibkr/equityContract.js";
+export { normalizeForexContract, parseForexPair, type ForexPair } from "./ibkr/forexContract.js";
