@@ -189,6 +189,9 @@ validated at runtime. Its broker-neutral account API includes:
   a response that states no transaction ARRAY, because an error envelope, an empty object, or an
   explicit `null` is an unknown broker state and must never reach a consumer looking exactly like a
   completed read that found nothing. A stated empty array is a real answer and is reported as one.
+  IBKR also states a window with no rows as a response with no `transactions` key and the warning
+  `"No matches found"`. The read reports that response as an empty list. Any other warning still
+  makes the read refuse the response.
   A missing field inside a row never makes it throw. It proves no event and infers nothing: an empty list
   is not proof that nothing happened, and the CONSUMER decides whether a row states an assignment,
   an exercise, or an expiration.
