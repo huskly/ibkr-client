@@ -718,6 +718,9 @@ export class IbkrInsufficientHistoryError extends Error {
   }
 }
 
+/** The warning IBKR sends, with no `transactions` key, for a `pa/transactions` window with no rows. */
+const PA_TRANSACTIONS_NO_MATCHES = "No matches found";
+
 /**
  * Typed IBKR Web API client implementing the broker-neutral {@link BrokerClient}.
  * Wraps the `ibkr-client` npm package, which performs the OAuth 1.0a
@@ -3001,7 +3004,7 @@ export class IbkrClient
       method: "POST",
       data: { acctIds: [accountId], conids, currency, days },
     });
-    const envelope: { transactions?: unknown } =
+    const envelope: { transactions?: unknown; warning?: unknown } =
       typeof response === "object" && response !== null ? response : {};
 
     // A response that states no transaction ARRAY did not answer this question. An error envelope,
@@ -3009,14 +3012,21 @@ export class IbkrClient
     // reports an unknown state as a successful empty read: the consumer of this evidence decides
     // whether an assignment happened, and it must not read a refusal as "no activity". A STATED
     // empty array is a real answer and passes through untouched.
-    if (!Array.isArray(envelope.transactions)) {
+    //
+    // IBKR states an empty window in one other way: it omits the `transactions` key and sends
+    // `warning: "No matches found"`. That is the broker's own statement of no rows, so it reads as
+    // a stated empty list. Only this exact warning with no `transactions` key qualifies.
+    const statedNoMatches =
+      !("transactions" in envelope) && envelope.warning === PA_TRANSACTIONS_NO_MATCHES;
+    const stated: unknown = statedNoMatches ? [] : envelope.transactions;
+    if (!Array.isArray(stated)) {
       const present = Object.keys(envelope).sort();
       throw new Error(
         "IBKR stated no transaction list for this contract transaction read; " +
           `present response keys: ${present.length === 0 ? "(none)" : present.join(", ")}`
       );
     }
-    const rows = envelope.transactions as IbkrTransaction[];
+    const rows = stated as IbkrTransaction[];
 
     return {
       accountId,

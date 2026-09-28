@@ -191,6 +191,8 @@ void test("getContractTransactionEvidence refuses a response that states no tran
     ["an explicit null list", { transactions: null }],
     ["a broker error envelope", { error: "no permission", statusCode: 403 }],
     ["a list that is not an array", { transactions: { 0: {} } }],
+    ["another warning", { id: "getTransactions", warning: "Service unavailable" }],
+    ["a no-matches warning with a null list", { transactions: null, warning: "No matches found" }],
   ];
   for (const [name, response] of refused) {
     const client = clientForTransactions(response);
@@ -209,6 +211,26 @@ void test("getContractTransactionEvidence accepts a stated empty transaction lis
     conids: [726],
     currency: "USD",
     days: 1,
+  });
+  assert.deepEqual(evidence.transactions, []);
+});
+
+/**
+ * IBKR states a window with no rows by omitting `transactions` and sending the warning
+ * "No matches found". This is the exact live response shape, and it is a stated empty list.
+ */
+void test("getContractTransactionEvidence reads the no-matches warning as a stated empty list", async () => {
+  const client = clientForTransactions({
+    currency: "USD",
+    from: 1790294400000,
+    id: "getTransactions",
+    to: 1790553600000,
+    warning: "No matches found",
+  });
+  const evidence = await client.getContractTransactionEvidence({
+    conids: [726],
+    currency: "USD",
+    days: 3,
   });
   assert.deepEqual(evidence.transactions, []);
 });
