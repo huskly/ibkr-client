@@ -4034,7 +4034,7 @@ export class IbkrClient
       error: errorParts.length > 0 ? errorParts.join("; ").slice(0, 4_096) : null,
       response: this.sanitizeJsonEvidence(response),
     };
-    const accountProvided = record !== null && "account" in record;
+    const accountProvided = record !== null && "account" in record && record["account"] !== null;
     const orderProvided = record !== null && "order_id" in record;
     const conidProvided = record !== null && "conid" in record;
     const conid = record?.["conid"];

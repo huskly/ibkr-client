@@ -817,6 +817,60 @@ void test("account preparation rejects a selected account without valid account-
   assert.ok(client.calls.every(({ method }) => method !== "DELETE"));
 });
 
+void test("cancellation accepts the observed numeric identity with a null account", async () => {
+  for (const response of [
+    { msg: "Request was submitted", order_id: 777, conid: 123, account: null },
+    { msg: "Request was submitted", order_id: 777, conid: 123 },
+  ]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.method === "DELETE") return response;
+      return sessionResponse(input);
+    });
+    assert.deepEqual(
+      await client.cancelDerivativeOrder({ accountId: "U123", orderId: "777", assetClass: "OPT" }),
+      { state: "requested", accountId: "U123", orderId: "777", message: "Request was submitted" }
+    );
+    assert.equal(client.calls.filter(({ method }) => method === "DELETE").length, 1);
+  }
+});
+
+void test("cancellation still refuses malformed or conflicting observed-shape variants", async () => {
+  const observed = { msg: "Request was submitted", order_id: 777, conid: 123, account: null };
+  for (const overrides of [
+    { account: "" },
+    { account: "   " },
+    { account: 123 },
+    { account: false },
+    { account: {} },
+    { account: undefined },
+    { account: "U999" },
+    { error: "Cannot cancel" },
+    { success: true },
+    { msg: "Cancelled" },
+    { order_id: 888 },
+    { order_id: null },
+    { order_id: 0 },
+    { order_id: 777.5 },
+    { conid: null },
+    { conid: "123" },
+    { conid: 0 },
+    { conid: 123.5 },
+    { conid: Number.NaN },
+  ]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.method === "DELETE") return { ...observed, ...overrides };
+      return sessionResponse(input);
+    });
+    const result = await client.cancelDerivativeOrder({
+      accountId: "U123",
+      orderId: "777",
+      assetClass: "OPT",
+    });
+    assert.equal(result.state, "recovery_required", JSON.stringify(overrides));
+    assert.equal(client.calls.filter(({ method }) => method === "DELETE").length, 1);
+  }
+});
+
 void test("cancellation requires unambiguous documented success evidence", async () => {
   const cases = [
     {
