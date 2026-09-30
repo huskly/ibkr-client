@@ -73,7 +73,8 @@ Version 2.0.0 makes session and write safety evidence explicit:
 - Pass an exact `accountId` to legacy warning acknowledgements and keep it in contingent warning
   continuations.
 - Handle both `requested` and `recovery_required` cancellation results. Only an unambiguous broker
-  acknowledgement returns `requested`.
+  acknowledgement returns `requested`. A null cancellation `account` is not stated, like an absent
+  account key. Non-null malformed or conflicting accounts still require recovery.
 
 ## Flex statement evidence
 
