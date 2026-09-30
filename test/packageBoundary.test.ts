@@ -18,6 +18,8 @@ import {
   type BrokerClient,
   type BrokerEnvironment,
   type DerivativeComboPreviewResult,
+  type DerivativeComboReconciliation,
+  type DerivativeOrderLifecycle,
   type EquityContract,
   type ForexContract,
   type ForexOrderPreviewRequest,
@@ -521,6 +523,41 @@ test("package exposes only the library and no CLI entry point", async () => {
   }
   assert.equal(manifest.dependencies?.["chalk"], undefined);
   assert.equal(manifest.dependencies?.["commander"], undefined);
+});
+
+void test("public lifecycle and reconciliation types preserve unknown quantities", () => {
+  const lifecycle: DerivativeOrderLifecycle = {
+    accountId: "U123",
+    orderId: "777",
+    clientOrderId: null,
+    status: "CANCELED",
+    quantity: null,
+    filledQuantity: null,
+    remainingQuantity: null,
+    averagePrice: null,
+    orderType: "STOP",
+    limitPrice: null,
+    stopPrice: null,
+    commissionAndFees: null,
+    legs: [],
+    updatedAt: null,
+  };
+  const reconciliation: DerivativeComboReconciliation = {
+    state: "RECOVERY_REQUIRED",
+    reason: "Aggregate order returned incomplete fill quantities",
+    aggregateStatus: lifecycle.status,
+    filledQuantity: lifecycle.filledQuantity,
+    remainingQuantity: lifecycle.remainingQuantity,
+    legs: [],
+    grossPoints: null,
+    multiplier: 100,
+    grossAmount: null,
+    commission: null,
+    netAmount: null,
+  };
+  assert.equal(lifecycle.quantity, null);
+  assert.equal(reconciliation.filledQuantity, null);
+  assert.equal(reconciliation.remainingQuantity, null);
 });
 
 void test("public What-If results always carry a known environment", () => {

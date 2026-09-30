@@ -1022,9 +1022,12 @@ export interface DerivativeOrderLifecycle {
   orderId: string;
   clientOrderId: string | null;
   status: DerivativeOrderStatus;
-  quantity: number;
-  filledQuantity: number;
-  remainingQuantity: number;
+  /** The positive original order quantity, or null when IBKR does not state one. */
+  quantity: number | null;
+  /** The non-negative filled quantity, or null when missing or invalid. */
+  filledQuantity: number | null;
+  /** The non-negative remainder, reported or derived from known quantities, or null. */
+  remainingQuantity: number | null;
   averagePrice: number | null;
   /**
    * The normalized IBKR order type, for example `LIMIT` or `STOP`, or `null` when the broker
@@ -1187,8 +1190,10 @@ export interface DerivativeComboReconciliation {
   state: "PENDING" | "VERIFIED" | "RECOVERY_REQUIRED";
   reason: string | null;
   aggregateStatus: DerivativeOrderStatus;
-  filledQuantity: number;
-  remainingQuantity: number;
+  /** Null when the aggregate lifecycle does not state a valid filled quantity. */
+  filledQuantity: number | null;
+  /** Null when the aggregate lifecycle does not state a valid remainder. */
+  remainingQuantity: number | null;
   legs: DerivativeLegExecutionSummary[];
   grossPoints: number | null;
   multiplier: number;

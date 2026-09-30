@@ -664,7 +664,11 @@ return `recovery_required`, because they do not prove that every submitted ticke
 - `getDerivativeOrderStatus(...)` uses IBKR's exact order-ID status endpoint so fast terminal
   orders remain visible after live-list eviction. It normalizes pending, working, partial-fill,
   fill, canceled, and rejected lifecycle states with leg ratios and order economics, and fails
-  closed on identity mismatch, unknown status, or missing aggregate quantities. Combo legs come
+  closed on identity mismatch or unknown status. Each unavailable or invalid aggregate quantity
+  is `null`, not a guessed zero. A zero total size on a cancelled order does not state its original
+  quantity, so `quantity` stays `null`. A valid zero fill stays `0`. A missing remainder is derived
+  only when the total and filled quantities are known. Callers must treat any null quantity as
+  incomplete evidence. This nullable contract also applies to equity order-status reads. Combo legs come
   from `conidex`; a single leg comes from the broker-stated scalar `conid` and `side`. Invalid or
   missing identity remains an empty leg list. The result also carries `orderType` and `stopPrice`,
   normalized from the same broker fields as the active-order
@@ -694,7 +698,8 @@ return `recovery_required`, because they do not prove that every submitted ticke
   correlates by the unique client order reference, rejects duplicate or mismatched evidence, and
   validates each expected leg's side and ratio-derived quantity. Its sanitized result separates
   gross option points, multiplier-adjusted gross dollars, commission, and net dollars without
-  exposing account or execution IDs.
+  exposing account or execution IDs. Incomplete aggregate quantities return `RECOVERY_REQUIRED`
+  with null economics. Its filled and remaining quantities can be null and are never defaulted to zero.
 - `cancelDerivativeOrder(...)` uses its exact account ID and sends one exact cancellation request.
   It returns `requested` only for the exact documented success shape with no conflicting identity
   or error evidence. Other 2xx payloads return `recovery_required` with bounded, sanitized complete

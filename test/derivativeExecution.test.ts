@@ -411,7 +411,7 @@ void test("lifecycle derives the remainder when IBKR reports only total and fill
   assert.equal(result.remainingQuantity, 1);
 });
 
-void test("lifecycle still fails closed when the filled quantity itself is missing", async () => {
+void test("lifecycle preserves a missing filled quantity as null", async () => {
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/accounts") {
       return { accounts: ["U123"], selectedAccount: "U123" };
@@ -421,10 +421,85 @@ void test("lifecycle still fails closed when the filled quantity itself is missi
     }
     throw new Error(`Unexpected request ${input.path}`);
   });
-  await assert.rejects(
-    () => client.getDerivativeOrderStatus("U123", "777"),
-    /returned incomplete fill quantities/
-  );
+  const result = await client.getDerivativeOrderStatus("U123", "777");
+  assert.equal(result.status, "WORKING");
+  assert.equal(result.quantity, 1);
+  assert.equal(result.filledQuantity, null);
+  assert.equal(result.remainingQuantity, null);
+});
+
+void test("cancelled lifecycle retains zero fills without inventing the original quantity", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/order/status/777") {
+      return {
+        account: "U123",
+        order_id: 777,
+        order_status: "Cancelled",
+        order_type: "STP",
+        size: "0.0",
+        total_size: "0.0",
+        cum_fill: "0.0",
+        tif: "GTC",
+      };
+    }
+    return sessionResponse(input);
+  });
+  const result = await client.getDerivativeOrderStatus("U123", "777");
+  assert.equal(result.status, "CANCELED");
+  assert.equal(result.orderType, "STOP");
+  assert.equal(result.quantity, null);
+  assert.equal(result.filledQuantity, 0);
+  assert.equal(result.remainingQuantity, null);
+  assert.equal(result.stopPrice, null);
+  assert.ok(client.calls.every(({ method }) => method === undefined || method === "GET"));
+});
+
+void test("lifecycle keeps invalid quantities null and retains valid independent evidence", async () => {
+  const cases = [
+    { fields: {}, expected: [null, null, null] },
+    { fields: { total_size: "bad", cum_fill: "0.0" }, expected: [null, 0, null] },
+    { fields: { total_size: -1, cum_fill: 0 }, expected: [null, 0, null] },
+    { fields: { total_size: Infinity, cum_fill: 0 }, expected: [null, 0, null] },
+    { fields: { total_size: 2, cum_fill: -1 }, expected: [2, null, null] },
+    { fields: { total_size: 2, cum_fill: NaN }, expected: [2, null, null] },
+    { fields: { total_size: 2, cum_fill: 1, remaining: -1 }, expected: [2, 1, null] },
+    { fields: { cum_fill: 1, remaining: 0 }, expected: [null, 1, 0] },
+    { fields: { totalSize: 2, filledQuantity: 0, remainingQuantity: 2 }, expected: [2, 0, 2] },
+  ];
+  for (const { fields, expected } of cases) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/account/order/status/777") {
+        return { account: "U123", order_id: 777, order_status: "Cancelled", ...fields };
+      }
+      return sessionResponse(input);
+    });
+    const result = await client.getDerivativeOrderStatus("U123", "777");
+    assert.equal(result.status, "CANCELED");
+    assert.deepEqual([result.quantity, result.filledQuantity, result.remainingQuantity], expected);
+  }
+});
+
+void test("lifecycle preserves stated status when all quantities are unknown", async () => {
+  for (const [raw, expected] of [
+    ["Filled", "FILLED"],
+    ["Cancelled", "CANCELED"],
+    ["Inactive", "REJECTED"],
+    ["PendingSubmit", "PENDING"],
+    ["Submitted", "WORKING"],
+  ] as const) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/account/order/status/777") {
+        return { account: "U123", order_id: 777, order_status: raw };
+      }
+      return sessionResponse(input);
+    });
+    const result = await client.getDerivativeOrderStatus("U123", "777");
+    assert.equal(result.status, expected);
+    assert.deepEqual(
+      [result.quantity, result.filledQuantity, result.remainingQuantity],
+      [null, null, null]
+    );
+  }
 });
 
 void test("customer order IDs resolve the same typed lifecycle", async () => {

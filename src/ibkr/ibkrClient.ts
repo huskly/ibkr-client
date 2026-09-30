@@ -4614,32 +4614,24 @@ export class IbkrClient
     orderId: string,
     order: IbkrLiveOrder
   ): DerivativeOrderLifecycle {
-    const quantity = this.firstPositiveNumber(order.total_size, order.totalSize, order.size);
-    const filledQuantity = this.firstNumber(
+    // A cancelled order can report zero total size. This does not state the original quantity.
+    const quantity =
+      this.firstPositiveNumber(order.total_size, order.totalSize, order.size) ?? null;
+    const rawFilled = this.firstNumber(
       order.cum_fill,
       order.cumFill,
       order.filledQuantity,
       order.filled
     );
-    // `iserver/account/order/status/{orderId}` never carries a remaining-quantity field: it
-    // reports only `total_size` and `cum_fill`. Derive the remainder from those two authoritative
-    // values, exactly as `normalizeActiveDerivativeOrder` already does for the order snapshot.
-    // Nothing is invented here - if either input is missing, this stays `undefined` and the
-    // lifecycle read still fails closed below.
-    const remainingQuantity =
+    const filledQuantity = rawFilled !== undefined && rawFilled >= 0 ? rawFilled : null;
+    // Derive a missing remainder only when both source quantities are known. Keep invalid
+    // negative remainders unavailable instead of replacing them with a plausible quantity.
+    const rawRemaining =
       this.firstNumber(order.remainingQuantity, order.remaining_size, order.remaining) ??
-      (quantity !== undefined && filledQuantity !== undefined && filledQuantity >= 0
+      (quantity !== null && filledQuantity !== null
         ? Math.max(0, quantity - filledQuantity)
         : undefined);
-    if (
-      quantity === undefined ||
-      filledQuantity === undefined ||
-      filledQuantity < 0 ||
-      remainingQuantity === undefined ||
-      remainingQuantity < 0
-    ) {
-      throw new Error(`IBKR order ${orderId} returned incomplete fill quantities`);
-    }
+    const remainingQuantity = rawRemaining !== undefined && rawRemaining >= 0 ? rawRemaining : null;
     return {
       accountId,
       orderId,
@@ -5038,6 +5030,13 @@ export class IbkrClient
       commission: null,
       netAmount: null,
     });
+    if (
+      lifecycle.quantity === null ||
+      lifecycle.filledQuantity === null ||
+      lifecycle.remainingQuantity === null
+    ) {
+      return recovery("Aggregate order returned incomplete fill quantities");
+    }
     if (lifecycle.quantity !== request.quantity) {
       return recovery("Aggregate order quantity does not match the reviewed combo");
     }
@@ -5188,14 +5187,20 @@ export class IbkrClient
 
   private normalizeDerivativeOrderStatus(
     value: unknown,
-    filledQuantity: number,
-    remainingQuantity: number
+    filledQuantity: number | null,
+    remainingQuantity: number | null
   ): DerivativeOrderStatus {
     const status = this.canonicalIbkrOrderStatus(value);
     if (status === "FILLED") return "FILLED";
     if (status === "CANCELLED" || status === "CANCELED") return "CANCELED";
     if (status === "INACTIVE" || status === "REJECTED") return "REJECTED";
-    if (filledQuantity > 0 && remainingQuantity > 0) return "PARTIALLY_FILLED";
+    if (
+      filledQuantity !== null &&
+      remainingQuantity !== null &&
+      filledQuantity > 0 &&
+      remainingQuantity > 0
+    )
+      return "PARTIALLY_FILLED";
     if (status === "API_PENDING" || status === "PENDING_SUBMIT") return "PENDING";
     if (status !== undefined && IBKR_WORKING_STATUSES.has(status)) return "WORKING";
     return "UNKNOWN";

@@ -164,6 +164,30 @@ void test("partial aggregate fills remain pending with verified execution progre
   assert.equal(result.remainingQuantity, 1);
 });
 
+void test("incomplete aggregate quantities require recovery without guessed economics", async () => {
+  for (const fields of [
+    { totalSize: undefined },
+    { filledQuantity: undefined },
+    { remainingQuantity: -1 },
+    { status: "Cancelled", totalSize: "0.0", filledQuantity: "0.0", remainingQuantity: undefined },
+  ]) {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "iserver/account/order/status/777") return { ...status(), ...fields };
+      if (input.path === "iserver/account/trades") return filledTrades;
+      return accountResponse(input);
+    });
+    const result = await client.reconcileDerivativeComboExecution(request);
+    assert.equal(result.state, "RECOVERY_REQUIRED");
+    assert.match(result.reason ?? "", /incomplete fill quantities/);
+    assert.deepEqual(result.legs, []);
+    assert.equal(result.grossPoints, null);
+    assert.equal(result.grossAmount, null);
+    assert.equal(result.commission, null);
+    assert.equal(result.netAmount, null);
+    assert.deepEqual(client.waits, []);
+  }
+});
+
 void test("duplicate or mismatched leg evidence requires recovery", async () => {
   for (const trades of [
     [filledTrades[0], filledTrades[0], filledTrades[1]],
