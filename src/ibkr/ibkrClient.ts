@@ -4054,9 +4054,12 @@ export class IbkrClient
       reason = "IBKR returned malformed cancellation account evidence";
     else if (orderProvided && orderId === null)
       reason = "IBKR returned malformed cancellation order evidence";
+    // Combo replies can use null or non-positive integer conids as unstated placeholders.
+    // Order and account evidence still identify the cancellation request.
     else if (
       conidProvided &&
-      (typeof conid !== "number" || !Number.isSafeInteger(conid) || conid <= 0)
+      conid !== null &&
+      (typeof conid !== "number" || !Number.isSafeInteger(conid))
     )
       reason = "IBKR returned malformed cancellation conid evidence";
     else if (accountId !== null && accountId !== input.accountId)

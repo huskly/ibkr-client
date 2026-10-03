@@ -74,7 +74,11 @@ Version 2.0.0 makes session and write safety evidence explicit:
   continuations.
 - Handle both `requested` and `recovery_required` cancellation results. Only an unambiguous broker
   acknowledgement returns `requested`. A null cancellation `account` is not stated, like an absent
-  account key. Non-null malformed or conflicting accounts still require recovery.
+  account key. A null or safe non-positive integer cancellation `conid` is also not stated. Combo
+  (BAG) replies can use these placeholders. Other stated conids must be safe integers. Non-null
+  malformed or conflicting accounts still require recovery. A stated `order_id` must match the
+  requested order. These placeholders do not bypass identity checks, the `Request was submitted`
+  acknowledgement, or checks for error and unknown fields.
 
 ## Flex statement evidence
 
