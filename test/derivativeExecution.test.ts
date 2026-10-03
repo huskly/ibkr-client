@@ -896,6 +896,7 @@ void test("cancellation accepts the observed numeric identity with a null accoun
   for (const response of [
     { msg: "Request was submitted", order_id: 777, conid: 123, account: null },
     { msg: "Request was submitted", order_id: 777, conid: 123 },
+    { msg: "Request was submitted", order_id: 777, conid: 28812380, account: null },
   ]) {
     const client = new FakeIbkrClient((input) => {
       if (input.method === "DELETE") return response;
@@ -909,40 +910,72 @@ void test("cancellation accepts the observed numeric identity with a null accoun
   }
 });
 
-void test("cancellation still refuses malformed or conflicting observed-shape variants", async () => {
-  const observed = { msg: "Request was submitted", order_id: 777, conid: 123, account: null };
-  for (const overrides of [
-    { account: "" },
-    { account: "   " },
-    { account: 123 },
-    { account: false },
-    { account: {} },
-    { account: undefined },
-    { account: "U999" },
-    { error: "Cannot cancel" },
-    { success: true },
-    { msg: "Cancelled" },
-    { order_id: 888 },
-    { order_id: null },
-    { order_id: 0 },
-    { order_id: 777.5 },
-    { conid: null },
-    { conid: "123" },
-    { conid: 0 },
-    { conid: 123.5 },
-    { conid: Number.NaN },
-  ]) {
+for (const conid of [-1, 0, null, Number.MIN_SAFE_INTEGER]) {
+  void test(`cancellation accepts an unstated combo conid (${String(conid)}) with a null account`, async () => {
+    const response = { msg: "Request was submitted", order_id: 777, conid, account: null };
     const client = new FakeIbkrClient((input) => {
-      if (input.method === "DELETE") return { ...observed, ...overrides };
+      if (input.method === "DELETE") return response;
       return sessionResponse(input);
     });
-    const result = await client.cancelDerivativeOrder({
-      accountId: "U123",
-      orderId: "777",
-      assetClass: "OPT",
-    });
-    assert.equal(result.state, "recovery_required", JSON.stringify(overrides));
+    assert.deepEqual(
+      await client.cancelDerivativeOrder({ accountId: "U123", orderId: "777", assetClass: "OPT" }),
+      { state: "requested", accountId: "U123", orderId: "777", message: "Request was submitted" }
+    );
     assert.equal(client.calls.filter(({ method }) => method === "DELETE").length, 1);
+  });
+}
+
+void test("cancellation still refuses malformed or conflicting observed-shape variants", async () => {
+  for (const conid of [123, -1, 0, null]) {
+    const observed = { msg: "Request was submitted", order_id: 777, conid, account: null };
+    for (const overrides of [
+      { account: "" },
+      { account: "   " },
+      { account: 123 },
+      { account: false },
+      { account: {} },
+      { account: undefined },
+      { account: "U999" },
+      { error: "Cannot cancel" },
+      { error: null },
+      { errors: [] },
+      { success: true },
+      { msg: "Cancelled" },
+      { msg: null },
+      { order_id: 888 },
+      { order_id: "888" },
+      { order_id: null },
+      { order_id: 0 },
+      { order_id: -1 },
+      { order_id: 777.5 },
+      { order_id: Number.NaN },
+      { order_id: Number.POSITIVE_INFINITY },
+      { order_id: Number.MAX_SAFE_INTEGER + 1 },
+      { order_id: "" },
+      { order_id: {} },
+      { conid: "123" },
+      { conid: {} },
+      { conid: undefined },
+      { conid: 123.5 },
+      { conid: -0.5 },
+      { conid: Number.NaN },
+      { conid: Number.POSITIVE_INFINITY },
+      { conid: Number.NEGATIVE_INFINITY },
+      { conid: Number.MAX_SAFE_INTEGER + 1 },
+      { conid: Number.MIN_SAFE_INTEGER - 1 },
+    ]) {
+      const client = new FakeIbkrClient((input) => {
+        if (input.method === "DELETE") return { ...observed, ...overrides };
+        return sessionResponse(input);
+      });
+      const result = await client.cancelDerivativeOrder({
+        accountId: "U123",
+        orderId: "777",
+        assetClass: "OPT",
+      });
+      assert.equal(result.state, "recovery_required", JSON.stringify({ conid, overrides }));
+      assert.equal(client.calls.filter(({ method }) => method === "DELETE").length, 1);
+    }
   }
 });
 
