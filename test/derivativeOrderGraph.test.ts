@@ -3181,3 +3181,114 @@ test("graph recovery still fails closed when a parent order ID names no member o
   );
   assert.equal(result.state, "recovery_required");
 });
+
+// Inferred raw payload from the observed cancelled lifecycle in strategy-terminal#1483.
+// IDs and contracts are masked. Ticket prices and field shapes retain the observed values.
+async function recoverCancelledStopPlaceholder(
+  statusOverrides: Record<string, unknown> = {},
+  snapshotOverrides: Record<string, unknown> = {}
+) {
+  const base = comboStopGraph();
+  const request: DerivativeOrderGraphRequest = {
+    ...base,
+    nodes: base.nodes.map((node, index) =>
+      index === 0 ? { ...node, limit: 9.4 } : { ...node, stopPrice: 23.5 }
+    ) as DerivativeOrderGraphRequest["nodes"],
+  };
+  const snapshots = liveComboSnapshot().map((order, index) => ({
+    ...order,
+    status: "Cancelled",
+    filledQuantity: 0,
+    remainingQuantity: 1,
+    ...(index === 0
+      ? { price: "-9.4" }
+      : { stop_price: "23.50", auxPrice: "23.50", ...snapshotOverrides }),
+  }));
+  const client = new Fake((input) => {
+    if (input.path === "iserver/account/orders") {
+      return {
+        orders:
+          input.params?.["filters"] === undefined || input.params?.["filters"] === "cancelled"
+            ? snapshots
+            : [],
+      };
+    }
+    if (input.path === "iserver/account/order/status/980150331") {
+      return {
+        ...liveComboStatus(),
+        limit_price: "-9.4",
+        order_status: "Cancelled",
+        size: "1.0",
+        cum_fill: "0.0",
+      };
+    }
+    if (input.path === "iserver/account/order/status/980150332") {
+      return {
+        account: "U1",
+        order_id: 980150332,
+        order_type: "STOP",
+        side: "B",
+        conidex: "28812380;;;1/1,2/-1",
+        total_size: "1.0",
+        size: "1.0",
+        cum_fill: "0.0",
+        order_status: "Cancelled",
+        limit_price: 0,
+        stop_price: "23.50",
+        tif: "GTC",
+        ...statusOverrides,
+      };
+    }
+    if (input.path === "iserver/account/trades") return [];
+    return session(input);
+  });
+  const result = await client.recoverDerivativeOrderGraph(
+    { accountId: "U1", rootClientOrderId: "pcs-42" },
+    request
+  );
+  assert.equal(
+    client.calls.some((call) => call.method === "POST"),
+    false
+  );
+  return result;
+}
+
+test("recovers cancelled zero-fill combo graph with STOP limit placeholder in sparse status", async () => {
+  for (const placeholder of [0, "0", "0.0"]) {
+    const result = await recoverCancelledStopPlaceholder(
+      { limit_price: placeholder, limitPrice: placeholder },
+      { limitPrice: placeholder }
+    );
+    assert.equal(result.state, "accepted", JSON.stringify(result));
+    assert.deepEqual(
+      result.members.map(({ status, parentOrderId }) => [status, parentOrderId]),
+      [
+        ["CANCELED", null],
+        ["CANCELED", "980150331"],
+      ]
+    );
+  }
+});
+
+test("STOP placeholder handling preserves all other terminal conflicts", async () => {
+  for (const fields of [
+    { limit_price: 1 },
+    { limitPrice: 1 },
+    { limit_price: "invalid" },
+    { limit_price: null },
+    { stop_price: "24.00" },
+    { auxPrice: "24.00" },
+    { price: "0" },
+    { order_type: "LIMIT" },
+    { account: "OTHER" },
+    { order_id: 99 },
+    { order_ref: "OTHER" },
+    { parentId: "OTHER" },
+    { conidex: "28812380;;;1/-1,2/1" },
+    { total_size: "2.0" },
+    { tif: "DAY" },
+  ]) {
+    const result = await recoverCancelledStopPlaceholder(fields);
+    assert.equal(result.state, "recovery_required", JSON.stringify(fields));
+  }
+});

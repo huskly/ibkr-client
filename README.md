@@ -920,3 +920,7 @@ const request = {
 
 Publishing a stable GitHub Release publishes the matching package version to npm through trusted
 publishing. See [RELEASING.md](RELEASING.md) for the required tag format and release steps.
+
+### Plain STOP recovery
+
+Graph recovery treats a numeric zero `limitPrice` or `limit_price` on a plain STOP order as an unused limit placeholder. This rule applies to terminal ticket comparison and the sparse status overlay. Nonzero limits, malformed values, conflicting order types, and other price alias conflicts still require recovery. Raw broker responses remain in the recovery evidence.
