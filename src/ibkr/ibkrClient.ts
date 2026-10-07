@@ -1614,7 +1614,9 @@ export class IbkrClient
         // omit every client-order identity field. The caller's durable broker ID can establish that
         // one member's attachment when the status response contains no conflicting attachment
         // evidence and its complete ticket identifies exactly one requested node below.
-        const resolvedOrder = terminalOrder === undefined ? order : { ...terminalOrder, ...order };
+        const resolvedOrder = this.withoutPlainStopLimitPlaceholders(
+          terminalOrder === undefined ? order : { ...terminalOrder, ...order }
+        );
         if (!this.orderHasValidRecoveryStatus(resolvedOrder)) {
           invalidAttachedEvidence = true;
           terminalOrdersById.delete(orderId);
@@ -1885,7 +1887,27 @@ export class IbkrClient
     );
   }
 
-  private terminalOrderTicketFingerprint(order: IbkrLiveOrder): Record<string, string | boolean> {
+  /** A plain STOP has no limit. IBKR can still report its unused limit as numeric zero. */
+  private withoutPlainStopLimitPlaceholders(order: IbkrLiveOrder): IbkrLiveOrder {
+    const types = [order.order_type, order.orderType].filter((value) => value !== undefined);
+    if (
+      types.length === 0 ||
+      !types.every(
+        (value) => typeof value === "string" && this.normalizeOrderType(value) === "STOP"
+      )
+    ) {
+      return order;
+    }
+    const isZero = (value: unknown): boolean =>
+      value === 0 || (typeof value === "string" && value.trim() !== "" && Number(value) === 0);
+    const result = { ...order };
+    if (isZero(result.limitPrice)) delete result.limitPrice;
+    if (isZero(result.limit_price)) delete result.limit_price;
+    return result;
+  }
+
+  private terminalOrderTicketFingerprint(input: IbkrLiveOrder): Record<string, string | boolean> {
+    const order = this.withoutPlainStopLimitPlaceholders(input);
     const ticket: Record<string, string | boolean> = {};
     const malformed = "__MALFORMED_TERMINAL_TICKET_FIELD__";
     const addAliases = (
