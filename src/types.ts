@@ -566,6 +566,9 @@ export type EquityOrderPreviewRequest = EquityOrderFields & EquityOrderTerms;
 /** One live US equity LIMIT or STOP request with caller-stable identity. */
 export type EquityOrderRequest = EquityOrderPreviewRequest & { clientOrderId: string };
 
+/** Full replacement ticket for one existing IBKR equity order. The client order ID cannot change. */
+export type EquityOrderModifyRequest = EquityOrderPreviewRequest & { orderId: string };
+
 export type EquityOrderPreviewResult = DerivativeComboPreviewResult;
 
 export interface EquityOrderCancelRequest {
@@ -1060,7 +1063,8 @@ export type ActiveDerivativeOrderUncertainty =
   | "AMBIGUOUS_PARENT"
   | "DUPLICATE_MEMBER"
   | "INCOMPLETE_QUANTITIES"
-  | "PARTIAL_GRAPH";
+  | "PARTIAL_GRAPH"
+  | "CONFLICTING_TERMS";
 
 export interface ActiveDerivativeOptionIdentity {
   symbol: string;
@@ -1088,6 +1092,10 @@ export interface ActiveDerivativeOrderLeg {
 /** One member of the active order graph returned by Client Portal. */
 export interface ActiveDerivativeOrder {
   accountId: string;
+  /** The broker-stated security class; null if absent or conflicting. */
+  assetClass: string | null;
+  /** The broker-stated ticker; null if absent or conflicting. */
+  symbol: string | null;
   orderId: string | null;
   clientOrderId: string | null;
   parentOrderId: string | null;

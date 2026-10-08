@@ -73,6 +73,8 @@ void test("lists a typed active single option and preserves lifecycle evidence",
   const [order] = await client.listActiveDerivativeOrders("U123");
   assert.deepEqual(order, {
     accountId: "U123",
+    assetClass: null,
+    symbol: null,
     orderId: "10",
     clientOrderId: "caller-10",
     parentOrderId: null,
@@ -592,4 +594,100 @@ void test("fails closed when a completed snapshot omits its orders array", async
 void test("fails closed when a completed snapshot has malformed orders", async () => {
   const client = new FakeIbkrClient({ snapshot: true, orders: {} });
   await assert.rejects(client.listActiveDerivativeOrders("U123"), /snapshot is incomplete/);
+});
+
+void test("active STK snapshot exposes exact stock identity and stop ticket terms", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [
+      {
+        account: "U123",
+        orderId: 991,
+        order_ref: "external-1",
+        conid: 320227571,
+        secType: "STK",
+        ticker: "IBIT",
+        side: "SELL",
+        totalSize: 12,
+        cumFill: 2,
+        remaining: 10,
+        status: "Submitted",
+        orderType: "STP",
+        price: 40.15,
+        tif: "GTC",
+        outsideRTH: true,
+      },
+    ],
+  });
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.equal(order?.assetClass, "STK");
+  assert.equal(order?.symbol, "IBIT");
+  assert.equal(order?.clientOrderId, "external-1");
+  assert.equal(order?.legs[0]?.conid, 320227571);
+  assert.equal(order?.legs[0]?.side, "SELL");
+  assert.equal(order?.orderType, "STOP");
+  assert.equal(order?.stopPrice, 40.15);
+  assert.equal(order?.limitPrice, null);
+  assert.equal(order?.filledQuantity, 2);
+  assert.equal(order?.session, "OVERNIGHT");
+});
+
+void test("active STK snapshot does not hide conflicting stock and price evidence", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [
+      {
+        account: "U123",
+        orderId: 991,
+        conid: 320227571,
+        secType: "STK",
+        assetClass: "OPT",
+        ticker: "IBIT",
+        symbol: "OTHER",
+        side: "BUY",
+        totalSize: 12,
+        cumFill: 0,
+        remaining: 12,
+        status: "Submitted",
+        orderType: "LMT",
+        price: 40,
+        limitPrice: 41,
+        tif: "GTC",
+        outsideRTH: false,
+      },
+    ],
+  });
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.ok(order?.uncertainty.includes("CONFLICTING_TERMS"));
+});
+
+void test("active STK snapshot flags conflicting quantity, session, type and client ID", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [
+      {
+        account: "U123",
+        orderId: 991,
+        conid: 320227571,
+        secType: "STK",
+        ticker: "IBIT",
+        side: "BUY",
+        totalSize: 12,
+        size: 13,
+        cumFill: 0,
+        remaining: 12,
+        status: "Submitted",
+        orderType: "LMT",
+        order_type: "STP",
+        price: 40,
+        tif: "GTC",
+        outsideRTH: false,
+        outside_rth: true,
+        cOID: "first",
+        order_ref: "second",
+      },
+    ],
+  });
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.ok(order?.uncertainty.includes("CONFLICTING_TERMS"));
 });

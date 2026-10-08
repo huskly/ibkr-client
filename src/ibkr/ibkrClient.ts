@@ -39,6 +39,7 @@ import type {
   EquityOrderPreviewRequest,
   EquityOrderPreviewResult,
   EquityOrderRequest,
+  EquityOrderModifyRequest,
   ForexContract,
   ForexOrderCancelRequest,
   ForexOrderPreviewRequest,
@@ -964,6 +965,42 @@ export class IbkrClient
           },
         });
         return this.normalizeOrderSubmission(response, request.clientOrderId);
+      }
+    );
+  }
+
+  /** Modify one existing equity order with one full ticket and one broker write attempt. */
+  async modifyEquityOrder(
+    request: EquityOrderModifyRequest
+  ): Promise<DerivativeOrderSubmissionResult> {
+    this.assertOpen();
+    this.validateEquityOrderFields(request);
+    if (typeof request.orderId !== "string" || !request.orderId.trim()) {
+      throw new Error("An exact IBKR order ID is required");
+    }
+    return this.withTradingMutation(
+      request.accountId,
+      "IBKR brokerage session is not safely authenticated for modification",
+      async () => {
+        const response = await this.singleAttemptRequest<
+          IbkrOrderSubmissionResponse | IbkrOrderSubmissionResponse[]
+        >({
+          path: `iserver/account/${request.accountId}/order/${encodeURIComponent(request.orderId)}`,
+          method: "POST",
+          data: { orders: [this.equityOrderTicket(request)] },
+        });
+        const result = this.normalizeOrderSubmission(response, null);
+        if (result.state === "accepted" && result.orderId !== request.orderId) {
+          return {
+            state: "recovery_required",
+            reasons: ["IBKR returned a different order ID for the modification"],
+            orders: [{ orderId: result.orderId, status: result.status, clientOrderId: null }],
+            warnings: [],
+            errors: [],
+            unrecognizedResponses: [],
+          };
+        }
+        return result;
       }
     );
   }
@@ -4741,6 +4778,29 @@ export class IbkrClient
     nestedParent: IbkrLiveOrder | null
   ): ActiveDerivativeOrder {
     const uncertainty: ActiveDerivativeOrderUncertainty[] = [];
+    const numericAliasesConflict = (values: readonly (string | number | undefined)[]): boolean => {
+      const present = values.filter((value) => value !== undefined);
+      if (present.length === 0) return false;
+      const normalized = present.map((value) => this.firstNumber(value));
+      return normalized.some((value) => value === undefined || value !== normalized[0]);
+    };
+    const stringAliasesConflict = (values: readonly (string | undefined)[]): boolean => {
+      const present = values.filter((value): value is string => value !== undefined);
+      return present.length > 1 && present.some((value) => value !== present[0]);
+    };
+    if (
+      numericAliasesConflict([order.total_size, order.totalSize, order.size]) ||
+      numericAliasesConflict([order.cum_fill, order.cumFill, order.filledQuantity, order.filled]) ||
+      numericAliasesConflict([order.remainingQuantity, order.remaining_size, order.remaining]) ||
+      stringAliasesConflict([order.cOID, order.order_ref]) ||
+      stringAliasesConflict([order.order_type, order.orderType]) ||
+      stringAliasesConflict([order.tif, order.timeInForce]) ||
+      (order.outsideRTH !== undefined &&
+        order.outside_rth !== undefined &&
+        order.outsideRTH !== order.outside_rth)
+    ) {
+      uncertainty.push("CONFLICTING_TERMS");
+    }
     const total = this.firstNumber(order.total_size, order.totalSize, order.size) ?? null;
     const filled =
       this.firstNumber(order.cum_fill, order.cumFill, order.filledQuantity, order.filled) ?? null;
@@ -4766,10 +4826,39 @@ export class IbkrClient
     ) {
       uncertainty.push("PARTIAL_GRAPH");
     }
+    const classAliases = [order.secType, order.assetClass].filter(
+      (value): value is string => typeof value === "string" && value.trim() !== ""
+    );
+    const symbolAliases = [order.ticker, order.symbol].filter(
+      (value): value is string => typeof value === "string" && value.trim() !== ""
+    );
+    const consistentAlias = (values: string[]): string | null => {
+      if (values.length === 0) return null;
+      const normalized = values.map((value) => value.trim().toUpperCase());
+      if (normalized.some((value) => value !== normalized[0])) {
+        uncertainty.push("CONFLICTING_TERMS");
+        return null;
+      }
+      return normalized[0] ?? null;
+    };
+    const assetClass = consistentAlias(classAliases);
+    const symbol = consistentAlias(symbolAliases);
+    const orderType = this.normalizeOrderType(order.order_type ?? order.orderType) ?? null;
+    const priceAliases = [order.price, order.limitPrice, order.limit_price];
+    const stopAliases = [order.price, order.stopPrice, order.stop_price];
+    const relevantPrices = orderType === "STOP" ? stopAliases : priceAliases;
+    const numericPrices = relevantPrices
+      .filter((value) => value !== undefined)
+      .map((value) => this.firstNumber(value));
+    if (numericPrices.length > 1 && numericPrices.some((value) => value !== numericPrices[0])) {
+      uncertainty.push("CONFLICTING_TERMS");
+    }
     const legs = this.normalizeActiveDerivativeLegs(order, total, uncertainty);
     const orderTime = this.parseOrderTime(order)?.toISOString() ?? null;
     return {
       accountId,
+      assetClass,
+      symbol,
       orderId: rawOrderId === undefined ? null : String(rawOrderId),
       clientOrderId: order.cOID ?? order.order_ref ?? null,
       parentOrderId:
@@ -4801,9 +4890,15 @@ export class IbkrClient
           : order.outsideRTH === false || order.outside_rth === false
             ? "REGULAR"
             : "UNKNOWN",
-      orderType: this.normalizeOrderType(order.order_type ?? order.orderType) ?? null,
-      limitPrice: this.firstNumber(order.limitPrice, order.limit_price, order.price) ?? null,
-      stopPrice: this.firstNumber(order.stopPrice, order.stop_price) ?? null,
+      orderType,
+      limitPrice:
+        orderType === "STOP"
+          ? null
+          : (this.firstNumber(order.limitPrice, order.limit_price, order.price) ?? null),
+      stopPrice:
+        orderType === "STOP"
+          ? (this.firstNumber(order.stopPrice, order.stop_price, order.price) ?? null)
+          : (this.firstNumber(order.stopPrice, order.stop_price) ?? null),
       enteredAt: orderTime,
       updatedAt:
         order.lastExecutionTime_r !== undefined || order.lastExecutionTime !== undefined

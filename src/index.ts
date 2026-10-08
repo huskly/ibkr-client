@@ -68,6 +68,7 @@ export type {
   EquityOrderPreviewRequest,
   EquityOrderPreviewResult,
   EquityOrderRequest,
+  EquityOrderModifyRequest,
   EquityOrderSide,
   EquityOrderTerms,
   ForexContract,
