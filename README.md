@@ -576,9 +576,13 @@ Permission metadata is diagnostic only; the What-If response remains authoritati
 `resolveEquityContract(symbol)` must produce the exact contract before an order can be previewed.
 `previewEquityOrder(...)` sends one What-If request and always returns `submitted: false`.
 `submitEquityOrder(...)` accepts only BUY or SELL LIMIT or STOP orders for positive whole-share
-quantities and requires a stable client order ID. `cancelEquityOrder(...)` sends one cancellation
-request. These broker writes never retry automatically. Warning, lifecycle, and recovery evidence
-use the same strict normalization as single derivative orders.
+quantities and requires a stable client order ID. `modifyEquityOrder(...)` takes an existing IBKR
+order ID and the full equity ticket. It does not send a client order ID or run a What-If preview.
+`cancelEquityOrder(...)` sends one cancellation request. These broker writes never retry
+automatically. Warning, lifecycle, and recovery evidence use the same strict normalization as
+single derivative orders. Use `listActiveDerivativeOrders(accountId)` to read the broker-stated
+asset class, ticker, conid, side, quantities, prices, TIF, session, and graph links. Missing terms
+stay null. Verify the ticker with `resolveEquityContract` and check the conid before a modification.
 
 LIMIT and STOP requests are discriminated by `orderType`. A `LMT` request requires only a positive
 `limit`. A `STP` request requires only a positive `stopPrice`, and IBKR places it as a native
