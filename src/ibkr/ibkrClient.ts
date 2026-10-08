@@ -205,9 +205,11 @@ const OPTION_QUOTE_FIELDS = [
 ].join(",");
 const DERIVATIVE_QUOTE_FIELDS = [
   "31", // Last
+  "82", // Change
   "84", // Bid
   "86", // Ask
   "6509", // Market data availability
+  "7741", // Prior close
   "7308", // Delta
   "7633", // Implied volatility
   "7635", // Mark price
@@ -216,10 +218,12 @@ const DERIVATIVE_QUOTE_FIELDS = [
 ].join(",");
 const DERIVATIVE_REFERENCE_QUOTE_FIELDS = [
   "31", // Last
+  "82", // Change
   "55", // Symbol
   "84", // Bid
   "86", // Ask
   "6509", // Market data availability
+  "7741", // Prior close
   "7635", // Mark price when supplied
 ].join(",");
 const QUOTE_FIELDS = [
@@ -235,6 +239,7 @@ const QUOTE_FIELDS = [
   "87", // Formatted volume
   "6004", // Exchange
   "6509", // Market data availability
+  "7741", // Prior close
   "7762", // Unformatted volume
 ].join(",");
 const OPTION_SECDEF_INFO_BATCH_SIZE = 8;
@@ -7626,22 +7631,29 @@ export class IbkrClient
   }
 
   /**
-   * Split IBKR snapshot field `31` into a traded last price and a previous close.
+   * Read a traded last price and a previous close from an IBKR snapshot.
    *
-   * IBKR marks the value with a `C` prefix when the contract has not traded in the current
-   * session and the number is the previous close. The prefix is the only signal that separates a
-   * close from a trade, so the close is reported as `close` and `last` stays undefined. A value
-   * with no `C` prefix is a real last trade.
+   * Field `7741` supplies the prior close. Otherwise, a `C` prefix on field `31` marks a
+   * previous close, not a trade. Without that prefix, derive the close from last minus field
+   * `82` only when the trade and change are finite and the result is finite and non-negative.
    */
   private snapshotTradePrice(snapshot: IbkrMarketDataSnapshot): {
     last: number | undefined;
     close: number | undefined;
   } {
     const value = this.snapshotNumber(snapshot, "31");
-    if (value === undefined) return { last: undefined, close: undefined };
-    return this.snapshotHasPrefix(snapshot, "31", "C")
-      ? { last: undefined, close: value }
-      : { last: value, close: undefined };
+    const isClose = this.snapshotHasPrefix(snapshot, "31", "C");
+    const last = isClose ? undefined : value;
+    const priorClose = this.snapshotNumber(snapshot, "7741");
+    if (priorClose !== undefined && priorClose >= 0) return { last, close: priorClose };
+    if (isClose) return { last, close: value };
+    const change = this.snapshotNumber(snapshot, "82");
+    const derivedClose = last !== undefined && change !== undefined ? last - change : undefined;
+    const close =
+      derivedClose !== undefined && Number.isFinite(derivedClose) && derivedClose >= 0
+        ? derivedClose
+        : undefined;
+    return { last, close };
   }
 
   private snapshotHasPrefix(

@@ -233,6 +233,60 @@ void test("NDX and NDXP at the same expiry and strike remain distinct and ambigu
   assert.equal(ndxp.multiplier, 100);
 });
 
+void test("derivative chain and reference snapshots request and recover prior close", async (t) => {
+  for (const fields of [{ "7741": "380", "82": "2" }, { "82": "3" }]) {
+    await t.test(JSON.stringify(fields), async () => {
+      const client: FakeIbkrClient = new FakeIbkrClient((input) => {
+        if (input.path === "iserver/secdef/search") return nqSearch;
+        if (input.path === "iserver/secdef/strikes") return { call: [], put: [26600] };
+        if (input.path === "iserver/secdef/info") return nqAug26600Definitions;
+        if (input.path === "trsrv/secdef")
+          return { secdef: [{ conid: 892767774, undConid: 770561204, undSym: "NQ" }] };
+        if (input.path === "iserver/marketdata/snapshot") {
+          const reads = client.calls.filter(
+            (call) =>
+              call.path === input.path && call.params?.["conids"] === input.params?.["conids"]
+          ).length;
+          return reads === 1
+            ? []
+            : [
+                {
+                  conid: Number(input.params?.["conids"]),
+                  "31": "383",
+                  "84": "330",
+                  "86": "337",
+                  ...fields,
+                },
+              ];
+        }
+        throw new Error(`Unexpected request: ${input.path}`);
+      });
+      const [quote] = await client.getDerivativeChain({
+        assetClass: "FOP",
+        underlying: "NQ",
+        expiration: "2026-08-21",
+        tradingClass: "QN3",
+        right: "P",
+      });
+      assert.ok(quote);
+      assert.equal(quote.close, 380);
+      assert.equal(quote.last, 383);
+      const reference = await client.getDerivativeReferenceQuote(quote.contract);
+      assert.equal(reference.close, 380);
+      assert.equal(reference.last, 383);
+      const snapshotCalls = client.calls.filter(
+        (call) => call.path === "iserver/marketdata/snapshot"
+      );
+      assert.equal(snapshotCalls.length, 4);
+      for (const call of snapshotCalls) {
+        const requested = String(call.params?.["fields"]).split(",");
+        assert.ok(requested.includes("7741"));
+        assert.ok(requested.includes("82"));
+      }
+    });
+  }
+});
+
 void test("a C-prefixed field 31 reports a derivative close, not a last trade", async () => {
   let snapshots = 0;
   const client = new FakeIbkrClient((input) => {

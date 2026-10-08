@@ -2753,6 +2753,70 @@ void test("price history keeps priority over a C-prefixed snapshot close", async
   assert.equal(quotes["TEST"]?.quote.lastPrice, 23);
 });
 
+void test("snapshot prior close uses field 7741, then a real last trade minus change", async (t) => {
+  const cases = [
+    {
+      name: "explicit prior close has priority",
+      fields: { "31": "11.5", "82": "1.95", "7741": "10" },
+      close: 10,
+    },
+    { name: "prior close without a last trade", fields: { "7741": "18.15" }, close: 18.15 },
+    { name: "zero prior close", fields: { "7741": "0" }, close: 0 },
+    { name: "real trade and positive change", fields: { "31": "11.5", "82": "1.95" }, close: 9.55 },
+    { name: "negative change", fields: { "31": "11.5", "82": "-1.95" }, close: 13.45 },
+    { name: "zero derived close", fields: { "31": "2", "82": "2" }, close: 0 },
+    { name: "C prefix is already a close", fields: { "31": "C18.15", "82": "1.95" }, close: 18.15 },
+    { name: "explicit close beats C prefix", fields: { "31": "C18.15", "7741": "17" }, close: 17 },
+    { name: "negative derived close", fields: { "31": "1", "82": "2" }, close: undefined },
+    {
+      name: "negative trade with a nonnegative prior close",
+      fields: { "31": "-1", "82": "-2" },
+      close: 1,
+    },
+    { name: "missing change", fields: { "31": "11.5" }, close: undefined },
+    { name: "missing last", fields: { "82": "1.95" }, close: undefined },
+    { name: "non-finite last", fields: { "31": "Infinity", "82": "1" }, close: undefined },
+    { name: "non-finite change", fields: { "31": "11.5", "82": "NaN" }, close: undefined },
+    { name: "non-finite result", fields: { "31": "1e308", "82": "-1e308" }, close: undefined },
+    { name: "negative prior close", fields: { "7741": "-1" }, close: undefined },
+    { name: "non-finite prior close", fields: { "7741": "Infinity" }, close: undefined },
+    {
+      name: "invalid prior close falls back",
+      fields: { "7741": "NaN", "31": "11.5", "82": "1.95" },
+      close: 9.55,
+    },
+  ];
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      let reads = 0;
+      const client = new FakeIbkrClient((input) => {
+        assert.equal(input.path, "iserver/marketdata/snapshot");
+        reads += 1;
+        return reads === 1 ? [] : [{ conid: 123, ...fixture.fields }];
+      });
+      const quotes = await client.getQuotes([{ symbol: "TEST", brokerId: "123" }], {
+        includeHistory: false,
+      });
+      assert.equal(quotes["TEST"]?.quote.closePrice, fixture.close);
+      assert.equal(reads, 2, "missing optional fields do not trigger more warm-up reads");
+      for (const call of client.calls) {
+        assert.ok(String(call.params?.["fields"]).split(",").includes("7741"));
+      }
+    });
+  }
+});
+
+void test("history close keeps priority over field 7741 and derived snapshot close", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/marketdata/snapshot")
+      return [{ conid: 123, "31": "11.5", "82": "1.95", "7741": "10" }];
+    if (input.path === "iserver/marketdata/history") return { data: [bar(1, 8), bar(2, 11)] };
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+  const quotes = await client.getQuotes([{ symbol: "TEST", brokerId: "123" }]);
+  assert.equal(quotes["TEST"]?.quote.closePrice, 8);
+});
+
 void test("known broker ids quote held options without symbol rediscovery", async () => {
   let snapshots = 0;
   const client = new FakeIbkrClient((input) => {
