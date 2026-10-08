@@ -1948,6 +1948,30 @@ export class IbkrClient
     return result;
   }
 
+  /** Normalize broker aliases once for exact recovery and active-order evidence. */
+  private normalizedOrderAliases(
+    values: readonly unknown[],
+    normalize: (value: unknown) => string | boolean | undefined
+  ): string | boolean | null | undefined {
+    // An empty string means "not applicable" in IBKR snapshots, not a conflicting value.
+    const provided = values.filter(
+      (value) => value !== undefined && !(typeof value === "string" && value.trim() === "")
+    );
+    if (provided.length === 0) return undefined;
+    const normalized = provided.map(normalize);
+    const [first] = normalized;
+    return first !== undefined && normalized.every((value) => value === first) ? first : null;
+  }
+
+  private normalizeOrderAliasNumber(value: unknown): string | undefined {
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    if (typeof value === "string" && value.trim() !== "") {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? String(numeric) : undefined;
+    }
+    return undefined;
+  }
+
   private terminalOrderTicketFingerprint(input: IbkrLiveOrder): Record<string, string | boolean> {
     const order = this.withoutPlainStopLimitPlaceholders(input);
     const ticket: Record<string, string | boolean> = {};
@@ -1957,28 +1981,11 @@ export class IbkrClient
       values: readonly unknown[],
       normalize: (value: unknown) => string | boolean | undefined
     ) => {
-      // An empty string is IBKR's "this field does not apply to this order", not a value that
-      // conflicts with its own aliases: a stop order carries `price: ""` next to a real
-      // `stop_price`. Treating it as provided marked every such ticket malformed.
-      const provided = values.filter(
-        (value) => value !== undefined && !(typeof value === "string" && value.trim() === "")
-      );
-      if (provided.length === 0) return;
-      const normalized = provided.map(normalize);
-      const [first] = normalized;
-      ticket[field] =
-        first !== undefined && normalized.every((value) => value === first) ? first : malformed;
+      const result = this.normalizedOrderAliases(values, normalize);
+      if (result !== undefined) ticket[field] = result ?? malformed;
     };
-    const normalizeNumber = (value: unknown): string | undefined => {
-      if (typeof value === "number" && Number.isFinite(value)) {
-        return String(value);
-      }
-      if (typeof value === "string" && value.trim() !== "") {
-        const numeric = Number(value);
-        return Number.isFinite(numeric) ? String(numeric) : undefined;
-      }
-      return undefined;
-    };
+    const normalizeNumber = (value: unknown): string | undefined =>
+      this.normalizeOrderAliasNumber(value);
 
     addAliases("conid", [order.conid], normalizeNumber);
     if (order.conidex !== undefined) {
@@ -4772,41 +4779,57 @@ export class IbkrClient
     return visit(record["orders"], null) ? flattened : null;
   }
 
+  private activeOrderAliasesConflict(order: IbkrLiveOrder): boolean {
+    const number = (value: unknown): string | undefined => this.normalizeOrderAliasNumber(value);
+    const identity = (value: unknown): string | undefined =>
+      typeof value === "string" ? value : undefined;
+    const aliases: readonly [
+      readonly unknown[],
+      (value: unknown) => string | boolean | undefined,
+    ][] = [
+      [[order.total_size, order.totalSize], number],
+      [[order.cum_fill, order.cumFill, order.filledQuantity, order.filled], number],
+      [[order.remainingQuantity, order.remaining_size, order.remaining, order.size], number],
+      [[order.cOID, order.order_ref], identity],
+      [
+        [order.order_type, order.orderType],
+        (value) => (typeof value === "string" ? this.normalizeOrderType(value) : undefined),
+      ],
+      [[order.tif, order.timeInForce], (value) => this.canonicalTimeInForce(value)],
+      [
+        [order.outsideRTH, order.outside_rth],
+        (value) => (typeof value === "boolean" ? value : undefined),
+      ],
+    ];
+    const type = this.normalizeOrderType(order.order_type ?? order.orderType);
+    const prices =
+      type === "STOP"
+        ? [order.stopPrice, order.stop_price, order.auxPrice, order.aux_price]
+        : [order.price, order.limitPrice, order.limit_price];
+    return (
+      aliases.some(
+        ([values, normalize]) => this.normalizedOrderAliases(values, normalize) === null
+      ) || this.normalizedOrderAliases(prices, number) === null
+    );
+  }
+
   private normalizeActiveDerivativeOrder(
     accountId: string,
     order: IbkrLiveOrder,
     nestedParent: IbkrLiveOrder | null
   ): ActiveDerivativeOrder {
     const uncertainty: ActiveDerivativeOrderUncertainty[] = [];
-    const numericAliasesConflict = (values: readonly (string | number | undefined)[]): boolean => {
-      const present = values.filter((value) => value !== undefined);
-      if (present.length === 0) return false;
-      const normalized = present.map((value) => this.firstNumber(value));
-      return normalized.some((value) => value === undefined || value !== normalized[0]);
-    };
-    const stringAliasesConflict = (values: readonly (string | undefined)[]): boolean => {
-      const present = values.filter((value): value is string => value !== undefined);
-      return present.length > 1 && present.some((value) => value !== present[0]);
-    };
-    if (
-      numericAliasesConflict([order.total_size, order.totalSize, order.size]) ||
-      numericAliasesConflict([order.cum_fill, order.cumFill, order.filledQuantity, order.filled]) ||
-      numericAliasesConflict([order.remainingQuantity, order.remaining_size, order.remaining]) ||
-      stringAliasesConflict([order.cOID, order.order_ref]) ||
-      stringAliasesConflict([order.order_type, order.orderType]) ||
-      stringAliasesConflict([order.tif, order.timeInForce]) ||
-      (order.outsideRTH !== undefined &&
-        order.outside_rth !== undefined &&
-        order.outsideRTH !== order.outside_rth)
-    ) {
-      uncertainty.push("CONFLICTING_TERMS");
-    }
-    const total = this.firstNumber(order.total_size, order.totalSize, order.size) ?? null;
+    if (this.activeOrderAliasesConflict(order)) uncertainty.push("CONFLICTING_TERMS");
+    const total = this.firstNumber(order.total_size, order.totalSize) ?? null;
     const filled =
       this.firstNumber(order.cum_fill, order.cumFill, order.filledQuantity, order.filled) ?? null;
     const remaining =
-      this.firstNumber(order.remainingQuantity, order.remaining_size, order.remaining) ??
-      (total !== null && filled !== null ? Math.max(0, total - filled) : null);
+      this.firstNumber(
+        order.remainingQuantity,
+        order.remaining_size,
+        order.remaining,
+        order.size
+      ) ?? (total !== null && filled !== null ? Math.max(0, total - filled) : null);
     if (total === null || filled === null || remaining === null)
       uncertainty.push("INCOMPLETE_QUANTITIES");
     const rawStatus = order.order_status ?? order.orderStatus ?? order.status;
@@ -4826,33 +4849,19 @@ export class IbkrClient
     ) {
       uncertainty.push("PARTIAL_GRAPH");
     }
-    const classAliases = [order.secType, order.assetClass].filter(
-      (value): value is string => typeof value === "string" && value.trim() !== ""
+    const uppercase = (value: unknown): string | undefined =>
+      typeof value === "string" ? value.trim().toUpperCase() : undefined;
+    const assetClassAlias = this.normalizedOrderAliases(
+      [order.secType, order.assetClass],
+      uppercase
     );
-    const symbolAliases = [order.ticker, order.symbol].filter(
-      (value): value is string => typeof value === "string" && value.trim() !== ""
-    );
-    const consistentAlias = (values: string[]): string | null => {
-      if (values.length === 0) return null;
-      const normalized = values.map((value) => value.trim().toUpperCase());
-      if (normalized.some((value) => value !== normalized[0])) {
-        uncertainty.push("CONFLICTING_TERMS");
-        return null;
-      }
-      return normalized[0] ?? null;
-    };
-    const assetClass = consistentAlias(classAliases);
-    const symbol = consistentAlias(symbolAliases);
-    const orderType = this.normalizeOrderType(order.order_type ?? order.orderType) ?? null;
-    const priceAliases = [order.price, order.limitPrice, order.limit_price];
-    const stopAliases = [order.price, order.stopPrice, order.stop_price];
-    const relevantPrices = orderType === "STOP" ? stopAliases : priceAliases;
-    const numericPrices = relevantPrices
-      .filter((value) => value !== undefined)
-      .map((value) => this.firstNumber(value));
-    if (numericPrices.length > 1 && numericPrices.some((value) => value !== numericPrices[0])) {
+    const symbolAlias = this.normalizedOrderAliases([order.ticker, order.symbol], uppercase);
+    if (assetClassAlias === null || symbolAlias === null) {
       uncertainty.push("CONFLICTING_TERMS");
     }
+    const assetClass = typeof assetClassAlias === "string" ? assetClassAlias : null;
+    const symbol = typeof symbolAlias === "string" ? symbolAlias : null;
+    const orderType = this.normalizeOrderType(order.order_type ?? order.orderType) ?? null;
     const legs = this.normalizeActiveDerivativeLegs(order, total, uncertainty);
     const orderTime = this.parseOrderTime(order)?.toISOString() ?? null;
     return {
@@ -4897,7 +4906,7 @@ export class IbkrClient
           : (this.firstNumber(order.limitPrice, order.limit_price, order.price) ?? null),
       stopPrice:
         orderType === "STOP"
-          ? (this.firstNumber(order.stopPrice, order.stop_price, order.price) ?? null)
+          ? (this.observedStopPrice(order) ?? null)
           : (this.firstNumber(order.stopPrice, order.stop_price) ?? null),
       enteredAt: orderTime,
       updatedAt:

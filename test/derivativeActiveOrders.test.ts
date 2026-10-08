@@ -613,7 +613,9 @@ void test("active STK snapshot exposes exact stock identity and stop ticket term
         remaining: 10,
         status: "Submitted",
         orderType: "STP",
-        price: 40.15,
+        price: "",
+        stop_price: "40.15",
+        auxPrice: "40.15",
         tif: "GTC",
         outsideRTH: true,
       },
@@ -685,6 +687,116 @@ void test("active STK snapshot flags conflicting quantity, session, type and cli
         outside_rth: true,
         cOID: "first",
         order_ref: "second",
+      },
+    ],
+  });
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.ok(order?.uncertainty.includes("CONFLICTING_TERMS"));
+});
+
+void test("realistic filled, working STOP, and partially filled orders have no false conflicts", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [
+      {
+        account: "U123",
+        order_id: "100",
+        conid: 320227571,
+        secType: "STK",
+        ticker: "IBIT",
+        side: "BUY",
+        total_size: "1.0",
+        size: "0.0",
+        cum_fill: "1.0",
+        remaining: "0.0",
+        order_status: "Filled",
+        order_type: "LMT",
+        price: "40.50",
+        limit_price: "40.50",
+        tif: "DAY",
+        outside_rth: false,
+      },
+      {
+        account: "U123",
+        order_id: "101",
+        conid: 320227571,
+        secType: "STK",
+        ticker: "IBIT",
+        side: "SELL",
+        total_size: "10.0",
+        size: "10.0",
+        cum_fill: "0.0",
+        remaining: "10.0",
+        order_status: "PreSubmitted",
+        order_type: "STP",
+        price: "",
+        stop_price: "38.25",
+        auxPrice: "38.25",
+        tif: "GTC",
+        outside_rth: true,
+      },
+      {
+        account: "U123",
+        order_id: "102",
+        conid: 320227571,
+        secType: "STK",
+        ticker: "IBIT",
+        side: "BUY",
+        total_size: "10.0",
+        size: "6.0",
+        cum_fill: "4.0",
+        remaining: "6.0",
+        order_status: "Submitted",
+        order_type: "LMT",
+        price: "40.50",
+        limit_price: "40.50",
+        tif: "DAY",
+        outside_rth: false,
+      },
+    ],
+  });
+  const orders = await client.listActiveDerivativeOrders("U123");
+  assert.deepEqual(
+    orders.map(({ uncertainty }) => uncertainty),
+    [[], [], []]
+  );
+  assert.deepEqual(
+    orders.map(({ totalQuantity, filledQuantity, remainingQuantity }) => [
+      totalQuantity,
+      filledQuantity,
+      remainingQuantity,
+    ]),
+    [
+      [1, 1, 0],
+      [10, 0, 10],
+      [10, 4, 6],
+    ]
+  );
+  assert.equal(orders[1]?.stopPrice, 38.25);
+  assert.equal(orders[1]?.limitPrice, null);
+});
+
+void test("conflicting total quantity aliases are flagged", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [
+      {
+        account: "U123",
+        order_id: "103",
+        conid: 320227571,
+        secType: "STK",
+        ticker: "IBIT",
+        side: "BUY",
+        total_size: "10.0",
+        totalSize: "11.0",
+        size: "10.0",
+        cum_fill: "0.0",
+        remaining: "10.0",
+        order_status: "Submitted",
+        order_type: "LMT",
+        price: "40.50",
+        tif: "DAY",
+        outside_rth: false,
       },
     ],
   });
