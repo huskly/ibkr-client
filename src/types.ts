@@ -478,8 +478,8 @@ export interface BrokerQuoteData {
   bidPrice?: number;
   askPrice?: number;
   /**
-   * Previous close. It comes from price history when history is present, and otherwise from a
-   * `C`-prefixed snapshot field 31.
+   * Previous close. The previous history bar keeps priority. Snapshot sources are field 7741,
+   * then a `C`-prefixed field 31, then a finite, non-negative result from last minus field 82.
    */
   closePrice?: number;
   highPrice?: number;
@@ -678,7 +678,10 @@ export interface DerivativeQuote {
   ask: number | null;
   /** Last traded price of the current session; null when the contract has not traded. */
   last: number | null;
-  /** Previous close, which IBKR sends with a `C` prefix on field 31; null when absent. */
+  /**
+   * Previous close from field 7741, a `C`-prefixed field 31, or finite last minus field 82.
+   * A derived close must be non-negative. Null when no source supplies a usable close.
+   */
   close: number | null;
   mark: number | null;
   delta: number | null;
@@ -697,7 +700,10 @@ export interface DerivativeReferenceQuote {
   ask: number | null;
   /** Last traded price of the current session; null when the contract has not traded. */
   last: number | null;
-  /** Previous close, which IBKR sends with a `C` prefix on field 31; null when absent. */
+  /**
+   * Previous close from field 7741, a `C`-prefixed field 31, or finite last minus field 82.
+   * A derived close must be non-negative. Null when no source supplies a usable close.
+   */
   close: number | null;
   mark: number | null;
 }
