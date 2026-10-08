@@ -5,6 +5,7 @@ import {
   type EquityContract,
   type EquityOrderPreviewRequest,
   type EquityOrderRequest,
+  type EquityOrderModifyRequest,
 } from "../src/index.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
@@ -345,4 +346,73 @@ void test("equity cancellation makes one STK request without CME metadata", asyn
   assert.equal(result.state, "requested");
   const cancellation = api.calls.find(({ method }) => method === "DELETE");
   assert.deepEqual(cancellation?.params, undefined);
+});
+
+void test("equity modification sends a full ticket without cOID for LIMIT and STOP", async () => {
+  for (const original of [request(), stopRequest()] as const) {
+    const { clientOrderId: _clientOrderId, ...terms } = original;
+    const modify: EquityOrderModifyRequest = { ...terms, orderId: "991" };
+    const api = new FakeIbkrClient((input) =>
+      input.path === "iserver/account/U123/order/991"
+        ? [{ order_id: "991", order_status: "PreSubmitted" }]
+        : session(input)
+    );
+    const result = await api.modifyEquityOrder(modify);
+    assert.equal(result.state, "accepted");
+    const writes = api.calls.filter(({ path }) => path === "iserver/account/U123/order/991");
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]?.method, "POST");
+    assert.deepEqual(writes[0]?.data, {
+      orders: [
+        {
+          acctId: "U123",
+          conid: contract.conid,
+          orderType: original.orderType,
+          side: original.side,
+          price: original.orderType === "LMT" ? original.limit : original.stopPrice,
+          tif: original.tif,
+          quantity: original.quantity,
+          outsideRTH: original.session === "OVERNIGHT",
+        },
+      ],
+    });
+    assert.equal(
+      api.calls.some(({ path }) => path.endsWith("/orders/whatif")),
+      false
+    );
+  }
+});
+
+void test("equity modification keeps warning, refusal and ambiguous responses explicit", async () => {
+  const { clientOrderId: _clientOrderId, ...terms } = request();
+  const modify: EquityOrderModifyRequest = { ...terms, orderId: "991" };
+  for (const [response, expected] of [
+    [[{ id: "reply-1", message: ["Price constraint"] }], "warning"],
+    [{ error: "Order rejected", statusCode: 400 }, "rejected"],
+    [[{ order_id: "other", order_status: "PreSubmitted" }], "recovery_required"],
+    [[{ order_id: "991", order_status: "not-a-status" }], "recovery_required"],
+    [{ unrelated: "response" }, "recovery_required"],
+  ] as const) {
+    const api = new FakeIbkrClient((input) =>
+      input.path === "iserver/account/U123/order/991" ? response : session(input)
+    );
+    assert.equal((await api.modifyEquityOrder(modify)).state, expected);
+  }
+});
+
+void test("equity modification validates fields and never retries a failed broker write", async () => {
+  const { clientOrderId: _clientOrderId, ...terms } = request();
+  const modify: EquityOrderModifyRequest = { ...terms, orderId: "991" };
+  const api = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/account/U123/order/991") throw new Error("connection lost");
+    return session(input);
+  });
+  await assert.rejects(() => api.modifyEquityOrder({ ...modify, orderId: " " }), /order ID/);
+  await assert.rejects(
+    () => api.modifyEquityOrder({ ...modify, limit: Number.NaN } as EquityOrderModifyRequest),
+    /positive limit/
+  );
+  assert.equal(api.calls.length, 0);
+  await assert.rejects(() => api.modifyEquityOrder(modify), /connection lost/);
+  assert.equal(api.calls.filter(({ path }) => path === "iserver/account/U123/order/991").length, 1);
 });

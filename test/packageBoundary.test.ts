@@ -30,6 +30,7 @@ import {
   type EquityOrderPreviewRequest,
   type EquityOrderPreviewResult,
   type EquityOrderRequest,
+  type EquityOrderModifyRequest,
   type DerivativeExecutionClient,
   type DerivativeOrderCancellationEvidence,
   type DerivativeOrderCancellationResult,
@@ -655,4 +656,30 @@ void test("package exports structured HTTP error evidence", () => {
   assert.equal(error.status, 500);
   assert.equal(error.statusCode, 500);
   assert.equal(error.response, response);
+});
+
+void test("package exports equity modification and live stock evidence", () => {
+  const modify: IbkrClient["modifyEquityOrder"] | undefined = undefined;
+  const list: IbkrClient["listActiveDerivativeOrders"] | undefined = undefined;
+  const input: EquityOrderModifyRequest = {
+    accountId: "U123",
+    orderId: "991",
+    contract: {
+      conid: 320227571,
+      assetClass: "STK",
+      symbol: "IBIT",
+      exchange: "SMART",
+      primaryExchange: "NASDAQ",
+      currency: "USD",
+    },
+    side: "BUY",
+    quantity: 2,
+    orderType: "LMT",
+    limit: 40,
+    tif: "DAY",
+    session: "REGULAR",
+  };
+  assert.equal(input.orderId, "991");
+  assert.equal(modify, undefined);
+  assert.equal(list, undefined);
 });
