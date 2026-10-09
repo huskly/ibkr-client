@@ -3292,3 +3292,201 @@ test("STOP placeholder handling preserves all other terminal conflicts", async (
     assert.equal(result.state, "recovery_required", JSON.stringify(fields));
   }
 });
+
+const recoverySummary =
+  "Exact graph recovery found incomplete, duplicated, or ambiguous member evidence";
+const recoveryStop = (): Record<string, unknown> => ({
+  account: "U1",
+  order_id: "11",
+  order_status: "Submitted",
+  conid: 1,
+  orderType: "STP",
+  side: "BUY",
+  totalSize: 1,
+  stopPrice: 2.4,
+  tif: "GTC",
+  outsideRTH: false,
+  parentId: "pcs-42",
+});
+
+const recoveryReasonCases: {
+  name: string;
+  activeOrders: Record<string, unknown>[];
+  reasons: string[];
+  orderId?: string;
+  snapshot?: boolean;
+  terminalOrders?: Record<string, unknown>[];
+  terminalLookupFails?: boolean;
+}[] = [
+  {
+    name: "missing member evidence",
+    activeOrders: [liveRoot()],
+    reasons: [
+      "recovery-member-evidence-incomplete",
+      "recovery-member-order-ids-not-distinct",
+      "recovery-member-status-unresolved",
+    ],
+  },
+  {
+    name: "duplicate active member evidence",
+    activeOrders: [liveRoot(), liveRoot(), recoveryStop()],
+    reasons: [
+      "recovery-member-evidence-incomplete",
+      "recovery-member-order-ids-not-distinct",
+      "recovery-unselected-linked-order",
+      "recovery-member-status-unresolved",
+    ],
+  },
+  {
+    name: "shared member broker ID",
+    activeOrders: [liveRoot(), { ...recoveryStop(), order_id: "10" }],
+    reasons: [
+      "recovery-member-evidence-incomplete",
+      "recovery-member-order-ids-not-distinct",
+      "recovery-member-status-unresolved",
+    ],
+  },
+  {
+    name: "linked member without a broker ID",
+    activeOrders: [liveRoot(), { ...recoveryStop(), order_id: undefined }],
+    reasons: [
+      "recovery-member-evidence-incomplete",
+      "recovery-member-order-ids-not-distinct",
+      "recovery-linked-order-missing-broker-id",
+      "recovery-member-status-unresolved",
+    ],
+  },
+  {
+    name: "unexpected linked member",
+    activeOrders: [liveRoot(), recoveryStop(), { ...recoveryStop(), order_id: "12", conid: 3 }],
+    reasons: ["recovery-unselected-linked-order"],
+  },
+  {
+    name: "missing caller-named broker ID",
+    activeOrders: [liveRoot(), recoveryStop()],
+    orderId: "99",
+    reasons: ["recovery-requested-order-id-missing"],
+  },
+  {
+    name: "incomplete active snapshot",
+    activeOrders: [liveRoot(), recoveryStop()],
+    snapshot: false,
+    reasons: [
+      "recovery-member-evidence-incomplete",
+      "recovery-member-order-ids-not-distinct",
+      "recovery-active-snapshot-incomplete",
+      "recovery-member-status-unresolved",
+    ],
+  },
+  {
+    name: "invalid active account evidence",
+    activeOrders: [liveRoot(), recoveryStop(), { ...liveRoot(), account: "U2" }],
+    reasons: ["recovery-active-account-evidence-invalid"],
+  },
+  {
+    name: "invalid nested active evidence",
+    activeOrders: [
+      {
+        ...liveRoot(),
+        childOrders: [{ ...recoveryStop(), order_id: "12", parentId: undefined, conid: 3 }],
+      },
+      recoveryStop(),
+    ],
+    reasons: ["recovery-nested-active-evidence-invalid"],
+  },
+  {
+    name: "conflicting caller-named active attachment",
+    activeOrders: [liveRoot(), recoveryStop(), { ...liveRoot(), order_id: "99", cOID: "other" }],
+    orderId: "99",
+    reasons: ["recovery-requested-order-id-missing", "recovery-known-active-order-conflict"],
+  },
+  {
+    name: "conflicting caller-named active ticket",
+    activeOrders: [{ ...liveRoot(), limitPrice: -9.99 }, recoveryStop()],
+    orderId: "10",
+    terminalOrders: [recoveredTerminalRootStatus("10")],
+    reasons: ["recovery-known-active-ticket-conflict"],
+  },
+  {
+    name: "invalid attached terminal evidence",
+    activeOrders: [liveRoot(), recoveryStop()],
+    terminalOrders: [{ ...recoveredTerminalRootStatus("10"), account: "U2" }],
+    reasons: ["recovery-terminal-attached-evidence-invalid"],
+  },
+  {
+    name: "terminal snapshot transport failure",
+    activeOrders: [liveRoot(), recoveryStop()],
+    terminalLookupFails: true,
+    reasons: ["recovery-terminal-snapshot-lookup-failed"],
+  },
+  {
+    name: "unknown member status",
+    activeOrders: [liveRoot(), { ...recoveryStop(), order_status: "BrokerSpecificState" }],
+    reasons: ["recovery-member-status-unresolved"],
+  },
+];
+
+for (const scenario of recoveryReasonCases) {
+  test(`exact graph recovery names each refusal: ${scenario.name}`, async () => {
+    const client = new Fake((input) => {
+      if (input.path === "iserver/account/orders") {
+        if (input.params?.["filters"] !== undefined) {
+          if (scenario.terminalLookupFails) throw new Error("terminal snapshot unavailable");
+          return { orders: scenario.terminalOrders ?? [] };
+        }
+        return { snapshot: scenario.snapshot ?? true, orders: scenario.activeOrders };
+      }
+      if (input.path === "iserver/account/trades") return [];
+      if (input.path.startsWith("iserver/account/order/status/")) {
+        const orderId = input.path.split("/").at(-1);
+        const terminal = scenario.terminalOrders?.find((order) => order["order_id"] === orderId);
+        if (terminal !== undefined) return terminal;
+        throw new Error("exact status unavailable");
+      }
+      return session(input);
+    });
+    const result = await client.recoverDerivativeOrderGraph(
+      {
+        accountId: "U1",
+        ...(scenario.orderId === undefined
+          ? { rootClientOrderId: "pcs-42" }
+          : { orderId: scenario.orderId }),
+      },
+      graphTwoNodes()
+    );
+    assert.equal(result.state, "recovery_required");
+    if (result.state !== "recovery_required") return;
+    assert.deepEqual(result.reasons, [recoverySummary, ...scenario.reasons]);
+    assert.equal(
+      client.calls.some(({ method }) => method === "POST" || method === "DELETE"),
+      false
+    );
+    assert.deepEqual(result.warnings, []);
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.members.length, 2);
+    if (scenario.name === "missing member evidence") {
+      assert.equal(result.members[1]?.memberId, "stop");
+      assert.equal(result.members[1]?.status, "WARNING_PENDING");
+      assert.equal(result.members[1]?.orderId, null);
+    }
+    if (scenario.name === "unknown member status") {
+      assert.equal(result.members[1]?.memberId, "stop");
+      assert.equal(result.members[1]?.status, "UNKNOWN");
+      assert.equal(result.members[1]?.orderId, "11");
+    }
+    if (scenario.snapshot === false) {
+      assert.equal(
+        result.unrecognizedResponses.some(
+          (response) =>
+            typeof response === "object" &&
+            response !== null &&
+            "orders" in response &&
+            response.orders === scenario.activeOrders
+        ),
+        true
+      );
+    } else {
+      assert.equal(result.unrecognizedResponses.includes(scenario.activeOrders[0]), true);
+    }
+  });
+}

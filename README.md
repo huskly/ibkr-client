@@ -906,6 +906,30 @@ lookup fails remain preserved as uncorrelated evidence instead of being discarde
 This recovery API is the safety boundary: consumers should not bypass it with the private raw request
 client.
 
+When exact graph recovery returns `recovery_required`, `reasons` keeps the existing summary and
+adds a stable ID for each failed check. Multiple IDs can occur in one result. Use
+`result.reasons.includes(id)` to check an ID; do not parse the summary or use array positions.
+
+| Reason ID | Failed check |
+| --- | --- |
+| `recovery-member-evidence-incomplete` | Not every requested member has one selected broker row. Evidence can be absent, duplicated, or ambiguous. |
+| `recovery-member-order-ids-not-distinct` | The members do not have one distinct broker ID each. Missing IDs also fail this check. |
+| `recovery-linked-order-missing-broker-id` | A linked order has no usable broker ID, or its attachment aliases conflict. |
+| `recovery-unselected-linked-order` | A linked broker ID is not in the selected graph. |
+| `recovery-requested-order-id-missing` | The caller's exact broker ID is not in the selected graph. |
+| `recovery-active-snapshot-incomplete` | The active order response is not a complete, valid snapshot. |
+| `recovery-active-account-evidence-invalid` | An active row does not prove the exact requested account. |
+| `recovery-nested-active-evidence-invalid` | A child nested under a graph order does not have valid graph attachment evidence. |
+| `recovery-known-active-order-conflict` | An active row for the caller's exact broker ID conflicts with the graph attachment. |
+| `recovery-known-active-ticket-conflict` | Active and terminal tickets for the caller's exact broker ID conflict. |
+| `recovery-terminal-attached-evidence-invalid` | Attached terminal evidence is invalid or conflicts with other evidence. |
+| `recovery-terminal-snapshot-lookup-failed` | A terminal snapshot read failed or returned an incomplete or invalid snapshot. |
+| `recovery-member-status-unresolved` | A member has status `UNKNOWN` or `WARNING_PENDING`. Check `members` for its ID and status. |
+
+These IDs describe the failed checks, not permission to submit an order again. A snapshot failure
+does not prove that an order is absent. Keep all member and raw broker evidence. Resolve every failed
+check before you treat the graph as accepted. Recovery does not retry broker writes.
+
 Build the request with every identity in place before submission:
 
 ```ts
