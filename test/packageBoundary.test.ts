@@ -54,6 +54,7 @@ import {
   type OptionDefinitionCacheKey,
   type OptionDiscoveryOptions,
   type DerivativeOrderGraphNode,
+  type DerivativeOrderGraphResult,
   type OptionDiscoveryTelemetry,
   type OptionSeriesReferenceEvidence,
   type OptionStrikeRange,
@@ -682,4 +683,18 @@ void test("package exports equity modification and live stock evidence", () => {
   assert.equal(input.orderId, "991");
   assert.equal(modify, undefined);
   assert.equal(list, undefined);
+});
+
+void test("public graph recovery reasons support stable ID checks", () => {
+  const result: DerivativeOrderGraphResult = {
+    state: "recovery_required",
+    rootClientOrderId: "hg-root",
+    members: [],
+    reasons: ["recovery-active-snapshot-incomplete", "recovery-member-status-unresolved"],
+    warnings: [],
+    errors: [],
+    unrecognizedResponses: [],
+  };
+  assert.equal(result.reasons.includes("recovery-active-snapshot-incomplete"), true);
+  assert.equal(result.reasons.includes("recovery-terminal-snapshot-lookup-failed"), false);
 });

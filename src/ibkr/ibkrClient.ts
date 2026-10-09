@@ -1405,27 +1405,39 @@ export class IbkrClient
           return orderId === undefined ? [] : [orderId];
         })
       );
-      if (
-        selected.size !== request.nodes.length ||
-        !hasDistinctOrderIds ||
-        linkedOrderMissingBrokerId ||
-        [...linkedOrderIds].some((orderId) => !selectedOrderIds.has(orderId)) ||
-        requestedOrderIdMissing ||
-        activeSnapshotIncomplete ||
-        invalidActiveAccountEvidence ||
-        invalidNestedActiveEvidence ||
-        conflictingKnownActiveOrders.length > 0 ||
-        conflictingKnownActiveTickets.length > 0 ||
-        terminalEvidence.invalidAttachedEvidence ||
-        terminalEvidence.terminalSnapshotLookupFailed ||
-        members.some(({ status }) => status === "UNKNOWN" || status === "WARNING_PENDING")
-      ) {
+      const reasons: string[] = [];
+      if (selected.size !== request.nodes.length)
+        reasons.push("recovery-member-evidence-incomplete");
+      if (!hasDistinctOrderIds) reasons.push("recovery-member-order-ids-not-distinct");
+      if (linkedOrderMissingBrokerId) reasons.push("recovery-linked-order-missing-broker-id");
+      if ([...linkedOrderIds].some((orderId) => !selectedOrderIds.has(orderId))) {
+        reasons.push("recovery-unselected-linked-order");
+      }
+      if (requestedOrderIdMissing) reasons.push("recovery-requested-order-id-missing");
+      if (activeSnapshotIncomplete) reasons.push("recovery-active-snapshot-incomplete");
+      if (invalidActiveAccountEvidence) reasons.push("recovery-active-account-evidence-invalid");
+      if (invalidNestedActiveEvidence) reasons.push("recovery-nested-active-evidence-invalid");
+      if (conflictingKnownActiveOrders.length > 0)
+        reasons.push("recovery-known-active-order-conflict");
+      if (conflictingKnownActiveTickets.length > 0)
+        reasons.push("recovery-known-active-ticket-conflict");
+      if (terminalEvidence.invalidAttachedEvidence) {
+        reasons.push("recovery-terminal-attached-evidence-invalid");
+      }
+      if (terminalEvidence.terminalSnapshotLookupFailed) {
+        reasons.push("recovery-terminal-snapshot-lookup-failed");
+      }
+      if (members.some(({ status }) => status === "UNKNOWN" || status === "WARNING_PENDING")) {
+        reasons.push("recovery-member-status-unresolved");
+      }
+      if (reasons.length > 0) {
         return {
           state: "recovery_required",
           rootClientOrderId: request.rootClientOrderId,
           members,
           reasons: [
             "Exact graph recovery found incomplete, duplicated, or ambiguous member evidence",
+            ...reasons,
           ],
           warnings: [],
           errors: [],
