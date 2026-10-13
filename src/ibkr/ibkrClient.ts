@@ -161,6 +161,8 @@ const { IbkrClient: RawIbkrClientCtor } = require("ibkr-client") as {
   IbkrClient: new (config: IbkrOauth1Config) => RawIbkrClient;
 };
 
+class AccountIdentityError extends Error {}
+
 /** A resolved quote target: the requested symbol mapped to an IBKR conid. */
 interface QuoteContract {
   requestedSymbol: string;
@@ -1640,16 +1642,15 @@ export class IbkrClient
             (value) => value !== undefined
           );
           if (
-            accounts.length > 0 &&
-            accounts.every((value) => typeof value === "string" && value !== accountId)
+            accounts.length === 0 ||
+            accounts.some((value) => typeof value !== "string" || value !== accountId)
           ) {
+            this.markAccountIdentityFailure();
+            observedResponses.push(rawTrade);
+            invalidAttachedEvidence = true;
             continue;
           }
-          if (
-            accounts.length === 0 ||
-            accounts.some((value) => typeof value !== "string" || value !== accountId) ||
-            !isIbkrTrade(rawTrade)
-          ) {
+          if (!isIbkrTrade(rawTrade)) {
             observedResponses.push(rawTrade);
             invalidAttachedEvidence = true;
             continue;
@@ -2067,10 +2068,11 @@ export class IbkrClient
   private orderHasExactAccount(order: IbkrLiveOrder, accountId: string): boolean {
     const accounts: readonly unknown[] = [order.account, order.acct];
     const provided = accounts.filter((account) => account !== undefined);
-    return (
+    const matches =
       provided.length > 0 &&
-      provided.every((account) => typeof account === "string" && account === accountId)
-    );
+      provided.every((account) => typeof account === "string" && account === accountId);
+    if (!matches) this.markAccountIdentityFailure();
+    return matches;
   }
 
   private orderMatchesExactRecoveryIdentity(
@@ -2205,7 +2207,9 @@ export class IbkrClient
       path: `iserver/account/order/status/${encodeURIComponent(orderId)}`,
     });
     if (!this.orderHasExactAccount(order, accountId)) {
-      throw new Error(`IBKR order ${orderId} does not belong to the requested account`);
+      throw new AccountIdentityError(
+        `IBKR order ${orderId} does not belong to the requested account`
+      );
     }
     if (this.recoveryOrderId(order) !== orderId) {
       throw new Error(`IBKR response does not match the requested order ${orderId}`);
@@ -2267,7 +2271,9 @@ export class IbkrClient
         );
       });
       if (invalidAccountEvidence !== undefined) {
-        throw new Error("IBKR active-order response did not provide unambiguous account identity");
+        throw new AccountIdentityError(
+          "IBKR active-order response did not provide unambiguous account identity"
+        );
       }
 
       const normalized = flattened.map(({ order, nestedParent }) =>
@@ -2324,7 +2330,14 @@ export class IbkrClient
         ...(input.days === undefined ? {} : { params: { days: input.days } }),
       });
       return response
-        .filter((trade) => (trade.account ?? trade.accountCode) === input.accountId)
+        .filter((trade) => {
+          const accounts: readonly unknown[] = [trade.account, trade.accountCode];
+          const provided = accounts.filter((value) => value !== undefined);
+          const matches =
+            provided.length > 0 && provided.every((value) => value === input.accountId);
+          if (!matches) this.markAccountIdentityFailure();
+          return matches;
+        })
         .filter((trade) => input.orderId === undefined || String(trade.order_id) === input.orderId)
         .filter(
           (trade) => input.clientOrderId === undefined || trade.order_ref === input.clientOrderId
@@ -4140,6 +4153,11 @@ export class IbkrClient
         : Object.keys(record).filter(
             (key) => key !== "msg" && key !== "account" && key !== "order_id" && key !== "conid"
           );
+    if (
+      (accountProvided && accountId === null) ||
+      (accountId !== null && accountId !== input.accountId)
+    )
+      this.markAccountIdentityFailure();
     let reason: string | null = null;
     if (record === null) reason = "IBKR returned a malformed cancellation response";
     else if (errorParts.length > 0) reason = "IBKR returned cancellation error evidence";
@@ -5448,7 +5466,7 @@ export class IbkrClient
       try {
         return await operation();
       } catch (error) {
-        if (!this.isSelectionPreservingThrottle(error)) this.invalidateAccountSelection();
+        if (error instanceof AccountIdentityError) this.invalidateAccountSelection();
         throw error;
       }
     });
@@ -5477,6 +5495,20 @@ export class IbkrClient
   private invalidateAccountSelection(): void {
     this.confirmedAccount = undefined;
     this.selectionGeneration += 1;
+  }
+
+  private shouldInvalidateSelectionForRequestError(error: unknown): boolean {
+    if (this.isSelectionPreservingThrottle(error)) return false;
+    if (this.classifyRequestError(error).kind === "TEMPORARILY_BLOCKED") return true;
+    const status = this.httpStatusFromError(error);
+    if (status === 400 || status === 404) {
+      return /account|selection|selected|session|authenticat/i.test(this.requestErrorText(error));
+    }
+    return true;
+  }
+
+  private markAccountIdentityFailure(): void {
+    if (this.accountScope.getStore() !== undefined) this.invalidateAccountSelection();
   }
 
   private isSelectionPreservingThrottle(error: unknown): boolean {
@@ -7603,8 +7635,7 @@ export class IbkrClient
   }
 
   private orderBelongsToAccount(order: IbkrLiveOrder, accountId: string): boolean {
-    const account = order.account ?? order.acct;
-    return account === undefined || account === accountId;
+    return this.orderHasExactAccount(order, accountId);
   }
 
   private orderInDateRange(order: BrokerOrder, fromDate: Date, toDate: Date): boolean {
@@ -7948,7 +7979,7 @@ export class IbkrClient
         onTerminalFailure: (error) => {
           if (
             (input.path === "iserver/auth/status" || input.path === "tickle") &&
-            !this.isSelectionPreservingThrottle(error)
+            this.shouldInvalidateSelectionForRequestError(error)
           )
             this.unsafeAuthGeneration += 1;
           if (
@@ -7956,7 +7987,7 @@ export class IbkrClient
               input.path === "iserver/accounts" ||
               input.path === "iserver/auth/status" ||
               input.path === "tickle") &&
-            !this.isSelectionPreservingThrottle(error)
+            this.shouldInvalidateSelectionForRequestError(error)
           )
             this.invalidateAccountSelection();
           onTerminalFailure?.(error);
@@ -7973,7 +8004,7 @@ export class IbkrClient
         try {
           return await this.sendRequest<T>(input);
         } catch (error) {
-          if (scope !== undefined && !this.isSelectionPreservingThrottle(error)) {
+          if (scope !== undefined && this.shouldInvalidateSelectionForRequestError(error)) {
             this.invalidateAccountSelection();
           }
           throw this.normalizeHttpError(error);

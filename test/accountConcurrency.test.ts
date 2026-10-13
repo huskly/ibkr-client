@@ -478,8 +478,90 @@ void test("a status read passes a queued paced trades read for the confirmed acc
   await statusRejected;
   assert.equal(client.calls.filter((call) => call.path === "iserver/account/trades").length, 1);
   assert.ok(client.calls.some((call) => call.path.includes("/order/status/")));
-  // The logical status failure invalidates confirmation, so the queued trades read fails closed.
+  // Missing account identity invalidates confirmation, so the queued trades read fails closed.
   const pacedRejected = assert.rejects(paced, /selection changed/);
   await advance(4_900);
   await pacedRejected;
+});
+
+void test("not-found and parse failures preserve selection for concurrent siblings", async () => {
+  for (const failure of ["not-found", "parse", "400", "404"]) {
+    const client = new Client();
+    const trades = deferred<unknown>();
+    const started = deferred<void>();
+    client.responder = (input) => {
+      if (input.path === "iserver/account/trades") {
+        started.resolve();
+        return trades.promise;
+      }
+      if (input.path === "iserver/account/orders")
+        return failure === "parse" ? { orders: [] } : { snapshot: true, orders: [] };
+      if (input.path.includes("/order/status/"))
+        return Promise.reject(
+          new IbkrHttpError("Unknown order", Number(failure), {
+            status: Number(failure),
+            body: "Unknown order",
+            retryAfter: null,
+          })
+        );
+      return undefined;
+    };
+    const sibling = client.getDerivativeExecutions({ accountId: account });
+    await started.promise;
+    if (failure === "not-found") {
+      await assert.rejects(
+        client.findDerivativeOrder({ accountId: account, clientOrderId: "test-missing" }),
+        /not found/
+      );
+    } else if (failure === "parse") {
+      await assert.rejects(client.listActiveDerivativeOrders(account), /incomplete/);
+    } else {
+      await assert.rejects(client.getDerivativeOrderStatus(account, "test-missing"));
+    }
+    trades.resolve([]);
+    await sibling;
+    await client.getDerivativeExecutions({ accountId: account });
+    assert.equal(client.verifies(), 1, failure);
+  }
+});
+
+void test("401 and explicit account failures invalidate selection", async () => {
+  for (const evidence of ["401", "wrong-account", "missing-account", "400-account"]) {
+    const client = new Client();
+    client.responder = (input) => {
+      if (input.path.includes("/order/status/")) {
+        if (evidence === "401" || evidence === "400-account") {
+          const status = evidence === "401" ? 401 : 400;
+          return Promise.reject(
+            new IbkrHttpError("Account selection unavailable", status, {
+              status,
+              body: "Account selection unavailable",
+              retryAfter: null,
+            })
+          );
+        }
+        return evidence === "wrong-account" ? { account: otherAccount } : {};
+      }
+      return undefined;
+    };
+    await client.getDerivativeExecutions({ accountId: account });
+    await assert.rejects(client.getDerivativeOrderStatus(account, "test-order"));
+    await client.getDerivativeExecutions({ accountId: account });
+    assert.equal(client.verifies(), 2, evidence);
+  }
+});
+
+void test("conflicting execution account aliases invalidate confirmation", async () => {
+  const client = new Client();
+  let conflict = true;
+  client.responder = (input) => {
+    if (input.path === "iserver/account/trades" && conflict) {
+      conflict = false;
+      return [{ account, accountCode: otherAccount }];
+    }
+    return undefined;
+  };
+  assert.deepEqual(await client.getDerivativeExecutions({ accountId: account }), []);
+  await client.getDerivativeExecutions({ accountId: account });
+  assert.equal(client.verifies(), 2);
 });

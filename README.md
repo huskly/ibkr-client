@@ -736,7 +736,11 @@ not one selected account per request.
 The first account-scoped operation verifies the account with IBKR. Later operations reuse only
 an exact confirmed account. Account switches, session initialization, renewal, logout, close,
 unsafe or unknown session evidence, and ambiguous account-scoped failures clear that confirmation.
-A 429 alone does not clear it. Missing account or switch evidence fails closed. If an account
+A 429 alone does not clear it. A not-found result or parse failure after a successful request
+does not clear it. Definite object-level HTTP 400/404 responses do not clear it unless their
+body reports an account or session problem. Account-identity failures, transport failures,
+401/403, 5xx, temporary blocks, and other unknown HTTP failures clear it.
+Missing account or switch evidence fails closed. If an account
 request fails ambiguously, follow-up requests in that operation stop. Graph recovery retains
 its observed evidence and can return `recovery_required` instead of treating earlier identity
 evidence as permission to continue under an unknown account selection.
