@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createRequestClock } from "./helpers/requestClock.js";
 import { IbkrClient } from "../src/ibkr/ibkrClient.js";
 import type { DerivativeComboReconciliationRequest } from "../src/types.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
@@ -27,7 +28,7 @@ class FakeIbkrClient extends IbkrClient {
   private clock = 0;
 
   constructor(private readonly responder: (input: RequestInput) => unknown) {
-    super(config);
+    super(config, { requestScheduler: createRequestClock() });
   }
 
   protected override sendRequest<T>(input: RequestInput): Promise<T> {

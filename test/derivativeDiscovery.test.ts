@@ -1,4 +1,5 @@
 import test from "node:test";
+import { createRequestClock } from "./helpers/requestClock.js";
 import assert from "node:assert/strict";
 import { IbkrBrokerResponseError, IbkrClient } from "../src/ibkr/ibkrClient.js";
 import { normalizeDerivativeDataAvailability } from "../src/ibkr/derivativeContract.js";
@@ -25,7 +26,9 @@ class FakeIbkrClient extends IbkrClient {
   readonly calls: RequestInput[] = [];
 
   constructor(private readonly responder: (input: RequestInput) => unknown) {
-    super(config, { requestScheduler: { secdefInfoMinStartIntervalMs: 0 } });
+    super(config, {
+      requestScheduler: { ...createRequestClock(), secdefInfoMinStartIntervalMs: 0 },
+    });
   }
 
   protected override sendRequest<T>(input: RequestInput): Promise<T> {

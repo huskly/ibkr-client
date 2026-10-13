@@ -46,6 +46,8 @@ interface RequestOptions {
   priority: IbkrRequestPriority;
   /** Use the bounded read-only security-definition lane. */
   secdefInfo?: boolean;
+  /** Internal endpoint start pacing, supplied by the client. */
+  pacing?: { key: string; minStartIntervalMs: number };
   retryable?: boolean;
   retryServerErrors?: boolean;
   /** Cancel only the jobs that belong to this caller operation. */
@@ -59,6 +61,7 @@ interface ScheduledJob {
   endpoint: string;
   priority: IbkrRequestPriority;
   secdefInfo: boolean;
+  pacing?: { key: string; minStartIntervalMs: number };
   retryable: boolean;
   retryServerErrors: boolean;
   attempts: number;
@@ -126,7 +129,9 @@ export class IbkrRequestScheduler {
   private backoffUntil = 0;
   private backoffPromise: Promise<void> | undefined;
   private secdefInfoNextStartAt = 0;
-  private secdefInfoPacingPromise: Promise<void> | undefined;
+  private globalNextStartAt = 0;
+  private readonly endpointNextStartAt = new Map<string, number>();
+  private pacingWait: { target: number } | undefined;
   private circuitOpenUntil = 0;
 
   constructor(options: IbkrRequestSchedulerOptions = {}) {
@@ -181,6 +186,13 @@ export class IbkrRequestScheduler {
 
   schedule<T>(options: RequestOptions, task: () => Promise<T>): Promise<T> {
     if (options.signal?.aborted) return Promise.reject(this.abortReason(options.signal));
+    if (
+      options.pacing !== undefined &&
+      (!Number.isSafeInteger(options.pacing.minStartIntervalMs) ||
+        options.pacing.minStartIntervalMs < 0)
+    ) {
+      return Promise.reject(new Error("Invalid IBKR request pacing limits"));
+    }
     const circuitError = this.currentCircuitError(options.endpoint);
     if (circuitError !== undefined) return Promise.reject(circuitError);
     return new Promise<T>((resolve, reject) => {
@@ -189,6 +201,7 @@ export class IbkrRequestScheduler {
         endpoint: options.endpoint,
         priority: options.priority,
         secdefInfo: options.secdefInfo ?? false,
+        ...(options.pacing === undefined ? {} : { pacing: { ...options.pacing } }),
         retryable: options.retryable ?? true,
         retryServerErrors: options.retryServerErrors ?? false,
         attempts: 0,
@@ -253,6 +266,7 @@ export class IbkrRequestScheduler {
       }
       return;
     }
+    this.rejectLongPacingJobs(this.now());
     if (this.backoffUntil > 0) {
       this.ensureBackoffWait();
       return;
@@ -261,19 +275,22 @@ export class IbkrRequestScheduler {
       const now = this.now();
       const index = this.nextJobIndex(now);
       if (index < 0) {
-        this.ensureSecdefInfoPacingWait(now);
+        this.ensurePacingWait(now);
         return;
       }
       const [job] = this.queue.splice(index, 1);
       if (job === undefined) return;
       this.run(job);
+      this.rejectLongPacingJobs(this.now());
     }
-    this.ensureSecdefInfoPacingWait();
+    this.rejectLongPacingJobs(this.now());
+    this.ensurePacingWait();
   }
 
   private nextJobIndex(now: number): number {
     let selected = -1;
     for (const [index, job] of this.queue.entries()) {
+      if (this.nextStartAt(job) > now) continue;
       if (
         job.priority === "DISCOVERY" &&
         (job.secdefInfo
@@ -301,6 +318,11 @@ export class IbkrRequestScheduler {
   }
 
   private run(job: ScheduledJob): void {
+    const now = this.now();
+    this.globalNextStartAt = now + 100;
+    if (job.pacing !== undefined) {
+      this.endpointNextStartAt.set(job.pacing.key, now + job.pacing.minStartIntervalMs);
+    }
     if (job.secdefInfo) {
       this.secdefInfoNextStartAt = this.now() + this.effectiveSecdefInfoMinStartIntervalMs;
     }
@@ -461,33 +483,65 @@ export class IbkrRequestScheduler {
     });
   }
 
-  private ensureSecdefInfoPacingWait(now = this.now()): void {
-    if (this.secdefInfoPacingPromise !== undefined) return;
-    if (this.activeSecdefInfo >= this.maxSecdefInfoConcurrent) return;
-    if (!this.queue.some((job) => job.secdefInfo)) return;
-    const target = this.secdefInfoNextStartAt;
+  private nextStartAt(job: ScheduledJob): number {
+    return Math.max(
+      this.globalNextStartAt,
+      job.secdefInfo ? this.secdefInfoNextStartAt : 0,
+      job.pacing === undefined ? 0 : (this.endpointNextStartAt.get(job.pacing.key) ?? 0)
+    );
+  }
+
+  private rejectLongPacingJobs(now: number): void {
+    for (const job of [...this.queue]) {
+      if (job.pacing === undefined || job.pacing.minStartIntervalMs <= 5_000) continue;
+      const remaining = (this.endpointNextStartAt.get(job.pacing.key) ?? 0) - now;
+      if (remaining <= 0) continue;
+      this.queue.splice(this.queue.indexOf(job), 1);
+      this.rejectJob(
+        job,
+        new IbkrRequestSchedulerError(
+          `IBKR throttled ${job.endpoint}`,
+          "IBKR_THROTTLED",
+          job.endpoint,
+          remaining
+        )
+      );
+    }
+  }
+
+  private ensurePacingWait(now = this.now()): void {
+    if (this.active >= this.maxConcurrent) return;
+    const eligible = this.queue.filter(
+      (job) =>
+        job.priority !== "DISCOVERY" ||
+        (job.secdefInfo
+          ? this.activeSecdefInfo < this.maxSecdefInfoConcurrent
+          : this.activeDiscovery < this.maxDiscoveryConcurrent)
+    );
+    const target = Math.min(...eligible.map((job) => this.nextStartAt(job)));
+    if (!Number.isFinite(target) || target <= now) return;
+    if (this.pacingWait !== undefined && this.pacingWait.target <= target) return;
+    const wait = { target };
+    this.pacingWait = wait;
     const delayMs = target - now;
-    if (delayMs <= 0) return;
-    this.emitTelemetry({
-      event: "SECDEF_INFO_PACING",
-      endpoint: "secdef/info",
-      attempt: 0,
-      delayMs,
-      effectiveMinStartIntervalMs: this.effectiveSecdefInfoMinStartIntervalMs,
-    });
-    this.secdefInfoPacingPromise = this.sleep(delayMs).then(
+    if (eligible.some((job) => job.secdefInfo && this.secdefInfoNextStartAt === target)) {
+      this.emitTelemetry({
+        event: "SECDEF_INFO_PACING",
+        endpoint: "secdef/info",
+        attempt: 0,
+        delayMs,
+        effectiveMinStartIntervalMs: this.effectiveSecdefInfoMinStartIntervalMs,
+      });
+    }
+    void this.sleep(delayMs).then(
       () => {
-        this.secdefInfoPacingPromise = undefined;
+        if (this.pacingWait === wait) this.pacingWait = undefined;
         this.drain();
       },
       (error: unknown) => {
-        this.secdefInfoPacingPromise = undefined;
-        const queued = this.queue.splice(0);
-        for (const job of queued) {
-          if (job.secdefInfo) this.rejectJob(job, error);
-          else this.queue.push(job);
-        }
-        this.drain();
+        if (this.pacingWait !== wait) return;
+        this.pacingWait = undefined;
+        for (const job of this.queue.splice(0)) this.rejectJob(job, error);
       }
     );
   }

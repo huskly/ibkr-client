@@ -1,4 +1,5 @@
 import test from "node:test";
+import { createRequestClock } from "./helpers/requestClock.js";
 import assert from "node:assert/strict";
 import { IbkrClient, type IbkrClientOptions } from "../src/ibkr/ibkrClient.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
@@ -38,7 +39,11 @@ class FakeIbkrClient extends IbkrClient {
   ) {
     super(config, {
       ...options,
-      requestScheduler: { secdefInfoMinStartIntervalMs: 0, ...options.requestScheduler },
+      requestScheduler: {
+        ...createRequestClock(),
+        secdefInfoMinStartIntervalMs: 0,
+        ...options.requestScheduler,
+      },
     });
   }
 

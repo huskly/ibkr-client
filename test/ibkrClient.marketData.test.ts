@@ -1,4 +1,5 @@
 import test from "node:test";
+import { createRequestClock } from "./helpers/requestClock.js";
 import assert from "node:assert/strict";
 import {
   IbkrBrokerResponseError,
@@ -40,6 +41,7 @@ class FakeIbkrClient extends IbkrClient {
     super(config, {
       ...options,
       requestScheduler: {
+        ...createRequestClock(),
         secdefInfoMinStartIntervalMs: 0,
         ...options.requestScheduler,
       },
@@ -62,7 +64,7 @@ class FakeIbkrClient extends IbkrClient {
 
 class InitFailureIbkrClient extends IbkrClient {
   constructor(error: Error) {
-    super(config);
+    super(config, { requestScheduler: createRequestClock() });
     (this as unknown as { raw: { init: () => Promise<never> } }).raw = {
       init: () => Promise.reject(error),
     };
@@ -460,7 +462,7 @@ void test("exact-expiry option discovery filters the unused right and emits safe
       symbol: "MSTR",
       month: "AUG26",
       right: "C",
-      durationMs: 0,
+      durationMs: 100,
       definitionRequestCount: 0,
       snapshotBatchCount: 0,
       listedStrikeCount: 2,
@@ -473,7 +475,7 @@ void test("exact-expiry option discovery filters the unused right and emits safe
       symbol: "MSTR",
       month: "AUG26",
       right: "C",
-      durationMs: 0,
+      durationMs: 200,
       definitionRequestCount: 2,
       snapshotBatchCount: 0,
       listedStrikeCount: 2,
@@ -486,7 +488,7 @@ void test("exact-expiry option discovery filters the unused right and emits safe
       symbol: "MSTR",
       month: "AUG26",
       right: "C",
-      durationMs: 0,
+      durationMs: 200,
       definitionRequestCount: 0,
       snapshotBatchCount: 1,
       listedStrikeCount: 0,
@@ -2170,6 +2172,7 @@ void test("history rejects overflow in normalized volume", async () => {
 void test("price history retries one structured 500 and emits safe telemetry", async () => {
   let historyCalls = 0;
   const sleeps: number[] = [];
+  let schedulerNow = 123;
   const telemetry: unknown[] = [];
   const client = new FakeIbkrClient(
     (input) => {
@@ -2199,10 +2202,11 @@ void test("price history retries one structured 500 and emits safe telemetry", a
         retryBaseDelayMs: 100,
         retryMaxDelayMs: 500,
         jitterRatio: 0.5,
-        now: () => 123,
+        now: () => schedulerNow,
         random: () => 0,
         sleep: async (ms) => {
           sleeps.push(ms);
+          schedulerNow += ms;
         },
       },
       onRequestTelemetry: (event) => telemetry.push(event),
@@ -2220,7 +2224,7 @@ void test("price history retries one structured 500 and emits safe telemetry", a
     1.5
   );
   assert.equal(historyCalls, 2);
-  assert.deepEqual(sleeps, [100]);
+  assert.deepEqual(sleeps, [100, 100, 1_100]);
   assert.deepEqual(telemetry, [
     { event: "SERVER_RETRY", endpoint: "iserver/marketdata", attempt: 1, delayMs: 100 },
   ]);
@@ -2230,6 +2234,7 @@ void test("price history retries one structured 500 and emits safe telemetry", a
 void test("exhausted price-history retries retain final structured HTTP evidence", async () => {
   let historyCalls = 0;
   const sleeps: number[] = [];
+  let schedulerNow = 0;
   const client = new FakeIbkrClient(
     (input) => {
       if (input.path === "iserver/contract/272110/info") {
@@ -2248,6 +2253,7 @@ void test("exhausted price-history retries retain final structured HTTP evidence
     },
     {
       requestScheduler: {
+        now: () => schedulerNow,
         maxRetries: 2,
         retryBaseDelayMs: 100,
         retryMaxDelayMs: 150,
@@ -2255,6 +2261,7 @@ void test("exhausted price-history retries retain final structured HTTP evidence
         random: () => 1,
         sleep: async (ms) => {
           sleeps.push(ms);
+          schedulerNow += ms;
         },
       },
     }
@@ -2280,26 +2287,23 @@ void test("exhausted price-history retries retain final structured HTTP evidence
     }
   );
   assert.equal(historyCalls, 3);
-  assert.deepEqual(sleeps, [150, 150], "backoff plus jitter stays at the configured bound");
+  assert.deepEqual(sleeps, [100, 150, 1_050, 150, 1_050], "history pacing follows bounded backoff");
 });
 
 void test("price history does not retry a structured non-retryable 4xx", async () => {
   let historyCalls = 0;
-  const client = new FakeIbkrClient(
-    (input) => {
-      if (input.path === "iserver/contract/272110/info") {
-        return {
-          con_id: 272110,
-          local_symbol: "MSTR",
-          instrument_type: "STK",
-          exchange: "NASDAQ",
-        };
-      }
-      historyCalls += 1;
-      throw new Error("Response status 404: No history contract");
-    },
-    { requestScheduler: { sleep: () => Promise.reject(new Error("must not sleep")) } }
-  );
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "iserver/contract/272110/info") {
+      return {
+        con_id: 272110,
+        local_symbol: "MSTR",
+        instrument_type: "STK",
+        exchange: "NASDAQ",
+      };
+    }
+    historyCalls += 1;
+    throw new Error("Response status 404: No history contract");
+  }, {});
 
   await assert.rejects(
     () =>
@@ -2333,7 +2337,7 @@ void test("a cancellation 5xx remains single-attempt", async () => {
       throw new Error(`Unexpected request: ${input.path}`);
     },
     {
-      requestScheduler: { maxRetries: 3, sleep: () => Promise.reject(new Error("must not sleep")) },
+      requestScheduler: { maxRetries: 3 },
     }
   );
 
@@ -3199,6 +3203,7 @@ void test("underlying quotes carry market-data availability and snapshot timesta
 void test("safe POST reads remain retryable after a 429", async () => {
   let calls = 0;
   const sleeps: number[] = [];
+  let schedulerNow = TEST_NOW;
   const client = new FakeIbkrClient(
     (input) => {
       assert.equal(input.path, "iserver/auth/status");
@@ -3211,10 +3216,11 @@ void test("safe POST reads remain retryable after a 429", async () => {
       requestScheduler: {
         // The shared backoff wait recomputes the remaining delay from the clock, so an
         // injected clock keeps the observed sleep exact instead of one tick short.
-        now: () => TEST_NOW,
+        now: () => schedulerNow,
         jitterRatio: 0,
         sleep: async (ms) => {
           sleeps.push(ms);
+          schedulerNow += ms;
         },
       },
     }
@@ -3232,6 +3238,7 @@ void test("safe POST reads remain retryable after a 429", async () => {
 void test("HTTP-date Retry-After uses the injected scheduler clock", async () => {
   let calls = 0;
   const sleeps: number[] = [];
+  let schedulerNow = 0;
   const client = new FakeIbkrClient(
     (input) => {
       assert.equal(input.path, "iserver/auth/status");
@@ -3243,10 +3250,11 @@ void test("HTTP-date Retry-After uses the injected scheduler clock", async () =>
     },
     {
       requestScheduler: {
-        now: () => 0,
+        now: () => schedulerNow,
         jitterRatio: 0,
         sleep: async (ms) => {
           sleeps.push(ms);
+          schedulerNow += ms;
         },
       },
     }
@@ -3276,6 +3284,7 @@ void test("initialization normalizes raw HTTP failures", async () => {
 void test("price-history 5xx honors Retry-After above the local backoff cap", async () => {
   let historyCalls = 0;
   const sleeps: number[] = [];
+  let schedulerNow = 0;
   const client = new FakeIbkrClient(
     (input) => {
       if (input.path === "iserver/contract/416904/info") {
@@ -3304,12 +3313,14 @@ void test("price-history 5xx honors Retry-After above the local backoff cap", as
     },
     {
       requestScheduler: {
+        now: () => schedulerNow,
         maxRetries: 1,
         retryBaseDelayMs: 100,
         retryMaxDelayMs: 500,
         jitterRatio: 0,
         sleep: async (ms) => {
           sleeps.push(ms);
+          schedulerNow += ms;
         },
       },
     }
@@ -3321,7 +3332,7 @@ void test("price-history 5xx honors Retry-After above the local backoff cap", as
     days: 5,
   });
   assert.equal(historyCalls, 2);
-  assert.deepEqual(sleeps, [30_000]);
+  assert.deepEqual(sleeps, [100, 30_000]);
 });
 
 void test("account-selection mutations remain single-attempt after a 429", async () => {
@@ -3348,7 +3359,6 @@ void test("account-selection mutations remain single-attempt after a 429", async
     {
       requestScheduler: {
         maxRetries: 3,
-        sleep: () => Promise.reject(new Error("must not sleep")),
       },
     }
   );

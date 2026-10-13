@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createRequestClock } from "./helpers/requestClock.js";
 import { IbkrClient, IbkrHttpError, type IbkrClientOptions } from "../src/index.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
@@ -30,7 +31,11 @@ class LifecycleClient extends IbkrClient {
   ) {
     super(config, {
       ...options,
-      requestScheduler: { secdefInfoMinStartIntervalMs: 0, ...options.requestScheduler },
+      requestScheduler: {
+        ...createRequestClock(),
+        secdefInfoMinStartIntervalMs: 0,
+        ...options.requestScheduler,
+      },
     });
     (
       this as unknown as { raw: { init: (compete?: boolean, publish?: boolean) => Promise<void> } }
