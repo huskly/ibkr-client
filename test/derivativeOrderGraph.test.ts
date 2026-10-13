@@ -3394,7 +3394,12 @@ const recoveryReasonCases: {
   {
     name: "invalid active account evidence",
     activeOrders: [liveRoot(), recoveryStop(), { ...liveRoot(), account: "U2" }],
-    reasons: ["recovery-active-account-evidence-invalid"],
+    // Account evidence for another account clears the selected-account confirmation, so the
+    // client does not send the terminal lookup that follows.
+    reasons: [
+      "recovery-active-account-evidence-invalid",
+      "recovery-terminal-snapshot-lookup-failed",
+    ],
   },
   {
     name: "invalid nested active evidence",
@@ -3424,7 +3429,12 @@ const recoveryReasonCases: {
     name: "invalid attached terminal evidence",
     activeOrders: [liveRoot(), recoveryStop()],
     terminalOrders: [{ ...recoveredTerminalRootStatus("10"), account: "U2" }],
-    reasons: ["recovery-terminal-attached-evidence-invalid"],
+    // Account evidence for another account clears the selected-account confirmation, so the
+    // client does not send the terminal lookups that follow.
+    reasons: [
+      "recovery-terminal-attached-evidence-invalid",
+      "recovery-terminal-snapshot-lookup-failed",
+    ],
   },
   {
     name: "terminal snapshot transport failure",
