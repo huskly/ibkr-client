@@ -727,10 +727,51 @@ the IBKR boundary, matching the What-If ticket exactly. Every write requires the
 the library never falls back to the first account. Broker-declared order rejections retain their
 structured response in `BrokerErrorDetail.details`; transport exceptions are rethrown intact.
 
+### Selected-account safety and concurrent reads
+
+One `IbkrClient` must own selected-account changes for its brokerage session. Do not share the
+same session with another client that can switch accounts. The broker has one selected account,
+not one selected account per request.
+
+The first account-scoped operation verifies the account with IBKR. Later operations reuse only
+an exact confirmed account. Account switches, session initialization, renewal, logout, close,
+unsafe or unknown session evidence, and ambiguous account-scoped failures clear that confirmation.
+A 429 alone does not clear it. Missing account or switch evidence fails closed. If an account
+request fails ambiguously, follow-up requests in that operation stop. Graph recovery retains
+its observed evidence and can return `recovery_required` instead of treating earlier identity
+evidence as permission to continue under an unknown account selection.
+
+Reads for the same selected account can run together. A switch or trading operation waits for
+all prior reads and excludes later reads. Trading operations keep their arrival order and their
+single-attempt write policy. A request for another account uses the same exclusive boundary.
+Paced reads hold account access until they finish, including retries. Thus a trading operation
+can wait behind a read for up to one short pacing interval (5 s), plus request and retry time.
+The client does not switch accounts under a queued or active read.
+
 ### Request pacing and temporary blocks
 
-Every authenticated request runs through one priority scheduler per `IbkrClient`. The default
-limits allow at most ten requests globally. Stateful security-definition discovery stays at one
+Client-managed requests use one priority scheduler per `IbkrClient`. Requests start at least
+100 ms apart, with at most ten requests in flight by default. The vendor `raw.init` handshake
+is outside this scheduler. With OAuth, it sends one live-session-token POST and then one
+brokerage-initialization POST. The client does not retry or wrap those calls.
+
+The scheduler also enforces these intervals between request starts:
+
+| Endpoint | Minimum interval |
+| --- | --- |
+| GET orders, GET trades, GET portfolio accounts | 5 s each |
+| GET market-data snapshot | 100 ms |
+| GET market-data history | 1.2 s (at most 50 starts per minute) |
+| POST tickle | 1 s (conservative use of the documented GET limit) |
+| POST portfolio-analysis transactions | 15 minutes |
+
+Short intervals wait in the scheduler. A request that is too early for the 15-minute interval
+fails immediately with `IbkrRequestSchedulerError`, code `IBKR_THROTTLED`, and the remaining
+`retryAfterMs`. The caller decides when to try again. A request is eligible at the exact interval
+boundary. Endpoint limits apply across accounts and to retries. The order-read limit does not
+apply to order writes. See the [IBKR pacing limits](https://www.interactivebrokers.com/docs/web-api/trading/usage-and-availability/pacing-limitations).
+
+Stateful security-definition discovery stays at one
 request at a time. Read-only `iserver/secdef/info` expansion defaults to one concurrent request and
 at least 250 ms between request starts. Configure these limits with `maxSecdefInfoConcurrent` and
 `secdefInfoMinStartIntervalMs`; concurrency cannot exceed the global limit. Order preview, status,
