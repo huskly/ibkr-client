@@ -62,6 +62,9 @@ class Client extends IbkrClient {
     if (input.path === "iserver/account/trades") return Promise.resolve([] as T);
     return Promise.resolve({} as T);
   }
+  override getAccountId(): Promise<string> {
+    return Promise.resolve(account);
+  }
   endpoint(input: Input): Promise<unknown> {
     return this.req(input);
   }
@@ -564,4 +567,39 @@ void test("conflicting execution account aliases invalidate confirmation", async
   assert.deepEqual(await client.getDerivativeExecutions({ accountId: account }), []);
   await client.getDerivativeExecutions({ accountId: account });
   assert.equal(client.verifies(), 2);
+});
+
+void test("legacy order lists keep unstated accounts and filter other accounts without invalidation", async () => {
+  const client = new Client();
+  const pendingTrades = deferred<unknown>();
+  const started = deferred<void>();
+  client.responder = (input) => {
+    if (input.path === "iserver/account/trades") {
+      started.resolve();
+      return pendingTrades.promise;
+    }
+    if (input.path === "iserver/account/orders")
+      return {
+        orders: [
+          { account, order_id: "test-own", status: "Submitted" },
+          { account: otherAccount, order_id: "test-other", status: "Submitted" },
+          { order_id: "test-unstated", status: "Submitted" },
+        ],
+      };
+    return undefined;
+  };
+  const sibling = client.getDerivativeExecutions({ accountId: account });
+  await started.promise;
+  const result = await client.fetchOrders({
+    fromEnteredTime: new Date(0),
+    toEnteredTime: new Date(),
+  });
+  assert.deepEqual(
+    result[0]?.orders.map((order) => order.orderId),
+    ["test-own", "test-unstated"]
+  );
+  pendingTrades.resolve([]);
+  await sibling;
+  await client.getDerivativeExecutions({ accountId: account });
+  assert.equal(client.verifies(), 1);
 });

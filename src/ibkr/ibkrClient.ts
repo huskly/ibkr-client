@@ -7635,7 +7635,8 @@ export class IbkrClient
   }
 
   private orderBelongsToAccount(order: IbkrLiveOrder, accountId: string): boolean {
-    return this.orderHasExactAccount(order, accountId);
+    const account = order.account ?? order.acct;
+    return account === undefined || account === accountId;
   }
 
   private orderInDateRange(order: BrokerOrder, fromDate: Date, toDate: Date): boolean {
