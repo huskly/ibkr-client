@@ -1,4 +1,5 @@
 import test from "node:test";
+import { createRequestClock } from "./helpers/requestClock.js";
 import assert from "node:assert/strict";
 import { IbkrClient, IbkrHttpError } from "../src/ibkr/ibkrClient.js";
 import type { DerivativeComboExecutionRequest, DerivativeContract } from "../src/types.js";
@@ -25,7 +26,7 @@ class FakeIbkrClient extends IbkrClient {
   readonly calls: RequestInput[] = [];
 
   constructor(private readonly responder: (input: RequestInput) => unknown) {
-    super(config);
+    super(config, { requestScheduler: createRequestClock() });
   }
 
   protected override sendRequest<T>(input: RequestInput): Promise<T> {
@@ -871,23 +872,19 @@ void test("close rejects a queued mutation before broker access", async () => {
 });
 
 void test("account preparation rejects a selected account without valid account-list evidence", async () => {
-  let accountReads = 0;
   const client = new FakeIbkrClient((input) => {
     if (input.path === "iserver/auth/status") {
       return { authenticated: true, connected: true, competing: false };
     }
     if (input.path === "iserver/accounts") {
-      accountReads += 1;
-      return accountReads === 1
-        ? { accounts: ["U123"], selectedAccount: "U123", isPaper: true }
-        : { selectedAccount: "U123" };
+      return { selectedAccount: "U123", isPaper: true };
     }
     throw new Error(`Unexpected request ${input.path}`);
   });
 
   await assert.rejects(
     client.cancelDerivativeOrder({ accountId: "U123", orderId: "777", assetClass: "OPT" }),
-    /not available for trading/
+    /not available to this session/
   );
   assert.ok(client.calls.every(({ method }) => method !== "DELETE"));
 });

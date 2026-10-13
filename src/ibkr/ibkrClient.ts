@@ -1,4 +1,6 @@
 import { createRequire } from "node:module";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { AccountCoordinator } from "./accountCoordinator.js";
 import type { IbkrClient as RawIbkrClient } from "ibkr-client";
 import type { IbkrOauth1Config } from "./oauthConfig.js";
 import type {
@@ -142,6 +144,7 @@ import {
 } from "./derivativeContract.js";
 import {
   IbkrRequestScheduler,
+  IbkrRequestSchedulerError,
   type IbkrRequestErrorClassification,
   type IbkrRequestPriority,
   type IbkrRequestSchedulerOptions,
@@ -745,7 +748,14 @@ export class IbkrClient
   private initPromise?: Promise<void>;
   private logoutPromise?: Promise<void>;
   private closed = false;
-  private accountCriticalSectionTail: Promise<void> = Promise.resolve();
+  private readonly accountCoordinator = new AccountCoordinator();
+  private confirmedAccount: string | undefined;
+  private selectionGeneration = 0;
+  private unsafeAuthGeneration = 0;
+  private readonly accountScope = new AsyncLocalStorage<{
+    accountId: string;
+    generation: number;
+  }>();
   private accountIdPromise?: Promise<string>;
   private readonly optionDiscovery = new Map<string, Promise<OptionDiscoveryResult>>();
   private readonly optionDefinitionCache: OptionDefinitionCache | undefined;
@@ -799,13 +809,15 @@ export class IbkrClient
     if (!isBrokerageSessionInput(rawInput)) {
       throw new TypeError("IBKR brokerage session initialization flags must be exact booleans");
     }
-    try {
-      await this.raw.init(rawInput.compete, rawInput.publish);
-    } catch (error) {
-      throw this.normalizeHttpError(error);
-    }
-    // IBKR is slow right after initialization; give the session a moment to settle.
-    await this.wait(1000);
+    await this.withAccountCriticalSection(async () => {
+      this.invalidateAccountSelection();
+      try {
+        await this.raw.init(rawInput.compete, rawInput.publish);
+      } catch (error) {
+        throw this.normalizeHttpError(error);
+      }
+      await this.wait(1000);
+    });
   }
 
   async renewBrokerageSession(input: { compete: false; publish: boolean }): Promise<void> {
@@ -816,12 +828,15 @@ export class IbkrClient
         "IBKR brokerage session renewal requires compete false and an exact publish boolean"
       );
     }
-    try {
-      await this.raw.init(false, rawInput.publish);
-    } catch (error) {
-      throw this.normalizeHttpError(error);
-    }
-    await this.wait(1000);
+    await this.withAccountCriticalSection(async () => {
+      this.invalidateAccountSelection();
+      try {
+        await this.raw.init(false, rawInput.publish);
+      } catch (error) {
+        throw this.normalizeHttpError(error);
+      }
+      await this.wait(1000);
+    });
   }
 
   async getSessionEvidence(): Promise<IbkrSessionEvidence> {
@@ -831,6 +846,7 @@ export class IbkrClient
       this.req<unknown>({ path: "iserver/accounts" }),
     ]);
     const accounts = isUnknownRecord(rawAccounts) ? rawAccounts : {};
+    this.observeAccountSelection(accounts);
     return {
       authenticated: status.authenticated,
       competing: status.competing,
@@ -848,6 +864,7 @@ export class IbkrClient
     const iserver = isUnknownRecord(response) ? response["iserver"] : null;
     const authStatus = isUnknownRecord(iserver) ? iserver["authStatus"] : null;
     const status = isUnknownRecord(authStatus) ? authStatus : {};
+    this.observeAuthStatus(status);
     return {
       authenticated: this.booleanOrNull(status["authenticated"]),
       competing: this.booleanOrNull(status["competing"]),
@@ -857,16 +874,17 @@ export class IbkrClient
 
   async logout(): Promise<void> {
     this.assertOpen();
-    this.logoutPromise ??= this.singleAttemptRequest<unknown>({
-      path: "logout",
-      method: "POST",
-    }).then(() => undefined);
+    this.logoutPromise ??= this.withAccountCriticalSection(async () => {
+      this.invalidateAccountSelection();
+      await this.singleAttemptRequest<unknown>({ path: "logout", method: "POST" });
+    });
     return this.logoutPromise;
   }
 
   close(): Promise<void> {
     if (this.closed) return Promise.resolve();
     this.closed = true;
+    this.invalidateAccountSelection();
     delete this.accountIdPromise;
     this.optionDiscovery.clear();
     this.optionContractResolution.clear();
@@ -882,6 +900,7 @@ export class IbkrClient
       method: "POST",
     });
     const status = isUnknownRecord(rawStatus) ? rawStatus : {};
+    this.observeAuthStatus(status);
     return {
       authenticated: this.booleanOrNull(status["authenticated"]),
       competing: this.booleanOrNull(status["competing"]),
@@ -897,6 +916,7 @@ export class IbkrClient
       this.req<unknown>({ path: "iserver/accounts" }),
     ]);
     const accounts = isUnknownRecord(rawAccounts) ? rawAccounts : {};
+    this.observeAccountSelection(accounts);
     const accountIds = this.accountIdsOrNull(accounts["accounts"]);
     if (!accountIds?.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available to this session`);
@@ -1273,8 +1293,7 @@ export class IbkrClient
     if (input.orderId !== undefined && !input.orderId.trim()) {
       throw new Error("An exact broker order ID is required for graph recovery");
     }
-    return this.withAccountCriticalSection(async () => {
-      await this.prepareBrokerageAccount(input.accountId);
+    return this.withAccountRead(input.accountId, async () => {
       const response = await this.req<IbkrLiveOrdersResponse>({
         path: "iserver/account/orders",
         params: { accountId: input.accountId },
@@ -2173,8 +2192,7 @@ export class IbkrClient
     if (!accountId.trim() || !orderId.trim()) {
       throw new Error("Exact account and order IDs are required");
     }
-    return this.withAccountCriticalSection(async () => {
-      await this.prepareBrokerageAccount(accountId);
+    return this.withAccountRead(accountId, async () => {
       return this.getDerivativeOrderStatusPrepared(accountId, orderId);
     });
   }
@@ -2207,8 +2225,7 @@ export class IbkrClient
     if (input.orderId !== undefined) {
       return this.getDerivativeOrderStatus(input.accountId, input.orderId);
     }
-    return this.withAccountCriticalSection(async () => {
-      await this.prepareBrokerageAccount(input.accountId);
+    return this.withAccountRead(input.accountId, async () => {
       const response = await this.req<IbkrLiveOrdersResponse>({
         path: "iserver/account/orders",
         params: { accountId: input.accountId },
@@ -2229,8 +2246,7 @@ export class IbkrClient
   async listActiveDerivativeOrders(accountId: string): Promise<ActiveDerivativeOrder[]> {
     this.assertOpen();
     if (!accountId.trim()) throw new Error("An exact account ID is required");
-    return this.withAccountCriticalSection(async () => {
-      await this.prepareBrokerageAccount(accountId);
+    return this.withAccountRead(accountId, async () => {
       const response = await this.req<IbkrLiveOrdersResponse>({
         path: "iserver/account/orders",
         params: { accountId },
@@ -2302,8 +2318,7 @@ export class IbkrClient
     if (input.clientOrderId !== undefined && !input.clientOrderId.trim()) {
       throw new Error("Client order ID cannot be empty");
     }
-    return this.withAccountCriticalSection(async () => {
-      await this.prepareBrokerageAccount(input.accountId);
+    return this.withAccountRead(input.accountId, async () => {
       const response = await this.req<IbkrTrade[]>({
         path: "iserver/account/trades",
         ...(input.days === undefined ? {} : { params: { days: input.days } }),
@@ -3198,9 +3213,7 @@ export class IbkrClient
   async fetchOrders(options: BrokerOrdersOptions): Promise<BrokerAccountOrders[]> {
     this.assertOpen();
     const accountId = await this.getAccountId();
-    return this.withAccountCriticalSection(async () => {
-      await this.prepareBrokerageAccount(accountId);
-
+    return this.withAccountRead(accountId, async () => {
       const params: Record<string, string | boolean> = {};
       if (options.status && options.status.toUpperCase() !== "WORKING") {
         params["filters"] = this.ibkrStatusFilter(options.status);
@@ -5411,15 +5424,66 @@ export class IbkrClient
 
   private withAccountCriticalSection<T>(operation: () => Promise<T>): Promise<T> {
     this.assertOpen();
-    const result = this.accountCriticalSectionTail.then(async () => {
+    return this.accountCoordinator.exclusive(async () => {
       this.assertOpen();
       return operation();
     });
-    this.accountCriticalSectionTail = result.then(
-      () => undefined,
-      () => undefined
+  }
+
+  private withAccountRead<T>(accountId: string, operation: () => Promise<T>): Promise<T> {
+    this.assertOpen();
+    return this.accountCoordinator.read(
+      accountId,
+      () => this.prepareBrokerageAccount(accountId),
+      () => this.runAccountOperation(accountId, operation)
     );
-    return result;
+  }
+
+  private async runAccountOperation<T>(accountId: string, operation: () => Promise<T>): Promise<T> {
+    this.assertOpen();
+    if (this.confirmedAccount !== accountId) {
+      throw new Error("IBKR selected-account confirmation is unavailable");
+    }
+    return this.accountScope.run({ accountId, generation: this.selectionGeneration }, async () => {
+      try {
+        return await operation();
+      } catch (error) {
+        if (!this.isSelectionPreservingThrottle(error)) this.invalidateAccountSelection();
+        throw error;
+      }
+    });
+  }
+
+  private observeAuthStatus(status: Readonly<Record<string, unknown>>): void {
+    if (
+      status["authenticated"] !== true ||
+      status["connected"] !== true ||
+      status["competing"] !== false
+    ) {
+      this.unsafeAuthGeneration += 1;
+      this.invalidateAccountSelection();
+    }
+  }
+
+  private observeAccountSelection(accounts: Readonly<Record<string, unknown>>): void {
+    if (
+      this.confirmedAccount !== undefined &&
+      (accounts["selectedAccount"] !== this.confirmedAccount ||
+        !this.accountIdsOrNull(accounts["accounts"])?.includes(this.confirmedAccount))
+    )
+      this.invalidateAccountSelection();
+  }
+
+  private invalidateAccountSelection(): void {
+    this.confirmedAccount = undefined;
+    this.selectionGeneration += 1;
+  }
+
+  private isSelectionPreservingThrottle(error: unknown): boolean {
+    return (
+      (error instanceof IbkrRequestSchedulerError && error.code === "IBKR_THROTTLED") ||
+      this.classifyRequestError(error).kind === "THROTTLED"
+    );
   }
 
   private withTradingMutation<T>(
@@ -5428,10 +5492,20 @@ export class IbkrClient
     operation: (diagnostics: SafeTradingDiagnostics) => Promise<T>
   ): Promise<T> {
     return this.withAccountCriticalSection(async () => {
+      const generation = this.selectionGeneration;
+      const authGeneration = this.unsafeAuthGeneration;
       const diagnostics = await this.getTradingDiagnostics(accountId);
-      if (!this.isSafeForTradingMutation(diagnostics)) throw new Error(unsafeMessage);
+      if (
+        !this.isSafeForTradingMutation(diagnostics) ||
+        authGeneration !== this.unsafeAuthGeneration
+      )
+        throw new Error(unsafeMessage);
+      if (generation === this.selectionGeneration && diagnostics.selectedAccountId === accountId) {
+        this.confirmedAccount = accountId;
+      }
       await this.prepareBrokerageAccount(accountId);
-      return operation(diagnostics);
+      if (authGeneration !== this.unsafeAuthGeneration) throw new Error(unsafeMessage);
+      return this.runAccountOperation(accountId, () => operation(diagnostics));
     });
   }
 
@@ -5466,6 +5540,11 @@ export class IbkrClient
   }
 
   private async prepareBrokerageAccount(accountId: string): Promise<void> {
+    this.assertOpen();
+    if (!accountId.trim()) throw new Error("An explicit IBKR account ID is required");
+    if (this.confirmedAccount === accountId) return;
+    this.invalidateAccountSelection();
+    const generation = this.selectionGeneration;
     const rawBrokerageAccounts = await this.req<unknown>({
       path: "iserver/accounts",
     });
@@ -5474,15 +5553,31 @@ export class IbkrClient
     if (!accountIds?.includes(accountId)) {
       throw new Error(`IBKR account ${accountId} is not available for trading/order queries.`);
     }
-    if (brokerageAccounts["selectedAccount"] === accountId) return;
+    if (brokerageAccounts["selectedAccount"] === accountId) {
+      this.assertOpen();
+      if (generation !== this.selectionGeneration) {
+        throw new Error("IBKR account confirmation changed during verification");
+      }
+      this.confirmedAccount = accountId;
+      return;
+    }
+    this.invalidateAccountSelection();
+    const switchGeneration = this.selectionGeneration;
     const switchedAccount = await this.singleAttemptRequest<IbkrSwitchAccountResponse>({
       path: "iserver/account",
       method: "POST",
       data: { acctId: accountId },
     });
-    if (switchedAccount.set !== true || switchedAccount.acctId !== accountId) {
+    if (
+      !isUnknownRecord(switchedAccount) ||
+      switchedAccount["set"] !== true ||
+      switchedAccount["acctId"] !== accountId ||
+      switchGeneration !== this.selectionGeneration
+    ) {
       throw new Error(`IBKR account switch was not confirmed for ${accountId}.`);
     }
+    this.assertOpen();
+    this.confirmedAccount = accountId;
   }
 
   private normalizeStockListing(symbol: string, listing: IbkrStockListing): BrokerInstrument[] {
@@ -7839,24 +7934,70 @@ export class IbkrClient
     onTerminalFailure?: (error: unknown) => void
   ): Promise<T> {
     if (this.closed) return Promise.reject(this.closedError());
+    const pacing = this.requestPacing(input);
+    const scope = this.accountScope.getStore();
     return this.requestScheduler.schedule(
       {
         endpoint: this.requestEndpoint(input.path),
         priority: this.requestPriority(input.path),
         secdefInfo: input.path === "iserver/secdef/info",
+        ...(pacing === undefined ? {} : { pacing }),
         retryable: retryPolicy !== "SINGLE_ATTEMPT",
         retryServerErrors: retryPolicy === "PRICE_HISTORY",
         ...(signal === undefined ? {} : { signal }),
-        ...(onTerminalFailure === undefined ? {} : { onTerminalFailure }),
+        onTerminalFailure: (error) => {
+          if (
+            (input.path === "iserver/auth/status" || input.path === "tickle") &&
+            !this.isSelectionPreservingThrottle(error)
+          )
+            this.unsafeAuthGeneration += 1;
+          if (
+            (scope !== undefined ||
+              input.path === "iserver/accounts" ||
+              input.path === "iserver/auth/status" ||
+              input.path === "tickle") &&
+            !this.isSelectionPreservingThrottle(error)
+          )
+            this.invalidateAccountSelection();
+          onTerminalFailure?.(error);
+        },
       },
       async () => {
+        this.assertOpen();
+        if (
+          scope !== undefined &&
+          (scope.generation !== this.selectionGeneration ||
+            scope.accountId !== this.confirmedAccount)
+        )
+          throw new Error("IBKR account selection changed during an account operation");
         try {
           return await this.sendRequest<T>(input);
         } catch (error) {
+          if (scope !== undefined && !this.isSelectionPreservingThrottle(error)) {
+            this.invalidateAccountSelection();
+          }
           throw this.normalizeHttpError(error);
         }
       }
     );
+  }
+
+  private requestPacing(
+    input: IbkrRequestInput
+  ): { key: string; minStartIntervalMs: number } | undefined {
+    const method = input.method ?? "GET";
+    const intervals: Readonly<Record<string, number>> = {
+      "GET iserver/account/orders": 5_000,
+      "GET iserver/account/trades": 5_000,
+      "GET portfolio/accounts": 5_000,
+      "GET iserver/marketdata/snapshot": 100,
+      "GET iserver/marketdata/history": 1_200,
+      "POST pa/transactions": 900_000,
+      "POST tickle": 1_000,
+    };
+    const key = `${method} ${input.path}`;
+    const minStartIntervalMs = intervals[key];
+    return minStartIntervalMs === undefined ? undefined : { key, minStartIntervalMs };
   }
 
   private requestPriority(path: string): IbkrRequestPriority {

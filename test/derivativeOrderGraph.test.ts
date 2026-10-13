@@ -1,4 +1,5 @@
 import test from "node:test";
+import { createRequestClock } from "./helpers/requestClock.js";
 import assert from "node:assert/strict";
 import { IbkrClient } from "../src/ibkr/ibkrClient.js";
 import type { DerivativeContract, DerivativeOrderGraphRequest } from "../src/index.js";
@@ -22,7 +23,7 @@ const config: IbkrOauth1Config = {
 class Fake extends IbkrClient {
   calls: Input[] = [];
   constructor(private response: (input: Input) => unknown) {
-    super(config);
+    super(config, { requestScheduler: createRequestClock() });
   }
   protected override sendRequest<T>(input: Input): Promise<T> {
     this.calls.push(input);
@@ -1761,7 +1762,7 @@ test("fails closed when terminal evidence includes an unexpected attached order"
   );
 });
 
-test("uses an exact broker ID even when trade history fails", async () => {
+test("requires recovery when trade history fails despite an exact broker ID", async () => {
   const client = new Fake((input) => {
     if (input.path === "iserver/account/orders") {
       if (input.params?.["filters"] !== undefined) return { orders: [] };
@@ -1792,10 +1793,22 @@ test("uses an exact broker ID even when trade history fails", async () => {
     { accountId: "U1", orderId: "10" },
     graphTwoNodes()
   );
-  assert.equal(result.state, "accepted");
+  assert.equal(result.state, "recovery_required");
+  assert.equal(result.members[0]?.orderId, null);
+  assert.equal(result.members[1]?.orderId, "11");
+  if (result.state !== "recovery_required") assert.fail("Expected recovery evidence");
+  assert.ok(
+    result.unrecognizedResponses.some(
+      (response) =>
+        typeof response === "object" &&
+        response !== null &&
+        "order_id" in response &&
+        response.order_id === result.members[1]?.orderId
+    )
+  );
   assert.equal(
     client.calls.some((call) => call.path === "iserver/account/order/status/10"),
-    true
+    false
   );
 });
 
