@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createRequestClock } from "./helpers/requestClock.js";
 import {
   IbkrClient,
   type EquityContract,
@@ -30,7 +31,7 @@ class FakeIbkrClient extends IbkrClient {
   readonly calls: RequestInput[] = [];
 
   constructor(private readonly responder: (input: RequestInput) => unknown | Promise<unknown>) {
-    super(config);
+    super(config, { requestScheduler: createRequestClock() });
   }
 
   protected override async sendRequest<T>(input: RequestInput): Promise<T> {

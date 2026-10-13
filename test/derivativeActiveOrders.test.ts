@@ -1,4 +1,5 @@
 import test from "node:test";
+import { createRequestClock } from "./helpers/requestClock.js";
 import assert from "node:assert/strict";
 import { IbkrClient } from "../src/ibkr/ibkrClient.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
@@ -25,7 +26,7 @@ class FakeIbkrClient extends IbkrClient {
     private readonly selectedAccount = "U123",
     private readonly switchResponse: unknown = { set: true, acctId: "U123" }
   ) {
-    super(config);
+    super(config, { requestScheduler: createRequestClock() });
   }
   protected override sendRequest<T>(input: RequestInput): Promise<T> {
     this.calls.push(input);
