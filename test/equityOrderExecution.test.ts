@@ -349,7 +349,7 @@ void test("equity cancellation makes one STK request without CME metadata", asyn
   assert.deepEqual(cancellation?.params, undefined);
 });
 
-void test("equity modification sends a full ticket without cOID for LIMIT and STOP", async () => {
+void test("equity modification sends one full ticket object without cOID for LIMIT and STOP", async () => {
   for (const original of [request(), stopRequest()] as const) {
     const { clientOrderId: _clientOrderId, ...terms } = original;
     const modify: EquityOrderModifyRequest = { ...terms, orderId: "991" };
@@ -364,18 +364,14 @@ void test("equity modification sends a full ticket without cOID for LIMIT and ST
     assert.equal(writes.length, 1);
     assert.equal(writes[0]?.method, "POST");
     assert.deepEqual(writes[0]?.data, {
-      orders: [
-        {
-          acctId: "U123",
-          conid: contract.conid,
-          orderType: original.orderType,
-          side: original.side,
-          price: original.orderType === "LMT" ? original.limit : original.stopPrice,
-          tif: original.tif,
-          quantity: original.quantity,
-          outsideRTH: original.session === "OVERNIGHT",
-        },
-      ],
+      acctId: "U123",
+      conid: contract.conid,
+      orderType: original.orderType,
+      side: original.side,
+      price: original.orderType === "LMT" ? original.limit : original.stopPrice,
+      tif: original.tif,
+      quantity: original.quantity,
+      outsideRTH: original.session === "OVERNIGHT",
     });
     assert.equal(
       api.calls.some(({ path }) => path.endsWith("/orders/whatif")),

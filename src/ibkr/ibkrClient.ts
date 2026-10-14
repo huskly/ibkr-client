@@ -1009,7 +1009,8 @@ export class IbkrClient
         >({
           path: `iserver/account/${request.accountId}/order/${encodeURIComponent(request.orderId)}`,
           method: "POST",
-          data: { orders: [this.equityOrderTicket(request)] },
+          // IBKR's modify endpoint takes one ticket object as the body, not an `orders` array.
+          data: this.equityOrderTicket(request),
         });
         const result = this.normalizeOrderSubmission(response, null);
         if (result.state === "accepted" && result.orderId !== request.orderId) {
