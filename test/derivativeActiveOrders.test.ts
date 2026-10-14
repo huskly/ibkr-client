@@ -113,6 +113,31 @@ void test("lists a typed active single option and preserves lifecycle evidence",
   assert.deepEqual(client.calls.at(-1)?.params, { accountId: "U123" });
 });
 
+void test("reports IBKR's CLOSE time in force on an active order as DAY", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [
+      {
+        account: "U123",
+        orderId: 11,
+        conid: 101,
+        side: "BUY",
+        totalSize: 1,
+        filled: 0,
+        remaining: 1,
+        status: "Submitted",
+        orderType: "LMT",
+        price: 1.25,
+        timeInForce: "CLOSE",
+      },
+    ],
+  });
+
+  const [order] = await client.listActiveDerivativeOrders("U123");
+
+  assert.equal(order?.tif, "DAY");
+});
+
 void test("does not miss a live order hidden by a forced empty snapshot", async () => {
   const liveOrder = {
     account: "U123",

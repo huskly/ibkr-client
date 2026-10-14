@@ -4935,7 +4935,7 @@ export class IbkrClient
       totalQuantity: total,
       filledQuantity: filled,
       remainingQuantity: remaining,
-      tif: order.tif ?? order.timeInForce ?? null,
+      tif: this.canonicalTimeInForce(order.tif ?? order.timeInForce) ?? null,
       session:
         order.outsideRTH === true || order.outside_rth === true
           ? "OVERNIGHT"
