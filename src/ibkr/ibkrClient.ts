@@ -701,6 +701,18 @@ export class IbkrBrokerResponseError extends Error {
   }
 }
 
+/** A positions snapshot with a repeated contract cannot be used as account state. */
+export class IbkrInconsistentPositionsError extends Error {
+  readonly code = "DUPLICATE_CONID";
+
+  constructor() {
+    super(
+      "IBKR returned an inconsistent positions snapshot: duplicate conid; retry on a later read"
+    );
+    this.name = "IbkrInconsistentPositionsError";
+  }
+}
+
 /** Typed contract-resolution failure raised before a price-history broker request. */
 export class IbkrPriceHistoryContractError extends Error {
   constructor(
@@ -2720,12 +2732,18 @@ export class IbkrClient
   /** Page through the positions endpoint until it stops returning rows. */
   private async fetchAllPositions(accountId: string): Promise<IbkrPosition[]> {
     const out: IbkrPosition[] = [];
+    const seenConids = new Set<number>();
     let page = 0;
     for (;;) {
       const rows = await this.req<IbkrPosition[]>({
         path: `portfolio/${accountId}/positions/${String(page)}`,
       });
       if (!rows.length) break;
+      for (const row of rows) {
+        if (row.conid === undefined) continue;
+        if (seenConids.has(row.conid)) throw new IbkrInconsistentPositionsError();
+        seenConids.add(row.conid);
+      }
       out.push(...rows);
       page += 1;
     }

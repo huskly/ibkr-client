@@ -163,7 +163,11 @@ validated at runtime. Its broker-neutral account API includes:
   separators from numeric provider strings, such as day P/L field `78` and account summary amounts.
   The top-level net liquidation, available funds, buying power, and cash balance values and all
   margin values are `null` when IBKR omits or returns an invalid or non-finite value. Numeric zero
-  remains `0`.
+  remains `0`. A positions snapshot that repeats a conid within one page or across pages throws
+  `IbkrInconsistentPositionsError` with code `DUPLICATE_CONID`. The client refuses the complete
+  snapshot before symbol filtering or market-data requests. It never sums or silently removes
+  duplicate rows. The caller can retry on a later read; the client does not retry the snapshot.
+  This check also applies to the positions read used by `fetchTransactionHistory()`.
 - `getAccountSettlementEvidence()` for one settled-cash observation of the account. It reads the
   same account summary endpoint as `getAccountBalances()` and returns the account id, one
   client-minted `observedAtEpochMillis`, and the `settledCash`, `availableFunds`, `totalCashValue`,

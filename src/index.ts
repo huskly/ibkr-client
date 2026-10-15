@@ -9,6 +9,7 @@ export type {
 export {
   IbkrClient,
   IbkrBrokerResponseError,
+  IbkrInconsistentPositionsError,
   IbkrHttpError,
   IbkrPriceHistoryContractError,
   IbkrInsufficientHistoryError,

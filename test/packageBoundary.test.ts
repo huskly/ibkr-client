@@ -8,6 +8,7 @@ import {
   type FlexReportRequest,
   type FlexStatementResult,
   IbkrHttpError,
+  IbkrInconsistentPositionsError,
   IbkrInsufficientHistoryError,
   IbkrPriceHistoryContractError,
   type AccountBalances,
@@ -70,6 +71,14 @@ import {
   type TradingDiagnostics,
   type UnderlyingInstrumentReferenceEvidence,
 } from "../src/index.js";
+
+void test("public positions error identifies an inconsistent snapshot without account data", () => {
+  const error = new IbkrInconsistentPositionsError();
+  assert.ok(error instanceof Error);
+  assert.equal(error.name, "IbkrInconsistentPositionsError");
+  assert.equal(error.code, "DUPLICATE_CONID");
+  assert.match(error.message, /duplicate conid/);
+});
 
 void test("public Flex source exposes pending state and raw statement attributes", () => {
   const request: FlexReportRequest = { queryId: "123", fromDate: "20260901", toDate: "20260902" };

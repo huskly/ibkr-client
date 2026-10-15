@@ -1,7 +1,7 @@
 import test from "node:test";
 import { createRequestClock } from "./helpers/requestClock.js";
 import assert from "node:assert/strict";
-import { IbkrClient } from "../src/ibkr/ibkrClient.js";
+import { IbkrClient, IbkrInconsistentPositionsError } from "../src/ibkr/ibkrClient.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
 interface RequestInput {
@@ -242,6 +242,88 @@ void test("fetchTransactionHistory normalizes and date-filters IBKR transactions
     cost: 210,
     transferItemType: "TRADE",
   });
+});
+
+for (const samePage of [false, true]) {
+  void test(`getPositions refuses duplicate conids ${samePage ? "within one page" : "across pages"}`, async () => {
+    const row = { conid: 123, contractDesc: "AAPL", assetClass: "STK", position: 1 };
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "portfolio/accounts") return [{ accountId: "test-account" }];
+      if (input.path === "portfolio/test-account/positions/0") {
+        return samePage ? [row, { ...row, contractDesc: "OTHER", position: 2 }] : [row];
+      }
+      if (input.path === "portfolio/test-account/positions/1") return samePage ? [] : [row];
+      if (input.path === "portfolio/test-account/positions/2") return [];
+      if (input.path === "iserver/marketdata/snapshot") return [];
+      throw new Error(`Unexpected request: ${input.path}`);
+    });
+
+    await assert.rejects(
+      () => client.getPositions("UNRELATED"),
+      (error: unknown) => {
+        assert.ok(error instanceof IbkrInconsistentPositionsError);
+        assert.equal(error.code, "DUPLICATE_CONID");
+        return true;
+      }
+    );
+    assert.equal(
+      client.calls.some(({ path }) => path === "iserver/marketdata/snapshot"),
+      false
+    );
+    assert.equal(
+      client.calls.filter(({ path }) => path.includes("/positions/")).length,
+      samePage ? 1 : 2
+    );
+  });
+}
+
+void test("fetchTransactionHistory refuses duplicate positions before transaction requests", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "portfolio/accounts") return [{ accountId: "test-account" }];
+    if (input.path === "portfolio/test-account/positions/0")
+      return [{ conid: 123 }, { conid: 123 }];
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  await assert.rejects(
+    () => client.fetchTransactionHistory(new Date("2026-10-01"), new Date("2026-10-02")),
+    IbkrInconsistentPositionsError
+  );
+  assert.equal(
+    client.calls.some(({ path }) => path === "pa/transactions"),
+    false
+  );
+});
+
+void test("getPositions preserves distinct contracts and page order across multiple pages", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "portfolio/accounts") return [{ accountId: "test-account" }];
+    if (input.path === "portfolio/test-account/positions/0") {
+      return [{ conid: 123, contractDesc: "AAPL", assetClass: "STK", position: 1 }];
+    }
+    if (input.path === "portfolio/test-account/positions/1") {
+      return [{ conid: 456, contractDesc: "AAPL", assetClass: "STK", position: -2 }];
+    }
+    if (input.path === "portfolio/test-account/positions/2") return [];
+    if (input.path === "iserver/marketdata/snapshot") return [];
+    throw new Error(`Unexpected request: ${input.path}`);
+  });
+
+  const positions = await client.getPositions();
+  assert.deepEqual(
+    positions.map(({ brokerId, symbol, longQuantity, shortQuantity }) => ({
+      brokerId,
+      symbol,
+      longQuantity,
+      shortQuantity,
+    })),
+    [
+      { brokerId: "123", symbol: "AAPL", longQuantity: 1, shortQuantity: 0 },
+      { brokerId: "456", symbol: "AAPL", longQuantity: 0, shortQuantity: 2 },
+    ]
+  );
+  assert.equal(client.calls.filter(({ path }) => path.includes("/positions/")).length, 3);
+  assert.equal(client.calls.filter(({ path }) => path === "iserver/marketdata/snapshot").length, 2);
 });
 
 void test("getPositions exposes canonical OSI symbols for options", async () => {
