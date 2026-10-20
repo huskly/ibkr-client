@@ -660,6 +660,37 @@ void test("active STK snapshot exposes exact stock identity and stop ticket term
   assert.equal(order?.session, "OVERNIGHT");
 });
 
+void test("active modified STK LIMIT reads IBKR's zero stop price as no stop price", async () => {
+  const client = new FakeIbkrClient({
+    snapshot: true,
+    orders: [
+      {
+        account: "U123",
+        orderId: 198643852,
+        order_ref: "hg-modified",
+        conid: 12658199,
+        secType: "STK",
+        ticker: "IGV",
+        side: "SELL",
+        totalSize: 100,
+        cumFill: 0,
+        remaining: 100,
+        status: "Submitted",
+        orderType: "LMT",
+        price: "107.2",
+        stop_price: 0,
+        tif: "DAY",
+        outsideRTH: false,
+      },
+    ],
+  });
+  const [order] = await client.listActiveDerivativeOrders("U123");
+  assert.equal(order?.orderType, "LIMIT");
+  assert.equal(order?.limitPrice, 107.2);
+  assert.equal(order?.stopPrice, null);
+  assert.deepEqual(order?.uncertainty, []);
+});
+
 void test("active STK snapshot does not hide conflicting stock and price evidence", async () => {
   const client = new FakeIbkrClient({
     snapshot: true,
