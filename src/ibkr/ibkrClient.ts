@@ -4966,10 +4966,11 @@ export class IbkrClient
         orderType === "STOP"
           ? null
           : (this.firstNumber(order.limitPrice, order.limit_price, order.price) ?? null),
+      // IBKR reports a modified LIMIT order with `stop_price: 0`. Zero is a placeholder, not a stop.
       stopPrice:
         orderType === "STOP"
           ? (this.observedStopPrice(order) ?? null)
-          : (this.firstNumber(order.stopPrice, order.stop_price) ?? null),
+          : (this.firstPositiveNumber(order.stopPrice, order.stop_price) ?? null),
       enteredAt: orderTime,
       updatedAt:
         order.lastExecutionTime_r !== undefined || order.lastExecutionTime !== undefined
