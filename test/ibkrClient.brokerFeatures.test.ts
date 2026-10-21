@@ -2,6 +2,7 @@ import test from "node:test";
 import { createRequestClock } from "./helpers/requestClock.js";
 import assert from "node:assert/strict";
 import { IbkrClient, IbkrInconsistentPositionsError } from "../src/ibkr/ibkrClient.js";
+import type { CashBalance } from "../src/index.js";
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
 interface RequestInput {
@@ -62,6 +63,58 @@ void test("searchInstruments exposes normalized stock contracts", async () => {
     },
   ]);
   await assert.rejects(() => client.searchInstruments("MSTR", "fundamental"), /supports only/);
+});
+
+void test("getCashBalances reads each ledger currency without the BASE aggregate", async () => {
+  const client = new FakeIbkrClient((input) => {
+    if (input.path === "portfolio/accounts") return [{ accountId: "test-account" }];
+    assert.equal(input.path, "portfolio/test-account/ledger");
+    assert.equal(input.method ?? "GET", "GET");
+    return {
+      BASE: { cashbalance: 500, exchangerate: 1 },
+      usd: { currency: "USD", cashbalance: "1,250.50", exchangerate: 1 },
+      JPY: { cashbalance: -100_000, exchangerate: "0.0067" },
+      EUR: { cashbalance: 0, exchangerate: "0" },
+    };
+  });
+  const balances: CashBalance[] = await client.getCashBalances();
+  assert.deepEqual(balances, [
+    { currency: "USD", cashBalance: 1250.5, exchangeRate: 1 },
+    { currency: "JPY", cashBalance: -100_000, exchangeRate: 0.0067 },
+    { currency: "EUR", cashBalance: 0, exchangeRate: 0 },
+  ]);
+  assert.equal(client.calls.length, 2);
+});
+
+for (const value of [undefined, null, "", "not-a-number", "1,2,3", Infinity, NaN, true, {}]) {
+  void test(`getCashBalances preserves unavailable amounts for ${String(value)}`, async () => {
+    const client = new FakeIbkrClient((input) => {
+      if (input.path === "portfolio/accounts") return [{ accountId: "test-account" }];
+      return { USD: { cashbalance: value, exchangerate: value }, JPY: null };
+    });
+    assert.deepEqual(await client.getCashBalances(), [
+      { currency: "USD", cashBalance: null, exchangeRate: null },
+      { currency: "JPY", cashBalance: null, exchangeRate: null },
+    ]);
+  });
+}
+
+void test("getCashBalances returns no rows for an empty or aggregate-only ledger", async () => {
+  for (const ledger of [{}, { BASE: { cashbalance: 100 } }]) {
+    const client = new FakeIbkrClient((input) =>
+      input.path === "portfolio/accounts" ? [{ accountId: "test-account" }] : ledger
+    );
+    assert.deepEqual(await client.getCashBalances(), []);
+  }
+});
+
+void test("getCashBalances rejects invalid ledger responses", async () => {
+  for (const ledger of [null, undefined, [], "unavailable", 0]) {
+    const client = new FakeIbkrClient((input) =>
+      input.path === "portfolio/accounts" ? [{ accountId: "test-account" }] : ledger
+    );
+    await assert.rejects(client.getCashBalances(), /invalid cash ledger/);
+  }
 });
 
 void test("getAccountBalances exposes typed total and segment margin snapshots", async () => {

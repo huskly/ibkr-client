@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.5.0
+
+- Add `getCashBalances()` and the exported `CashBalance` type for cash by ledger currency.
+- Exclude the `BASE` aggregate and keep missing or invalid amounts as `null`.
+
 ## 4.1.6
 
 - Request IBKR field `7741` (Prior Close) for quotes and derivative chain and reference snapshots.

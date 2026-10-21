@@ -64,6 +64,13 @@ export interface AccountMargin {
   commodities: AccountMarginSnapshot;
 }
 
+/** Cash in one ledger currency; missing or invalid amounts remain null. */
+export interface CashBalance {
+  currency: string;
+  cashBalance: number | null;
+  exchangeRate: number | null;
+}
+
 export interface AccountBalances {
   netLiquidation: number | null;
   availableFunds: number | null;
@@ -1482,6 +1489,7 @@ export interface BrokerClient {
   getAuthStatus(): Promise<AuthStatus>;
   getAccountId(): Promise<string>;
   getAccountBalances(): Promise<AccountBalances>;
+  getCashBalances(): Promise<CashBalance[]>;
   getPositions(symbol?: string): Promise<BrokerPosition[]>;
   getQuotes(
     requests: readonly BrokerQuoteRequest[],
