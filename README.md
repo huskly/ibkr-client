@@ -168,6 +168,12 @@ validated at runtime. Its broker-neutral account API includes:
   snapshot before symbol filtering or market-data requests. It never sums or silently removes
   duplicate rows. The caller can retry on a later read; the client does not retry the snapshot.
   This check also applies to the positions read used by `fetchTransactionHistory()`.
+- `getCashBalances(): Promise<CashBalance[]>` reads `GET portfolio/{accountId}/ledger`.
+  Each row has an uppercase `currency` from the ledger key, `cashBalance` in that currency,
+  and `exchangeRate` in base-currency units per unit of that currency. It includes the base
+  currency row but not the `BASE` aggregate. Missing, invalid, and non-finite numbers remain
+  `null`; zero remains `0`. It does not infer a balance or an exchange rate. An invalid ledger
+  response throws. This read does not change positions or place orders.
 - `getAccountSettlementEvidence()` for one settled-cash observation of the account. It reads the
   same account summary endpoint as `getAccountBalances()` and returns the account id, one
   client-minted `observedAtEpochMillis`, and the `settledCash`, `availableFunds`, `totalCashValue`,

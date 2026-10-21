@@ -31,6 +31,7 @@ export type {
   AccountMargin,
   AccountMarginSnapshot,
   AccountBalances,
+  CashBalance,
   AccountSettledCashByDate,
   AccountSettlementEvidence,
   AccountSettlementFigure,

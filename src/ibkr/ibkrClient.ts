@@ -5,6 +5,7 @@ import type { IbkrClient as RawIbkrClient } from "ibkr-client";
 import type { IbkrOauth1Config } from "./oauthConfig.js";
 import type {
   AccountBalances,
+  CashBalance,
   AccountSettledCashByDate,
   AccountSettlementEvidence,
   AccountSettlementFigure,
@@ -2440,6 +2441,20 @@ export class IbkrClient
       return first.accountId;
     })();
     return this.accountIdPromise;
+  }
+
+  async getCashBalances(): Promise<CashBalance[]> {
+    this.assertOpen();
+    const accountId = await this.getAccountId();
+    const ledger = await this.req<unknown>({ path: `portfolio/${accountId}/ledger` });
+    if (!isUnknownRecord(ledger)) throw new Error("IBKR returned an invalid cash ledger");
+    return Object.entries(ledger)
+      .filter(([currency]) => currency.toUpperCase() !== "BASE")
+      .map(([currency, entry]) => ({
+        currency: currency.toUpperCase(),
+        cashBalance: toNullableNumber(isUnknownRecord(entry) ? entry["cashbalance"] : null),
+        exchangeRate: toNullableNumber(isUnknownRecord(entry) ? entry["exchangerate"] : null),
+      }));
   }
 
   async getAccountBalances(): Promise<AccountBalances> {
