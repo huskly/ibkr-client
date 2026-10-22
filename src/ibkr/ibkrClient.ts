@@ -1,7 +1,6 @@
-import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { AccountCoordinator } from "./accountCoordinator.js";
-import type { IbkrClient as RawIbkrClient } from "ibkr-client";
+import { IbkrOauthSession } from "./oauthSession.js";
 import type { IbkrOauth1Config } from "./oauthConfig.js";
 import type {
   AccountBalances,
@@ -151,16 +150,6 @@ import {
   type IbkrRequestSchedulerOptions,
   type IbkrRequestTelemetry,
 } from "./requestScheduler.js";
-
-// `ibkr-client`'s published ESM build is broken: its `import` condition points
-// at files that use extensionless relative imports, which Node's strict ESM
-// resolver rejects. Its CJS build is fine, so we deliberately load that via
-// createRequire. This is the one intentional createRequire in the package —
-// everything else imports natively as ESM. Revisit if upstream fixes their ESM.
-const require = createRequire(import.meta.url);
-const { IbkrClient: RawIbkrClientCtor } = require("ibkr-client") as {
-  IbkrClient: new (config: IbkrOauth1Config) => RawIbkrClient;
-};
 
 class AccountIdentityError extends Error {}
 
@@ -747,8 +736,8 @@ const PA_TRANSACTIONS_NO_MATCHES = "No matches found";
 
 /**
  * Typed IBKR Web API client implementing the broker-neutral {@link BrokerClient}.
- * Wraps the `ibkr-client` npm package, which performs the OAuth 1.0a
- * live-session-token handshake. Ports the data access from the Python PoC
+ * Uses {@link IbkrOauthSession} for the OAuth 1.0a live-session-token
+ * handshake and request signing. Ports the data access from the Python PoC
  * (main.py): account summary, positions paging, and day-P/L snapshots.
  */
 export class IbkrClient
@@ -759,7 +748,7 @@ export class IbkrClient
     DerivativePreviewClient,
     DerivativeExecutionClient
 {
-  private readonly raw: RawIbkrClient;
+  private readonly raw: IbkrOauthSession;
   private initPromise?: Promise<void>;
   private logoutPromise?: Promise<void>;
   private closed = false;
@@ -788,7 +777,7 @@ export class IbkrClient
   private readonly onRequestTelemetry: (event: IbkrRequestTelemetry) => void;
 
   constructor(config: IbkrOauth1Config, options: IbkrClientOptions = {}) {
-    this.raw = new RawIbkrClientCtor(config);
+    this.raw = new IbkrOauthSession(config);
     this.onPriceHistoryTelemetry = options.onPriceHistoryTelemetry ?? (() => undefined);
     this.onOptionDiscoveryTelemetry = options.onOptionDiscoveryTelemetry ?? (() => undefined);
     this.optionDefinitionCache = options.optionDefinitionCache;
@@ -7971,7 +7960,7 @@ export class IbkrClient
     return parsed;
   }
 
-  /** Typed wrapper around the raw client's untyped `request()`. */
+  /** Typed wrapper around the session's untyped `request()`. */
   protected async sendRequest<T>(input: IbkrRequestInput): Promise<T> {
     try {
       return (await this.raw.request(input)) as T;

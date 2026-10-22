@@ -1,0 +1,37 @@
+{
+  "config": {
+    "consumerKey": "TESTCONS",
+    "accessToken": "testaccesstoken",
+    "accessTokenSecret": "fSB0VdYCPqh9pGzB9Kh4tWw6udMEm7gpIHXdw+/cG5h57oqDcHqnmP1LDjETgP7XrpLqUT12mzjBY1o/cFEdm4Fka5tENPoGCZq9omSwGK07R64/xvmRooSDUX7EmcKPMDf5NeI5DxWu9s1C7vvx3zZKCAdz8+PWMlz+nRbQZgQ+96Lnj0syNOFgeECxS3YGZveuRvoZ8JeX+ZUvCNgEW2oqLTfBT0QdfLZvKR+EBfZrJuxTkdCUAhhg2MZbfgGhmoVAj98g0+5CZBJjyKyXAz9+iIKVhjrJY0jw1+AUi3ZeuUiaWIEWQ0RJNVEU0JtNe6ZYAVHDGBWfxyO4YFo9IQ==",
+    "dhPrime": "dba0bb9a704b755d9031b6aab42fd8a4afd4e4973dda5c71ec80ce2e172b97b7a7d28e614fda066aa514e7bea95898472e1622a1169cff0a83d13b77530e9b43",
+    "realm": "test_realm"
+  },
+  "prepend": "666978747572652d6163636573732d746f6b656e2d736563726574",
+  "url": "https://api.ibkr.com/v1/api/oauth/live_session_token",
+  "params": {
+    "oauth_consumer_key": "TESTCONS",
+    "oauth_nonce": "abcdefghABCDEFGH",
+    "oauth_signature_method": "RSA-SHA256",
+    "oauth_timestamp": "1700000000",
+    "oauth_token": "testaccesstoken",
+    "diffie_hellman_challenge": "abc123"
+  },
+  "rsaBase": "666978747572652d6163636573732d746f6b656e2d736563726574POST&https%3A%2F%2Fapi.ibkr.com%2Fv1%2Fapi%2Foauth%2Flive_session_token&diffie_hellman_challenge%3Dabc123%26oauth_consumer_key%3DTESTCONS%26oauth_nonce%3DabcdefghABCDEFGH%26oauth_signature_method%3DRSA-SHA256%26oauth_timestamp%3D1700000000%26oauth_token%3Dtestaccesstoken",
+  "rsaSignature": "mJGJ7C9nBw5PicHM8k%2FmVH8p2AVCG7GR6Kdicgf978OE8x3ANdnEbiTiTQshafvDiYOjNY7pA03uAmLeNzLHyg%2Fv3Vzaebx8TZx2Lm47PGp2yeXTZcdTTzcSD48IhxFoz9nNW9FDYD8MgcIzO1L2OBzFk386X6iTKUJTUl4YhoMQ8Ylo9myRc3MnHBYjmoVtISpT3sBZ9oa9NhzeCEfs1eP0Q9OCywcKUIB3U0xIkeOSapyXci%2Bm6m0N3s4bPAWlueYkPLNG8vw5c3nc6di%2FfbqQGkpWlfyFNKBy5TZormQEz9RvyRlhzrN6gw8r%2FTJ9yrKrmLXGUs%2Baf00z72Abiw%3D%3D",
+  "dhRandom": "55f3c038124c11a67114512565b036caf56b26fe10b62c82152e7dffb3735a3d",
+  "dhResponse": "5e14c3ed3fb6419b4c6c2326601c29428e0316942b8045655835440f8f8aaefc2e4e3af5d0a36869e61f82fa6dab4c36",
+  "liveSessionToken": "Oecv/RO5Ahq5kgdfwaTwzLtAPDY=",
+  "lstSignature": "8da391a3f0f873563ea54087b6578a8dc1d789c3",
+  "getUrl": "https://api.ibkr.com/v1/api/iserver/marketdata/snapshot",
+  "hmacParams": {
+    "oauth_consumer_key": "TESTCONS",
+    "oauth_nonce": "abcdefghABCDEFGH",
+    "oauth_signature_method": "HMAC-SHA256",
+    "oauth_timestamp": "1700000000",
+    "oauth_token": "testaccesstoken",
+    "conids": "265598,8314",
+    "fields": "31 84"
+  },
+  "hmacBase": "GET&https%3A%2F%2Fapi.ibkr.com%2Fv1%2Fapi%2Fiserver%2Fmarketdata%2Fsnapshot&conids%3D265598%2C8314%26fields%3D31+84%26oauth_consumer_key%3DTESTCONS%26oauth_nonce%3DabcdefghABCDEFGH%26oauth_signature_method%3DHMAC-SHA256%26oauth_timestamp%3D1700000000%26oauth_token%3Dtestaccesstoken",
+  "hmacSignature": "SM9HrNXI9iydKKP2iQiKFejWApxVG%2F7PF3BJdVWtTDI%3D"
+}

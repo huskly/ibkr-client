@@ -1,6 +1,6 @@
 /**
  * Raw IBKR Client Portal Web API response shapes (only the fields we read).
- * The `ibkr-client` `request()` method returns `any`; these types let us cast
+ * `IbkrOauthSession.request()` returns `unknown`; these types let us cast
  * once at the boundary and stay typed everywhere else.
  *
  * See: https://www.interactivebrokers.com/campus/ibkr-api-page/webapi-ref/

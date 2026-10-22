@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Do the OAuth 1.0a handshake in this package with `node:crypto`. Remove the `ibkr-client`
+  dependency and its transitive `node-forge`, `undici`, `ws`, `rxjs`, and `rxwebsocket`
+  dependencies. This removes the node-forge advisory GHSA-86w9-cpqp-85rv from the dependency tree.
+- Require Node.js 22 or later. RSA PKCS#1 v1.5 decryption of the access token secret needs
+  OpenSSL implicit rejection, which Node.js 20 does not have.
+
 ## 4.5.1
 
 - Read account summary `cushion`, `lookaheadnextchange`, and `leverage` from the IBKR `value`

@@ -1,7 +1,7 @@
 /**
  * Extract the Diffie-Hellman prime (hex) from a dhparam.pem.
  *
- * IBKR's OAuth 1.0a live-session-token exchange (via `ibkr-client`) needs the DH
+ * IBKR's OAuth 1.0a live-session-token exchange needs the DH
  * prime as a continuous hex string — it does `BigInt('0x' + dhPrime)`. Ports
  * dh_prime.py from the Python PoC, but parses the PEM's ASN.1 DER directly
  * instead of shelling out to `openssl`.
