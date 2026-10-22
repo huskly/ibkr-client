@@ -20,10 +20,10 @@ import {
 import type { IbkrOauth1Config } from "../src/ibkr/oauthConfig.js";
 
 // Vectors were produced by the upstream `ibkr-client` 1.0.4 (node-forge) implementation.
-const fixture = (name: string): string =>
-  readFileSync(new URL(`./fixtures/oauth/${name}`, import.meta.url), "utf8");
-const pem = fixture("test_only_private_key.pem");
-const vectors = JSON.parse(fixture("vectors.json")) as {
+const vectors = JSON.parse(
+  readFileSync(new URL("./fixtures/oauth/vectors.json", import.meta.url), "utf8")
+) as {
+  testOnlyPrivateKey: string;
   config: Omit<IbkrOauth1Config, "signature" | "encryption">;
   prepend: string;
   url: string;
@@ -39,6 +39,7 @@ const vectors = JSON.parse(fixture("vectors.json")) as {
   hmacBase: string;
   hmacSignature: string;
 };
+const pem = vectors.testOnlyPrivateKey;
 const config: IbkrOauth1Config = { ...vectors.config, signature: pem, encryption: pem };
 
 test("OAuth primitives match the upstream ibkr-client output", () => {
