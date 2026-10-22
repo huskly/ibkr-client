@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.5.1
+
+- Read account summary `cushion`, `lookaheadnextchange`, and `leverage` from the IBKR `value`
+  field. These values were `0` before because IBKR states them as strings with a placeholder
+  `amount: 0`.
+
 ## 4.5.0
 
 - Add `getCashBalances()` and the exported `CashBalance` type for cash by ledger currency.
