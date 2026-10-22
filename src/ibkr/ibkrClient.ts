@@ -2464,6 +2464,8 @@ export class IbkrClient
       path: `portfolio/${accountId}/summary`,
     });
     const amount = (key: string): number | null => toNullableNumber(summary[key]?.amount);
+    // IBKR states these ratio and time fields as strings in `value`, with a placeholder `amount: 0`.
+    const value = (key: string): number | null => toNullableNumber(summary[key]?.value);
     const marginSnapshot = (suffix: "" | "-s" | "-c") => ({
       equityWithLoanValue: toNullableNumber(summary[`equitywithloanvalue${suffix}`]?.amount),
       regTEquity: toNullableNumber(summary[`regtequity${suffix}`]?.amount),
@@ -2472,7 +2474,7 @@ export class IbkrClient
       maintenanceMarginRequirement: toNullableNumber(summary[`maintmarginreq${suffix}`]?.amount),
       availableFunds: toNullableNumber(summary[`availablefunds${suffix}`]?.amount),
       excessLiquidity: toNullableNumber(summary[`excessliquidity${suffix}`]?.amount),
-      cushion: toNullableNumber(summary[`cushion${suffix}`]?.amount),
+      cushion: value(`cushion${suffix}`),
       sma: toNullableNumber(summary[`sma${suffix}`]?.amount),
       buyingPower: toNullableNumber(summary[`buyingpower${suffix}`]?.amount),
       fullInitialMarginRequirement: toNullableNumber(summary[`fullinitmarginreq${suffix}`]?.amount),
@@ -2493,8 +2495,8 @@ export class IbkrClient
       lookAheadExcessLiquidity: toNullableNumber(
         summary[`lookaheadexcessliquidity${suffix}`]?.amount
       ),
-      lookAheadNextChange: toNullableNumber(summary[`lookaheadnextchange${suffix}`]?.amount),
-      leverage: toNullableNumber(summary[`leverage${suffix}`]?.amount),
+      lookAheadNextChange: value(`lookaheadnextchange${suffix}`),
+      leverage: value(`leverage${suffix}`),
     });
     return {
       netLiquidation: amount("netliquidation"),

@@ -159,7 +159,10 @@ validated at runtime. Its broker-neutral account API includes:
   session's broker contract ID for exact follow-up reads. Account balances include typed
   `margin.total`, `margin.securities`, and `margin.commodities` snapshots with IBKR's available
   funds, buying power, excess liquidity, cushion, SMA, equity-with-loan, Reg-T, initial- and
-  maintenance-margin, full, look-ahead, and leverage values. The client removes valid comma
+  maintenance-margin, full, look-ahead, and leverage values. `cushion` is a decimal ratio,
+  `leverage` is a ratio, and `lookAheadNextChange` is a Unix time in seconds. IBKR states these
+  three values as strings in the summary `value` field, and the client reads them from that
+  field. The client removes valid comma
   separators from numeric provider strings, such as day P/L field `78` and account summary amounts.
   The top-level net liquidation, available funds, buying power, and cash balance values and all
   margin values are `null` when IBKR omits or returns an invalid or non-finite value. Numeric zero

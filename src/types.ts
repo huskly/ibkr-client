@@ -43,6 +43,7 @@ export interface AccountMarginSnapshot {
   maintenanceMarginRequirement: number | null;
   availableFunds: number | null;
   excessLiquidity: number | null;
+  /** Margin cushion as a decimal ratio, (ELV - maintenance margin) / ELV. */
   cushion: number | null;
   sma: number | null;
   buyingPower: number | null;
@@ -54,7 +55,9 @@ export interface AccountMarginSnapshot {
   lookAheadMaintenanceMarginRequirement: number | null;
   lookAheadAvailableFunds: number | null;
   lookAheadExcessLiquidity: number | null;
+  /** Unix time in seconds when the look-ahead values take effect. */
   lookAheadNextChange: number | null;
+  /** Leverage ratio, gross position value / net liquidation value. */
   leverage: number | null;
 }
 
