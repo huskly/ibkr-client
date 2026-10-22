@@ -5,8 +5,9 @@ authenticating over **OAuth 1.0a** without the Client Portal Gateway. This
 package contains no command-line interface; terminal commands and presentation
 belong exclusively in [huskly/cli](https://github.com/huskly/cli).
 
-The OAuth 1.0a live-session-token handshake is performed by the
-[`ibkr-client`](https://github.com/art1c0/ibkr-client) package. See the
+The package performs the OAuth 1.0a live-session-token handshake itself with
+`node:crypto` (adapted from [`ibkr-client`](https://github.com/art1c0/ibkr-client),
+MIT). It requires Node.js 22 or later. See the
 [`ibind` OAuth 1.0a wiki](https://github.com/Voyz/ibind/wiki/OAuth-1.0a) for how
 the keys below are generated and registered in the IBKR self-service portal.
 
@@ -17,7 +18,8 @@ The repository contains only the reusable client library:
 | Path                             | Purpose                                                                     |
 | -------------------------------- | --------------------------------------------------------------------------- |
 | `src/types.ts`                   | Broker-neutral `BrokerClient` interface and normalized domain types         |
-| `src/ibkr/ibkrClient.ts`         | `IbkrClient` — typed wrapper over `ibkr-client` implementing `BrokerClient` |
+| `src/ibkr/ibkrClient.ts`         | `IbkrClient` — typed IBKR client implementing `BrokerClient`                |
+| `src/ibkr/oauthSession.ts`       | OAuth 1.0a live-session-token handshake and signed HTTP requests            |
 | `src/ibkr/oauthConfig.ts`        | Builds the OAuth config from `.pem` files + env vars                        |
 | `src/ibkr/dhPrime.ts`            | Extracts the DH prime (hex) from `dhparam.pem`                              |
 | `src/ibkr/optionContract.ts`     | Canonical OSI parsing and formatting for IBKR option contracts              |

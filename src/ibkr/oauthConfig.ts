@@ -4,8 +4,7 @@ import { config as loadEnv } from "dotenv";
 import { extractDhPrime } from "./dhPrime.js";
 
 /**
- * Shape of the OAuth 1.0a config consumed by `ibkr-client`'s `IbkrClient`
- * constructor. The package does not re-export this type, so we mirror it here.
+ * OAuth 1.0a config consumed by {@link IbkrOauthSession}.
  */
 export interface IbkrOauth1Config {
   accessTokenSecret: string;
@@ -18,12 +17,12 @@ export interface IbkrOauth1Config {
 }
 
 /**
- * Assemble the `ibkr-client` OAuth 1.0a config from local PEM files + env vars.
+ * Assemble the OAuth 1.0a config from local PEM files + env vars.
  * Ports build_client() from the Python PoC (main.py).
  *
  * The cryptographic material (private keys + DH params) lives as PEM files in
  * the keys directory; the account-specific secrets come from the environment
- * (or a local .env). `ibkr-client` expects the DH prime as a hex string, so we
+ * (or a local .env). The handshake expects the DH prime as a hex string, so we
  * extract it from dhparam.pem via {@link extractDhPrime} (a pure-TS port of
  * dh_prime.py — no openssl subprocess).
  *

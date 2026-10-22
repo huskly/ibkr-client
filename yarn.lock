@@ -337,7 +337,6 @@ __metadata:
     eslint-config-prettier: "npm:^10"
     fast-xml-parser: "npm:^5.11.1"
     fast-xml-validator: "npm:^1.4.2"
-    ibkr-client: "npm:^1.0.4"
     prettier: "npm:^3.9.6"
     tsx: "npm:^4.19.2"
     typescript: "npm:^6.0.3"
@@ -1116,19 +1115,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ibkr-client@npm:^1.0.4":
-  version: 1.0.4
-  resolution: "ibkr-client@npm:1.0.4"
-  dependencies:
-    node-forge: "npm:^1.3.1"
-    rxjs: "npm:^7.8.2"
-    rxwebsocket: "npm:^1.0.7"
-    undici: "npm:^7.15.0"
-    ws: "npm:^8.18.3"
-  checksum: 10c0/2a81c58ea234eaea8c9f6592a32f5e0ac797ae20c898eb2114cc2ab1e006936a3a58f01210f18383a9e34194a140715e99dd7293c629111f7cfb3c442aa9701c
-  languageName: node
-  linkType: hard
-
 "ignore@npm:^5.2.0":
   version: 5.3.2
   resolution: "ignore@npm:5.3.2"
@@ -1275,13 +1261,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"node-forge@npm:^1.3.1":
-  version: 1.4.0
-  resolution: "node-forge@npm:1.4.0"
-  checksum: 10c0/67330a5f1f95257a4c8a93b7d555abe87b5f15e350123aa396c97a21a8ca94f9c6549008eb2c73668a91e0d7e3a905785acbd8f8bd0751c29401292011f8f8e1
-  languageName: node
-  linkType: hard
-
 "node-gyp@npm:latest":
   version: 13.0.2
   resolution: "node-gyp@npm:13.0.2"
@@ -1412,24 +1391,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"rxjs@npm:^7.8.2":
-  version: 7.8.2
-  resolution: "rxjs@npm:7.8.2"
-  dependencies:
-    tslib: "npm:^2.1.0"
-  checksum: 10c0/1fcd33d2066ada98ba8f21fcbbcaee9f0b271de1d38dc7f4e256bfbc6ffcdde68c8bfb69093de7eeb46f24b1fb820620bf0223706cff26b4ab99a7ff7b2e2c45
-  languageName: node
-  linkType: hard
-
-"rxwebsocket@npm:^1.0.7":
-  version: 1.0.7
-  resolution: "rxwebsocket@npm:1.0.7"
-  dependencies:
-    rxjs: "npm:^7.8.2"
-  checksum: 10c0/976f7c1ea0c78158b9784e5494f4590a225be856394d5a4eef10a103756b901a3ecf12b61188bdfa006686cb3951514ee6f01592302ce6d9d105825b1c679012
-  languageName: node
-  linkType: hard
-
 "semver@npm:^7.3.5, semver@npm:^7.7.3":
   version: 7.8.5
   resolution: "semver@npm:7.8.5"
@@ -1493,13 +1454,6 @@ __metadata:
   peerDependencies:
     typescript: ">=4.8.4"
   checksum: 10c0/767849383c114e7f1971fa976b20e73ac28fd0c70d8d65c0004790bf4d8f89888c7e4cf6d5949f9c1beae9bc3c64835bef77bbe27fddf45a3c7b60cebcf85c8c
-  languageName: node
-  linkType: hard
-
-"tslib@npm:^2.1.0":
-  version: 2.8.1
-  resolution: "tslib@npm:2.8.1"
-  checksum: 10c0/9c4759110a19c53f992d9aae23aac5ced636e99887b51b9e61def52611732872ff7668757d4e4c61f19691e36f4da981cd9485e869b4a7408d689f6bf1f14e62
   languageName: node
   linkType: hard
 
@@ -1569,13 +1523,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"undici@npm:^7.15.0":
-  version: 7.28.0
-  resolution: "undici@npm:7.28.0"
-  checksum: 10c0/fe781983a26098795e99bb1f64906cbb7d0bcaa029a26baade007b53ea67f2631d189b8f9671a31f4c8d0cb3773b7559608628ba54452fef51fec90e7c78bb0d
-  languageName: node
-  linkType: hard
-
 "undici@npm:^8.4.1":
   version: 8.10.1
   resolution: "undici@npm:8.10.1"
@@ -1618,21 +1565,6 @@ __metadata:
   version: 1.2.5
   resolution: "word-wrap@npm:1.2.5"
   checksum: 10c0/e0e4a1ca27599c92a6ca4c32260e8a92e8a44f4ef6ef93f803f8ed823f486e0889fc0b93be4db59c8d51b3064951d25e43d434e95dc8c960cc3a63d65d00ba20
-  languageName: node
-  linkType: hard
-
-"ws@npm:^8.18.3":
-  version: 8.21.1
-  resolution: "ws@npm:8.21.1"
-  peerDependencies:
-    bufferutil: ^4.0.1
-    utf-8-validate: ">=5.0.2"
-  peerDependenciesMeta:
-    bufferutil:
-      optional: true
-    utf-8-validate:
-      optional: true
-  checksum: 10c0/c4c6f1d95f6d465262de2037c57c715725d67e078dd49420ede4e19115668aba159cb64d85c5e89c06eb2826be599e62e5095860ad6cc54ff42e8bd7684e1db8
   languageName: node
   linkType: hard
 

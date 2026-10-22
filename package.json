@@ -18,7 +18,7 @@
   "author": "Felipe Lima",
   "license": "MIT",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "build": "tsc",
@@ -35,8 +35,7 @@
   "dependencies": {
     "dotenv": "^18.0.2",
     "fast-xml-parser": "^5.11.1",
-    "fast-xml-validator": "^1.4.2",
-    "ibkr-client": "^1.0.4"
+    "fast-xml-validator": "^1.4.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
